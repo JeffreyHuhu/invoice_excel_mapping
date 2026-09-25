@@ -68,17 +68,22 @@ def clean_amount(text: str) -> Optional[float]:
     return float(text)
 
 
-def extract_text_from_pdf(pdf_path: str) -> str:
+def extract_text_from_pdf(pdf_path: str, **pdfplumber_kwargs) -> str:
     """讀取 PDF 全部頁面的文字並合併成一個字串。
 
     帳單是「可編輯 PDF」，pdfplumber 可以直接抓到文字層。
     若遇到沒有文字層的掃描檔，這裡會回傳空字串，
     使用端應提示使用者改用 OCR 工具或人工輸入。
+
+    pdfplumber_kwargs 會直接轉給 page.extract_text()，例如 x_tolerance、
+    y_tolerance、layout 等參數。不同帳單的版面(欄位間距、是否雙欄並排)不
+    盡相同，同一組參數不一定對每份 PDF 都是最佳解，所以開放參數化，
+    讓 parse_invoice_pdf_best() 可以用不同參數多跑幾次，挑出效果最好的。
     """
     full_text_parts = []
     with pdfplumber.open(pdf_path) as pdf:
         for page in pdf.pages:
-            page_text = page.extract_text() or ""
+            page_text = page.extract_text(**pdfplumber_kwargs) or ""
             full_text_parts.append(page_text)
     return "\n".join(full_text_parts)
 
@@ -249,9 +254,11 @@ def _extract_line_items(text: str) -> List[LineItem]:
     return items
 
 
-def parse_invoice_pdf(pdf_path: str) -> ParsedInvoice:
-    """對外主要入口：讀取一份 PDF 帳單，回傳結構化的 ParsedInvoice。"""
-    text = extract_text_from_pdf(pdf_path)
+def parse_invoice_pdf(pdf_path: str, **pdfplumber_kwargs) -> ParsedInvoice:
+    """對外主要入口：讀取一份 PDF 帳單，回傳結構化的 ParsedInvoice。
+    pdfplumber_kwargs 會轉給 extract_text_from_pdf()（見上方說明）。
+    """
+    text = extract_text_from_pdf(pdf_path, **pdfplumber_kwargs)
     header = _extract_header(text, source_file=pdf_path)
     line_items = _extract_line_items(text)
     return ParsedInvoice(header=header, line_items=line_items, raw_text=text)
@@ -301,3 +308,179 @@ def invoice_to_rows(parsed: ParsedInvoice) -> List[Dict]:
         row["Amount (IDR"] = item.amount_idr
         rows.append(row)
     return rows
+
+
+# ---------------------------------------------------------------------------
+# 6. 多種擷取設定 + 迴圈找出「正確率最高」的解析結果
+# ---------------------------------------------------------------------------
+#
+# 背景：不同供應商 / 不同份帳單的 PDF，版面留白、欄位排列方式可能不完全一樣，
+# 單一組 pdfplumber 參數不見得對每一份 PDF 都是最佳解 (這也是先前 Order No /
+# B/L No / Volume 等欄位被右欄污染的根本原因之一：兩欄距離太近，預設參數
+# 把它們黏成一行)。
+#
+# 這裡準備幾組不同的 x_tolerance / y_tolerance / layout 參數，對同一份 PDF
+# 各跑一次擷取，並用 quality_score()（沒有提供正確答案時）或
+# compute_accuracy()（有提供正確答案 Excel 時）評分，迴圈跑完後取分數
+# 最高的那一組結果，這樣可以自動避開「剛好在這份 PDF 上會出錯」的參數組合。
+
+EXTRACTION_CONFIGS: List[Dict] = [
+    {},                                       # pdfplumber 預設值
+    {"x_tolerance": 1, "y_tolerance": 1},
+    {"x_tolerance": 1, "y_tolerance": 3},
+    {"x_tolerance": 2, "y_tolerance": 3},
+    {"x_tolerance": 3, "y_tolerance": 5},
+    {"layout": True},                          # 盡量保留原始版面座標間距
+]
+
+# quality_score() 檢查的抬頭欄位清單 (排除 supplier，因為它是額外規則抓的)
+_EXPECTED_HEADER_ATTRS = [
+    "invoice_no", "invoice_date_raw", "consignee", "order_no",
+    "arrive_date_raw", "onboard_date_raw", "bl_no", "mbl_no",
+    "port_of_loading", "port_of_discharge", "volume", "vessel", "container_no",
+]
+
+
+def quality_score(parsed: ParsedInvoice) -> float:
+    """在『沒有』正確答案 Excel 可比對時使用的自我檢查分數 (0~1)。
+
+    檢查兩件事：
+      1. 完整度：每個抬頭欄位是否有抓到值
+      2. 乾淨度：抓到的值裡面，不能混入「下一個欄位的關鍵字」
+         (這正是先前 Order No 抓到 Port Of Loading 內容的那種汙染)
+
+    這不是「真正」跟人工核對過的正確率，只是用來在迴圈裡挑選比較好的
+    擷取設定的代理指標；如果有正確答案 Excel，請一律用 compute_accuracy()。
+    """
+    total = len(_EXPECTED_HEADER_ATTRS) + 1  # +1：費用明細
+    ok = 0
+    for attr in _EXPECTED_HEADER_ATTRS:
+        val = getattr(parsed.header, attr, "")
+        if val and not re.search(_NEXT_LABEL_ALT, str(val), flags=re.IGNORECASE):
+            ok += 1
+    if parsed.line_items and all(li.amount_idr is not None for li in parsed.line_items):
+        ok += 1
+    return ok / total
+
+
+# 抬頭欄位 (Excel欄名 -> InvoiceHeader屬性名)，比對時每張帳單只需比對一次
+HEADER_FIELD_MAP: Dict[str, str] = {
+    "Invoice Date": "invoice_date",
+    "Invoice No": "invoice_no",
+    "Payment can be Transfer to": "supplier",
+    "TO": "consignee",
+    "Order No.": "order_no",
+    "Arrive Date": "arrive_date",
+    "on board date": "onboard_date",
+    "B/L NO.": "bl_no",
+    "MBL NO.": "mbl_no",
+    "Port of Loading": "port_of_loading",
+    "Port of discharge": "port_of_discharge",
+    "Volume": "volume",
+    "Vessel": "vessel",
+    "Container no.": "container_no",
+}
+
+
+def normalize_value(value) -> str:
+    """把值標準化成字串，方便比對 (去除多餘空白、大小寫差異、逗號等)。"""
+    if value is None:
+        return ""
+    if isinstance(value, (datetime.date, datetime.datetime)):
+        return value.strftime("%Y-%m-%d")
+    if isinstance(value, float) and value.is_integer():
+        value = int(value)
+    text = str(value).strip().upper()
+    text = text.replace(",", "")
+    text = re.sub(r"\s+", " ", text)
+    return text.rstrip(",")
+
+
+def compare_invoice(reference_group, parsed: ParsedInvoice) -> List[Dict]:
+    """比對「一張帳單」的正確答案 (reference_group，一個 pandas DataFrame，
+    欄位對應 TEMPLATE_COLUMNS，同一 Invoice No 的所有列) 與 parsed (重新/
+    候選解析出來的結果)。回傳每個欄位的比對紀錄 list[dict]。
+
+    這支函式集中放在 extract_utils.py，讓 app.py、verify.py 共用同一套
+    比對邏輯，避免兩邊各自維護一份、日後改一邊忘了改另一邊。
+    """
+    results = []
+    first_row = reference_group.iloc[0]
+
+    for col_name, attr_name in HEADER_FIELD_MAP.items():
+        ref_val = first_row.get(col_name)
+        parsed_val = getattr(parsed.header, attr_name)
+        if attr_name in ("invoice_date", "arrive_date", "onboard_date") and parsed_val is None:
+            parsed_val = getattr(parsed.header, attr_name + "_raw")
+
+        match = normalize_value(ref_val) == normalize_value(parsed_val)
+        results.append({
+            "欄位": col_name,
+            "正確答案值": ref_val,
+            "擷取結果值": parsed_val,
+            "結果": "相符" if match else "不相符",
+        })
+
+    ref_items = set()
+    for _, r in reference_group.iterrows():
+        desc = normalize_value(r.get("Description\nVAT"))
+        amt = normalize_value(r.get("Amount (IDR"))
+        if desc or amt:
+            ref_items.add((desc, amt))
+
+    parsed_items = set(
+        (normalize_value(li.description), normalize_value(li.amount_idr))
+        for li in parsed.line_items
+    )
+
+    for desc, amt in sorted(ref_items & parsed_items):
+        results.append({"欄位": "費用明細", "正確答案值": f"{desc} / {amt}",
+                         "擷取結果值": f"{desc} / {amt}", "結果": "相符"})
+    for desc, amt in sorted(ref_items - parsed_items):
+        results.append({"欄位": "費用明細", "正確答案值": f"{desc} / {amt}",
+                         "擷取結果值": "(未擷取到)", "結果": "不相符"})
+    for desc, amt in sorted(parsed_items - ref_items):
+        results.append({"欄位": "費用明細", "正確答案值": "(正確答案缺漏)",
+                         "擷取結果值": f"{desc} / {amt}", "結果": "不相符"})
+
+    return results
+
+
+def compute_accuracy(results: List[Dict]) -> float:
+    """比對結果 list[dict] -> 正確率 (0~1)。"""
+    if not results:
+        return 0.0
+    matched = sum(1 for r in results if r["結果"] == "相符")
+    return matched / len(results)
+
+
+def parse_invoice_pdf_best(pdf_path: str, reference_group=None,
+                            configs: List[Dict] = None):
+    """核心：用『迴圈』嘗試 EXTRACTION_CONFIGS 裡每一組擷取參數解析同一份
+    PDF，挑出分數最高的結果，藉此提高轉檔正確率。
+
+    - 若有提供 reference_group (該張帳單的正確答案 DataFrame)，用真正的
+      compute_accuracy() 逐欄比對分數來挑最佳結果 (= 真正的正確率)。
+    - 若沒有提供，用 quality_score() 的完整度/乾淨度分數來挑 (= 品質代理
+      分數，非人工核對過的正確率，網頁上會清楚標示兩者差異)。
+
+    回傳：(最佳ParsedInvoice, 最佳分數 0~1, 使用的設定dict, 全部嘗試的分數紀錄)
+    """
+    configs = configs or EXTRACTION_CONFIGS
+    attempts = []
+    best_parsed, best_score, best_config = None, -1.0, None
+
+    for cfg in configs:
+        parsed = parse_invoice_pdf(pdf_path, **cfg)
+
+        if reference_group is not None and not reference_group.empty:
+            results = compare_invoice(reference_group, parsed)
+            score = compute_accuracy(results)
+        else:
+            score = quality_score(parsed)
+
+        attempts.append({"設定": cfg or "預設", "分數": score})
+        if score > best_score:
+            best_parsed, best_score, best_config = parsed, score, cfg
+
+    return best_parsed, best_score, best_config, attempts
