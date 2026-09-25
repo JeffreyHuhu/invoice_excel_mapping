@@ -128,23 +128,58 @@ class ParsedInvoice:
 # ---------------------------------------------------------------------------
 # 3. 正規表示式規則 (抬頭欄位)
 # ---------------------------------------------------------------------------
+#
+# 重要背景：這份帳單是「左右兩欄並排」的版面 (例如同一列左邊是
+# "Order No. : IMPJK26070038"，右邊緊接著是 "Port Of Loading : SHANGHAI, CHINA")。
+# pdfplumber 抽取文字時，同一個 y 座標高度的內容會被接成同一行字串，
+# 所以如果只用「抓到冒號後面所有文字」的寫法，會把右欄欄位的文字也一併抓進來。
+#
+# 解法：每個欄位的值只抓到「下一個已知欄位名稱出現之前」或「連續兩個以上空白
+# (欄與欄之間的排版留白)」或「換行」為止，三個條件任一成立就停止擷取。
 
-# 每一個 key 對應 InvoiceHeader 的欄位名稱，value 是抓「冒號後面那段文字」的 pattern
+# 所有帳單上可能出現的欄位/標題關鍵字，用來當作「這裡是下一欄，該停止擷取」的判斷依據
+_LABEL_WORDS = [
+    r"Invoice\s*No\.?", r"Invoice\s*Date", r"Shipment\s*Type", r"Page",
+    r"Order\s*No\.?", r"Arrive\s*Date", r"On\s*[Bb]oard\s*Date",
+    r"B/L\s*No\.?", r"MBL\s*No\.?", r"Shipper", r"Consignee",
+    r"Port\s*Of\s*Loading", r"Port\s*Of\s*Discharge", r"Reference",
+    r"Volume", r"Vessel", r"Container\s*No\.?", r"Payment\s*Term",
+    r"Payment\s*can\s*be\s*Transfer\s*to", r"Bank\s*Information",
+    r"I\s*N\s*V\s*O\s*I\s*C\s*E", r"Sub\s*Total", r"GRAND\s*TOTAL",
+    r"V\s*A\s*T", r"E\.?\s*&\s*O\.?\s*E", r"Halaman", r"\bTO\b",
+]
+_NEXT_LABEL_ALT = "(?:" + "|".join(_LABEL_WORDS) + ")"
+
+# 停止條件：遇到「連續2個以上空白」或「換行」或「字串結尾」或「下一個已知欄位名稱」
+_STOP_LOOKAHEAD = rf"(?=\s{{2,}}|\n|$|\s*{_NEXT_LABEL_ALT}\b)"
+
+# 每一個 key 對應 InvoiceHeader 的欄位名稱，value 是抓「冒號後面那段文字，
+# 直到遇到下一欄位為止」的 pattern
 HEADER_PATTERNS: Dict[str, str] = {
-    "invoice_no":         r"Invoice\s*No\.?\s*:\s*(.+)",
-    "invoice_date_raw":   r"Invoice\s*Date\s*:\s*(.+)",
-    "order_no":           r"Order\s*No\.?\s*:\s*(.+)",
-    "arrive_date_raw":    r"Arrive\s*Date\s*:\s*(.+)",
-    "onboard_date_raw":   r"On\s*[Bb]oard\s*Date\s*:\s*(.+)",
-    "bl_no":              r"\bB/L\s*No\.?\s*:\s*(.+)",
-    "mbl_no":              r"\bMBL\s*No\.?\s*:\s*(.+)",
-    "port_of_loading":    r"Port\s*Of\s*Loading\s*:\s*(.+)",
-    "port_of_discharge":  r"Port\s*Of\s*Discharge\s*:\s*(.+)",
-    "volume":             r"Volume\s*:\s*(.+)",
-    "vessel":              r"Vessel\s*:\s*(.+)",
-    "container_no":       r"Container\s*No\.?\s*:\s*(.+)",
-    "consignee":           r"^\s*TO\s*:\s*(.+)",
+    "invoice_no":         rf"Invoice\s*No\.?\s*:\s*(.+?){_STOP_LOOKAHEAD}",
+    "invoice_date_raw":   rf"Invoice\s*Date\s*:\s*(.+?){_STOP_LOOKAHEAD}",
+    "order_no":           rf"Order\s*No\.?\s*:\s*(.+?){_STOP_LOOKAHEAD}",
+    "arrive_date_raw":    rf"Arrive\s*Date\s*:\s*(.+?){_STOP_LOOKAHEAD}",
+    "onboard_date_raw":   rf"On\s*[Bb]oard\s*Date\s*:\s*(.+?){_STOP_LOOKAHEAD}",
+    "bl_no":              rf"\bB/L\s*No\.?\s*:\s*(.+?){_STOP_LOOKAHEAD}",
+    "mbl_no":              rf"\bMBL\s*No\.?\s*:\s*(.+?){_STOP_LOOKAHEAD}",
+    "port_of_loading":    rf"Port\s*Of\s*Loading\s*:\s*(.+?){_STOP_LOOKAHEAD}",
+    "port_of_discharge":  rf"Port\s*Of\s*Discharge\s*:\s*(.+?){_STOP_LOOKAHEAD}",
+    "volume":             rf"Volume\s*:\s*(.+?){_STOP_LOOKAHEAD}",
+    "vessel":              rf"Vessel\s*:\s*(.+?){_STOP_LOOKAHEAD}",
+    "container_no":       rf"Container\s*No\.?\s*:\s*(.+?){_STOP_LOOKAHEAD}",
+    "consignee":           rf"\bTO\s*:\s*(.+?){_STOP_LOOKAHEAD}",
 }
+
+
+def clean_volume(value: str) -> str:
+    """Volume 欄位常見格式是 'FCL - 1x40HC' 或 'LCL - 5 CBM'，
+    其中 'FCL -' / 'LCL -' 只是裝櫃方式的前綴，實際要的是後面的櫃型/數量，
+    所以這裡把該前綴去掉，只保留 '1x40HC' 這種實際資訊。
+    """
+    if not value:
+        return value
+    return re.sub(r"^(FCL|LCL)\s*-\s*", "", value.strip(), flags=re.IGNORECASE).strip()
 
 # 費用明細行：例如
 #   "JASA PPJK/FORWARDER 1 IDR 300,000 300,000 33,000"
@@ -172,13 +207,21 @@ def _extract_header(text: str, source_file: str) -> InvoiceHeader:
     for field_name, pattern in HEADER_PATTERNS.items():
         m = re.search(pattern, text, flags=re.MULTILINE)
         if m:
-            value = m.group(1).strip().rstrip(",")
+            value = m.group(1).strip().rstrip(",").strip()
             setattr(header, field_name, value)
+
+    # Volume 欄位去掉 'FCL -' / 'LCL -' 前綴，只保留櫃型/數量本身
+    header.volume = clean_volume(header.volume)
 
     # 供應商名稱：取自 "Payment can be Transfer to :" 之後的第一個非空白行
     m = re.search(r"Payment can be Transfer to\s*:?\s*\n\s*(.+)", text)
     if m:
-        header.supplier = m.group(1).strip()
+        supplier_line = m.group(1).strip()
+        # 同樣防止右欄或下一個標籤被誤黏進來
+        stop_m = re.search(_STOP_LOOKAHEAD, supplier_line)
+        if stop_m:
+            supplier_line = supplier_line[:stop_m.start()]
+        header.supplier = supplier_line.strip()
 
     # 日期字串轉成日期物件（若解析失敗仍保留原始字串）
     header.invoice_date = parse_indo_date(header.invoice_date_raw)
