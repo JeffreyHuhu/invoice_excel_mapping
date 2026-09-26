@@ -498,8 +498,28 @@ for row in all_export_rows:
     preview_records.append(rec)
 preview_df = pd.DataFrame(preview_records)
 
+# 預覽表格只「顯示」前 10 個欄位 (供應商 + 最常用的 10 個欄位)，避免 16 個
+# 欄位全部塞在畫面上太擠、看不清楚；但 preview_df 本身仍然保留全部 16 個
+# 欄位的資料 (只是被 column_order 隱藏、沒顯示出來而已)，沒被顯示到的
+# 欄位值不會因此遺失，下面「下載 Excel」用的還是完整 16 欄的資料。
+# 如果想改成顯示別的 10 個欄位，調整 _PREVIEW_VISIBLE_FIELD_CODES 這個
+# list 即可 (順序就是畫面上由左到右的顯示順序)。
+_PREVIEW_VISIBLE_FIELD_CODES = FIELD_CODES[:10]
+_preview_column_order = ["供應商"] + [
+    DISPLAY_HEADERS[c].split("\n")[0] for c in _PREVIEW_VISIBLE_FIELD_CODES
+]
+
 st.subheader("✏️ 轉檔結果預覽（可直接在表格中修正錯誤欄位；抓不到的欄位顯示 N/A）")
-edited_df = st.data_editor(preview_df, num_rows="dynamic", use_container_width=True)
+st.caption(
+    f"為了畫面清楚，這裡只顯示前 10 個欄位；其餘欄位的資料仍然保留，"
+    f"下方「⬇️ 下載 Excel」的檔案裡完整包含全部 {len(FIELD_CODES)} 個欄位。"
+)
+edited_df = st.data_editor(
+    preview_df,
+    num_rows="dynamic",
+    use_container_width=True,
+    column_order=_preview_column_order,
+)
 
 display_to_code = {DISPLAY_HEADERS[c].split("\n")[0]: c for c in FIELD_CODES}
 export_rows = []

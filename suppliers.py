@@ -989,31 +989,59 @@ def parse_yje_or_tata(text: str) -> Dict:
 #        PT. GLOSTAR INDONESIA - JL. Raya Sukabumi ..."
 #     日期/發票號碼在同一行，收件人在緊接著的下一行 (下下一行才是重複一次
 #     的收件人+地址，不用管)。
-#   - 費用明細只有一筆，但表格欄寬不夠，「DO No.」欄位的值會被自動換行拆成
-#     兩截 (例如 "00055/TDP/SJ-" 留在費用那一行，"01/2026" 被擠到下一行)，
-#     這裡直接用「前綴 + 換行後的後綴」兩段一起抓、拼回完整的 DO No. 當
-#     Order No. 欄位值。
+#   - ⚠️ 費用明細『不一定』只有一筆：有些帳單一張只有一筆費用，有些一張有
+#     兩、三筆。而且**正確答案的 Order No. 欄位是「每一筆費用明細各自的
+#     DO No.」，不是整張帳單共用同一個值**——同一張帳單裡不同費用列的
+#     Order No. 可能不一樣。所以這裡改成逐行掃描，每一筆費用明細各自帶著
+#     自己的 order_no 一起回傳 (參見 extract_utils.expand_to_rows()：item
+#     dict 裡如果帶了 HEADER_FIELD_CODES 裡的欄位，會覆蓋掉整張帳單共用的
+#     抬頭值，只套用在這一列)。
+#   - 費用明細行有兩種版面：
+#     (a) 完整版 (有 DO No./DO Date/部門代碼)，例如：
+#         "GSI-2 FCL Trucking 40" GTO20260120-077 20 Jan 2026 B 9308 JIN 1 4.920.000 4.920.000"
+#         格式：費用名稱 + DO No. + DO Date + 部門代碼(單一大寫字母+數字+
+#         字母) + 數量 + 單價 + 總價。DO No. 若因為欄寬不夠被自動換行拆成
+#         兩截 (例如 "00055/TDP/SJ-" 留在這一行、"01/2026" 被擠到下一行單
+#         獨一行)，這裡會偵測「這一截結尾是 '-' 或 '/' 這種明顯還沒結束的
+#         符號，且下一行是一個獨立的短字串」，把兩截拼回完整的 DO No.。
+#     (b) 簡化版 (沒有 DO No./DO Date/部門代碼，例如另外加收的手續費)：
+#         "Handling GSI-2 Operational 2 300.000 600.000"
+#         格式：費用名稱 + 數量 + 單價 + 總價，這種費用沒有對應的 DO No.，
+#         Order No. 留 None 讓 expand_to_rows() 補 N/A。
+#     逐行掃描時两種版面互斥判斷 (完整版比對不到才試簡化版)，避免像
+#     "Biaya LOLO 1.431.900" 這種只有一個數字的稅金/雜費小計行被誤判成
+#     費用明細 (簡化版需要「數量+單價+總價」三個數字都存在才會比對到)。
 #   - 費用名稱 (Description) 偶爾帶有貨櫃呎吋的引號 (例如
 #     'LCL Lokal Serang - GSI-2 40"' 代表 40 呎櫃)，正確答案裡這個引號被
 #     拿掉了 (只留 'LCL Lokal Serang - GSI-2 40')，擷取後要清掉引號字元。
 #   - 金額是印尼式千分位 (句點分隔、無小數)，例如 '2.975.000' -> 2975000。
-#   - 沒有到達日/開船日/提單/主提單/港口/材積/船名/貨櫃資訊，缺漏後續會
-#     自動補 N/A。
+#   - 目的港：帳單右側偶爾會有 "P.O.D : USA" 這一行，正確答案的 Port of
+#     discharge 欄位就是抓這個值；沒有這一行的帳單維持 N/A。
+#   - 沒有到達日/開船日/提單/主提單/啟運港/材積/船名/貨櫃資訊 (帳單上雖然
+#     另外印了 Vessel/Flight/Cont No 等欄位，但正確答案不會把這些對應到
+#     我們的欄位，一律留 N/A，避免抓多)，缺漏後續會自動補 N/A。
 
 def detect_trans(text: str) -> bool:
     return "TRANS DAYA PRIMA" in text.upper()
 
 
-# 費用明細行 (含跨行的 DO No. 後綴)，例如：
-#   "LCL-FUSO Cikarang-GSI-2 00055/TDP/SJ- 22 Jan 2026 B 9581 JXS 1 2.975.000 2.975.000
-#    01/2026"
-# 格式：費用名稱 + DO No.前綴 + DO Date + 部門代碼(單一大寫字母+數字+字母) +
-# 數量 + 單價 + 總價 + 換行 + DO No.後綴。
-_TRANS_ITEM_PATTERN = re.compile(
-    r"^(?P<desc>.+?)\s+(?P<do_prefix>\S+)\s+(?P<do_date>\d{1,2}\s+[A-Za-z]{3}\s+\d{4})\s+"
+# 完整版費用明細行 (費用名稱 + DO No. + DO Date + 部門代碼 + 數量 + 單價 +
+# 總價)，見上方說明。用 fullmatch 逐行比對 (不是在整段文字裡 search)，
+# 避免跟簡化版費用行搶著比對同一行文字。
+_TRANS_FULL_ITEM_PATTERN = re.compile(
+    r"^(?P<desc>.+?)\s+(?P<do_no>\S+)\s+(?P<do_date>\d{1,2}\s+[A-Za-z]{3}\s+\d{4})\s+"
     r"(?P<dept>[A-Z]\s+\d+\s+[A-Z]+)\s+(?P<qty>\d+)\s+(?P<unit_price>[\d.,]+)\s+"
-    r"(?P<total>[\d.,]+)\s*\n(?P<do_suffix>\S+)",
-    re.MULTILINE,
+    r"(?P<total>[\d.,]+)$"
+)
+# 簡化版費用明細行 (沒有 DO No./DO Date/部門代碼)：費用名稱 + 數量 + 單價 +
+# 總價，三個數字缺一不可，避免誤吃到只有一個數字的稅金/雜費小計行。
+# 注意：這種行偶爾在「費用名稱」跟「數量」之間會多夾一個部門代碼的雜字
+# (例如 'Handling GSI-2 Operational 2 300.000 600.000' 裡的 'Operational'，
+# 版面上其實落在 Department 欄位的位置，只是這一行沒有印出完整代碼)，這裡
+# 用一個可有可無的 dept 群組吃掉它，不要讓它被誤併進 desc 裡。
+_TRANS_SIMPLE_ITEM_PATTERN = re.compile(
+    r"^(?=[A-Za-z])(?P<desc>.+?)\s+(?:(?P<dept>[A-Za-z]+)\s+)?"
+    r"(?P<qty>\d+)\s+(?P<unit_price>[\d.,]+)\s+(?P<total>[\d.,]+)$"
 )
 
 
@@ -1051,6 +1079,57 @@ def _trans_clean_desc(text: Optional[str]) -> Optional[str]:
     return text.replace('"', "").strip()
 
 
+def _trans_extract_items(text: str) -> List[Dict]:
+    """逐行掃描費用明細表格區塊：完整版比對不到才試簡化版；完整版的
+    DO No. 若被換行拆成兩截，往下併一行。回傳的每一筆 item 都各自帶著
+    自己的 order_no (完整版有、簡化版沒有→None)，讓 expand_to_rows()
+    對這一列做逐筆覆蓋，而不是整張帳單套用同一個 Order No.。
+    """
+    lines = text.split("\n")
+    items: List[Dict] = []
+    i = 0
+    while i < len(lines):
+        line = lines[i].rstrip()
+        m = _TRANS_FULL_ITEM_PATTERN.match(line.strip())
+        if m:
+            do_no = m.group("do_no")
+            if i + 1 < len(lines):
+                nxt = lines[i + 1].strip()
+                looks_like_suffix = (
+                    do_no.endswith(("-", "/"))
+                    and nxt
+                    and re.fullmatch(r"\S+", nxt)
+                    and not _TRANS_FULL_ITEM_PATTERN.match(nxt)
+                    and not _TRANS_SIMPLE_ITEM_PATTERN.match(nxt)
+                )
+                if looks_like_suffix:
+                    do_no = do_no + nxt
+                    i += 1  # 續行已經併進上一筆，跳過不要再單獨處理一次
+            # 注意：Amount 欄位對應的是「Unit Price」(單價) 那一欄，不是
+            # 「Total Price」(單價 x 數量)——之前送測的樣本數量都剛好是 1，
+            # 單價跟總價數字一樣看不出差別；這次數量有一筆是 2 (見下面簡化
+            # 版費用行)，正確答案填的是單價 (300.000) 不是總價 (600.000)，
+            # 才發現真正要抓的是 Unit Price 這一欄。
+            items.append({
+                "description": _trans_clean_desc(m.group("desc")),
+                "amount": _trans_clean_amount(m.group("unit_price")),
+                "order_no": do_no.strip(),
+            })
+            i += 1
+            continue
+
+        m2 = _TRANS_SIMPLE_ITEM_PATTERN.match(line.strip())
+        if m2:
+            items.append({
+                "description": _trans_clean_desc(m2.group("desc")),
+                "amount": _trans_clean_amount(m2.group("unit_price")),
+                "order_no": None,
+            })
+        i += 1
+
+    return items
+
+
 def parse_trans(text: str) -> Dict:
     """注意：這是 multi_page 供應商，text 是『一頁』的文字。"""
     header: Dict[str, Optional[str]] = {}
@@ -1065,25 +1144,18 @@ def parse_trans(text: str) -> Dict:
         header["consignee"] = m.group(3).strip()
 
     header["supplier"] = _search(r"^(PT\.\s*TRANS\s*DAYA\s*PRIMA)", text)
+    header["port_of_discharge"] = _search(r"P\.O\.D\s*:\s*(.+?)\s*$", text)
 
-    # 這種帳單沒有到達日/開船日/提單/主提單/港口/材積/船名/貨櫃資訊，留空
-    # 給 expand_to_rows() 補 N/A
+    # 這種帳單沒有到達日/開船日/提單/主提單/啟運港/材積/船名/貨櫃資訊，留空
+    # 給 expand_to_rows() 補 N/A。Order No. 現在是逐筆費用各自帶自己的值
+    # (見 _trans_extract_items())，這裡的抬頭預設值留 None，沒有費用明細
+    # 帶值時才會用到 (整張帳單抓不到任何費用行的防禦性情況)。
     for code in ("arrive_date", "onboard_date", "bl_no", "mbl_no",
-                 "port_of_loading", "port_of_discharge", "volume",
-                 "vessel", "container_no"):
+                 "port_of_loading", "volume", "vessel", "container_no",
+                 "order_no"):
         header[code] = None
 
-    items: List[Dict] = []
-    item_m = _TRANS_ITEM_PATTERN.search(text)
-    if item_m:
-        header["order_no"] = (item_m.group("do_prefix") + item_m.group("do_suffix")).strip()
-        items.append({
-            "description": _trans_clean_desc(item_m.group("desc")),
-            "amount": _trans_clean_amount(item_m.group("total")),
-        })
-    else:
-        header["order_no"] = None
-
+    items = _trans_extract_items(text)
     if not items:
         items = [{"description": None, "amount": None}]
 
