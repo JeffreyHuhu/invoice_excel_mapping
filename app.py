@@ -92,7 +92,34 @@ except ImportError as e:
     st.stop()
 
 st.set_page_config(page_title="多供應商帳單自動化系統", layout="wide")
-st.title("📄➡️📊 多供應商帳單自動化系統")
+
+# 「重新查詢」按鈕：把檔案上傳元件的 key 綁定一個版本號，版本號加 1 之後
+# Streamlit 會把它們視為全新的元件重新渲染，藉此讓已上傳的檔案一併被清掉
+# (Streamlit 沒有直接清空 file_uploader 的 API，換 key 是官方建議的做法)。
+# 同時清空比對結果快取，讓使用者可以直接開始下一次全新的查詢。
+# 這裡把按鈕移到畫面「右上方」(跟標題同一列，靠右對齊)，並且要在檔案上傳
+# 元件 (file_uploader) 建立之前就先處理完點擊事件，這樣版本號 +1 才能在
+# 同一次重新執行時就套用到底下的 file_uploader key 上。
+if "uploader_version" not in st.session_state:
+    st.session_state["uploader_version"] = 0
+
+title_col, reset_col = st.columns([5, 1])
+with title_col:
+    st.title("📄➡️📊 多供應商帳單自動化系統")
+with reset_col:
+    st.write("")  # 讓按鈕跟標題文字的垂直位置對齊，不要黏在最上緣
+    st.markdown('<span id="reset-btn-marker"></span>', unsafe_allow_html=True)
+    reset_clicked = st.button(
+        "🔄 重新查詢",
+        use_container_width=True,
+        help="清空比對結果、快取，並清除已上傳的 PDF / 正確答案 Excel，方便重新上傳新的一批檔案。",
+    )
+if reset_clicked:
+    st.session_state.pop("result_bundle", None)
+    st.session_state.pop("last_signature", None)
+    st.session_state["uploader_version"] += 1
+    st.rerun()
+
 # 流程說明改成①②③由上而下各自一行 (並列顯示，不要擠成一段用箭頭串起來的
 # 長文字)，字體再放大 1.5 倍 (原本 19px -> 約 29px)。
 st.markdown(
@@ -113,15 +140,6 @@ with st.expander(f"🏷️ 目前系統已支援 {len(registered)} 家供應商�
     for s in registered:
         st.write(f"- **{s['label']}** (代碼: `{s['key']}`)")
     st.caption("要新增供應商，請在 suppliers.py 增加一組辨識/擷取規則並註冊，不用改這個網頁程式。")
-
-# ---------------------------------------------------------------------------
-# 「重新查詢」按鈕：把檔案上傳元件的 key 綁定一個版本號，版本號加 1 之後
-# Streamlit 會把它們視為全新的元件重新渲染，藉此讓已上傳的檔案一併被清掉
-# (Streamlit 沒有直接清空 file_uploader 的 API，換 key 是官方建議的做法)。
-# 同時清空比對結果快取，讓使用者可以直接開始下一次全新的查詢。
-# ---------------------------------------------------------------------------
-if "uploader_version" not in st.session_state:
-    st.session_state["uploader_version"] = 0
 
 st.markdown(
     """
@@ -244,26 +262,12 @@ current_signature = (
 )
 
 st.write("")
-col_run, col_reset = st.columns(2)
-with col_run:
-    run_clicked = st.button(
-        "▶️ 開始執行比對",
-        type="primary",
-        use_container_width=True,
-        help="上傳完 PDF (與選填的正確答案 Excel) 後，按這個按鈕才會開始擷取與比對，比對結果才會顯示在下方。",
-    )
-with col_reset:
-    st.markdown('<span id="reset-btn-marker"></span>', unsafe_allow_html=True)
-    reset_clicked = st.button(
-        "🔄 重新查詢",
-        use_container_width=True,
-        help="清空比對結果、快取，並清除已上傳的 PDF / 正確答案 Excel，方便重新上傳新的一批檔案。",
-    )
-if reset_clicked:
-    st.session_state.pop("result_bundle", None)
-    st.session_state.pop("last_signature", None)
-    st.session_state["uploader_version"] += 1
-    st.rerun()
+run_clicked = st.button(
+    "▶️ 開始執行比對",
+    type="primary",
+    use_container_width=True,
+    help="上傳完 PDF (與選填的正確答案 Excel) 後，按這個按鈕才會開始擷取與比對，比對結果才會顯示在下方。",
+)
 
 if run_clicked:
     reference_df = None
