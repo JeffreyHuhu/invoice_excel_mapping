@@ -425,14 +425,140 @@ def parse_indoprostime(text: str) -> Dict:
 
 
 # ===========================================================================
+# 供應商 4：MAERSK (PT Maersk Logistics Indonesia，海運帳單 + Faktur Pajak)
+# ===========================================================================
+#
+# 版面特徵：
+#   - 第1、2頁是 Maersk 自己的 Invoice，抬頭欄位 (POL/POD/ETD/ETA/Sold to...)
+#     一樣是左右並排、只隔一個空白 (跟 INDOPROSTIME 同款排版問題)，用同一套
+#     「遇到下一個已知欄位就停止」策略處理。
+#   - 費用明細表格在 Invoice 頁面裡會因為欄寬不夠而「自動換行」，例如
+#     "Origin Terminal Handling Charge" 的 "Charge" 兩個字被擠到下一行，
+#     單獨用 Invoice 頁面的文字很難可靠重組回完整描述。所幸第3頁的
+#     Faktur Pajak (稅務發票) 用不同版面列出同樣 4 筆費用，這裡描述文字
+#     完整沒有被換行，所以費用明細改成從 Faktur Pajak 頁面擷取 (效果比
+#     KUEHNE NAGEL 反過來：那家帳單是 Faktur Pajak 描述太籠統、要改抓
+#     Sales Invoice 明細；這家則是 Invoice 頁面描述被換行拆散、要改抓
+#     Faktur Pajak 明細)。
+#   - 沒有海運提單，改用 "FCR" (Forwarder's Cargo Receipt) 編號頂替
+#     B/L NO. 欄位；MBL NO.、Vessel、Container no. 這張帳單本來就沒有，
+#     缺漏後續會自動補 N/A。
+
+def detect_maersk(text: str) -> bool:
+    return "MAERSK" in text.upper()
+
+
+_MAERSK_LABEL_WORDS = [
+    r"Place\s*of\s*Receipt", r"Place\s*of\s*Delivery", r"SHPR", r"CNEE",
+    r"POL", r"POD", r"ETD", r"ETA", r"Sold\s*to", r"Total\s*Packages",
+    r"Weight", r"Volume", r"Units",
+]
+_MAERSK_NEXT = "(?:" + "|".join(_MAERSK_LABEL_WORDS) + ")"
+# 跟 INDOPROSTIME 一樣：並排欄位只隔一個空白，靠「下一個已知欄位關鍵字」
+# 停止，不能靠連續空白判斷。
+_MAERSK_STOP = rf"(?=\s+{_MAERSK_NEXT}\b|\n|$)"
+
+_EN_MONTHS_ABBR = {
+    "jan": 1, "feb": 2, "mar": 3, "apr": 4, "may": 5, "jun": 6,
+    "jul": 7, "aug": 8, "sep": 9, "oct": 10, "nov": 11, "dec": 12,
+}
+
+
+def _maersk_parse_date(text: Optional[str]) -> Optional[str]:
+    """把 'ETD:/ETA:' 這種英文縮寫月份日期 '29-Aug-2026' 轉成 'DD.MM.YYYY'。
+
+    這裡一定要轉成跟其他供應商一樣的 'DD.MM.YYYY' 數字格式，因為使用者的
+    正確答案 Excel 這兩欄是 Excel 內建的日期格式(儲存格型態是日期,不是
+    純文字)，比對時 normalize_value() 會把日期物件格式化成 'DD.MM.YYYY'，
+    如果這裡保留原始的 '29-Aug-2026' 文字就永遠對不起來。
+    """
+    if not text:
+        return text
+    m = re.match(r"(\d{1,2})-([A-Za-z]{3})-(\d{4})", text.strip())
+    if not m:
+        return text
+    day, month_abbr, year = m.groups()
+    month = _EN_MONTHS_ABBR.get(month_abbr.lower())
+    if not month:
+        return text
+    return f"{int(day):02d}.{month:02d}.{year}"
+
+
+def _maersk_clean_amount_id(text: Optional[str]) -> Optional[int]:
+    """印尼式數字 '623.699,00' (句點=千分位、逗號=小數) -> 623699。
+    跟 KUEHNE NAGEL 的 _kn_clean_amount() 是同一種格式，各供應商各自維護
+    一份，避免互相牽動。
+    """
+    if not text:
+        return None
+    text = text.strip().replace(".", "")
+    text = text.split(",")[0]
+    return int(text) if text.isdigit() else None
+
+
+# Faktur Pajak (稅務發票) 頁面的費用明細行，例如：
+#   "2 Origin Terminal Handling Charge 149.659,00"
+# 格式：項次 + 費用名稱 + 印尼式金額。用這一頁的明細而不是 Invoice 頁面，
+# 是因為 Invoice 頁面的表格欄寬不夠，長一點的費用名稱 (例如這筆) 會被自動
+# 換行拆成兩行，很難可靠重組；Faktur Pajak 頁面版面不同，同一筆描述都在
+# 同一行，擷取起來穩定得多。
+_MAERSK_TAX_ITEM_PATTERN = re.compile(
+    r"^\d+\s+(?P<desc>[A-Za-z][A-Za-z0-9 /\-\.]*?)\s+(?P<amount>[\d.]+,\d{2})\s*$",
+    re.MULTILINE,
+)
+
+
+def _maersk_extract_items(text: str) -> List[Dict]:
+    items = []
+    for m in _MAERSK_TAX_ITEM_PATTERN.finditer(text):
+        items.append({
+            "description": m.group("desc").strip(),
+            "amount": _maersk_clean_amount_id(m.group("amount")),
+        })
+    return items
+
+
+def parse_maersk(text: str) -> Dict:
+    header: Dict[str, Optional[str]] = {}
+
+    header["invoice_no"] = _search(r"\bINVOICE\s+(\d+)\b", text)
+    header["invoice_date"] = _search(r"Invoice\s*Date\s*:\s*(\S+)", text)
+    header["supplier"] = _search(r"Issued by:\s*\n(.+)", text)
+    header["consignee"] = _search(rf"Sold\s*to\s*:\s*(.+?){_MAERSK_STOP}", text)
+    header["order_no"] = _search(r"Commercial Invoice No\s*:\s*(\S+)", text)
+    header["bl_no"] = _search(r"\bFCR\s+(\S+)", text)
+    header["port_of_loading"] = _search(rf"\bPOL\s*:\s*(.+?){_MAERSK_STOP}", text)
+    header["port_of_discharge"] = _search(rf"\bPOD\s*:\s*(.+?){_MAERSK_STOP}", text)
+    header["onboard_date"] = _maersk_parse_date(
+        _search(rf"\bETD\s*:\s*(.+?){_MAERSK_STOP}", text)
+    )
+    header["arrive_date"] = _maersk_parse_date(
+        _search(rf"\bETA\s*:\s*(.+?){_MAERSK_STOP}", text)
+    )
+    header["volume"] = _search(r"Volume\s*:\s*([\d.]+)\s*m3", text)
+
+    # 這張帳單沒有主提單/船名/貨櫃資訊，留空給 expand_to_rows() 補 N/A
+    header["mbl_no"] = None
+    header["vessel"] = None
+    header["container_no"] = None
+
+    items = _maersk_extract_items(text)
+    if not items:
+        items = [{"description": None, "amount": None}]
+
+    return {"header": header, "items": items}
+
+
+# ===========================================================================
 # 註冊所有供應商
 # ===========================================================================
 # detect_kuehne_nagel() 的關鍵字 "KUEHNE"+"NAGEL" 很具體不會誤判，
 # detect_dwiharta() 同理只認 "DWIHARTA" 字樣，detect_indoprostime() 只認
-# "PROSTIME" 字樣，三者互不衝突，順序不影響結果。未來新增供應商時，關鍵字
-# 盡量挑「該公司獨有、不會出現在其他供應商帳單」的字串 (公司全名、統編、
-# 帳單編號前綴等)。
+# "PROSTIME" 字樣，detect_maersk() 只認 "MAERSK" 字樣，四者互不衝突，順序
+# 不影響結果。未來新增供應商時，關鍵字盡量挑「該公司獨有、不會出現在其他
+# 供應商帳單」的字串 (公司全名、統編、帳單編號前綴等)。
 
 register_supplier("DWIHARTA", "PT. DWIHARTA LOGISTINDO", detect_dwiharta, parse_dwiharta)
 register_supplier("KUEHNE_NAGEL", "KUEHNE NAGEL INDONESIA", detect_kuehne_nagel, parse_kuehne_nagel)
 register_supplier("INDOPROSTIME", "PT. INDO PROSTIME EXPRESS", detect_indoprostime, parse_indoprostime)
+register_supplier("MAERSK", "PT MAERSK LOGISTICS INDONESIA", detect_maersk, parse_maersk)

@@ -87,10 +87,15 @@ except ImportError as e:
 
 st.set_page_config(page_title="多供應商帳單自動化系統", layout="wide")
 st.title("📄➡️📊 多供應商帳單自動化系統")
-st.caption(
-    "流程：① 自動辨識帳單屬於哪家供應商 → ② 套用該供應商專屬的擷取規則 → "
-    f"③ 跟正確答案 Excel 逐欄比對算出正確率 (正確率未滿 100% 時，最多重新嘗試 "
-    f"{MAX_EXTRACTION_ATTEMPTS} 次不同的擷取參數，一達到 100% 就停止)。"
+st.markdown(
+    f"""
+    <div style="font-size:19px; color:#000000; font-weight:500; line-height:1.6; margin-bottom:12px;">
+        流程：① 自動辨識帳單屬於哪家供應商 → ② 套用該供應商專屬的擷取規則 →
+        ③ 跟正確答案 Excel 逐欄比對算出正確率 (正確率未滿 100% 時，最多重新嘗試
+        {MAX_EXTRACTION_ATTEMPTS} 次不同的擷取參數，一達到 100% 就停止)。
+    </div>
+    """,
+    unsafe_allow_html=True,
 )
 
 registered = list_registered_suppliers()
@@ -122,16 +127,6 @@ st.markdown(
     """,
     unsafe_allow_html=True,
 )
-reset_clicked = st.button(
-    "🔄 重新查詢 (清空目前結果與已上傳的檔案，開始下一次查詢)",
-    help="清空比對結果、快取，並清除已上傳的 PDF / 正確答案 Excel，方便重新上傳新的一批檔案。",
-    use_container_width=True,
-)
-if reset_clicked:
-    st.session_state.pop("result_bundle", None)
-    st.session_state.pop("last_signature", None)
-    st.session_state["uploader_version"] += 1
-    st.rerun()
 
 uploader_key_suffix = st.session_state["uploader_version"]
 
@@ -170,12 +165,25 @@ current_signature = (
 )
 
 st.write("")
-run_clicked = st.button(
-    "▶️ 開始執行比對 (擷取 PDF 並跟正確答案 Excel 比對)",
-    type="primary",
-    use_container_width=True,
-    help="上傳完 PDF (與選填的正確答案 Excel) 後，按這個按鈕才會開始擷取與比對，比對結果才會顯示在下方。",
-)
+col_run, col_reset = st.columns(2)
+with col_run:
+    run_clicked = st.button(
+        "▶️ 開始執行比對",
+        type="primary",
+        use_container_width=True,
+        help="上傳完 PDF (與選填的正確答案 Excel) 後，按這個按鈕才會開始擷取與比對，比對結果才會顯示在下方。",
+    )
+with col_reset:
+    reset_clicked = st.button(
+        "🔄 重新查詢",
+        use_container_width=True,
+        help="清空比對結果、快取，並清除已上傳的 PDF / 正確答案 Excel，方便重新上傳新的一批檔案。",
+    )
+if reset_clicked:
+    st.session_state.pop("result_bundle", None)
+    st.session_state.pop("last_signature", None)
+    st.session_state["uploader_version"] += 1
+    st.rerun()
 
 if run_clicked:
     reference_df = None
