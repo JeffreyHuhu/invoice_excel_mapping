@@ -723,6 +723,210 @@ def parse_hyper_mega(text: str) -> Dict:
 # 統編、帳單編號前綴等)；如果新供應商也是「一份 PDF 有好幾張獨立發票」，
 # 記得跟 HYPER MEGA 一樣在 register_supplier() 傳入 multi_page=True。
 
+# ===========================================================================
+# 供應商 6a：YJE (ShenZhen) International Logistics (⚠️ multi_page)
+# ===========================================================================
+#
+# 這家帳單版面很單純：每一頁就是一張完整獨立的發票 (跟 HYPER MEGA 一樣，
+# 一份 PDF 裡可能塞好幾張不同發票號碼/日期/費用明細的獨立帳單，一頁一張)，
+# 所以一樣用 multi_page=True 逐頁辨識/擷取。
+#
+# 版面特徵：
+#   - 標題公司名稱是 "YJE (ShenZhen) International Logistics Co., Ltd."，
+#     但正確答案 Excel 的 SUPPLIER 欄位填的是帳單下方 "AGENT:" 那一行
+#     ("PT TATA HARMONI SARANATAMA")，不是抬頭公司名稱。
+#   - PDF 裡的冒號是全形 "："，不是半形 ":"，抓值時兩種都要接受。
+#   - "TO：" 收件人欄位偶爾會多一個句點 ("PT. POU YUEN INDONESIA")，
+#     偶爾沒有 ("PT POU YUEN INDONESIA")，正確答案統一是不帶句點的寫法，
+#     擷取後要把 "PT." 開頭正規化成 "PT "。
+#   - 金額用歐式寫法 (逗號當小數點)，例如 "US$1,72" 代表 1.72、
+#     "US$115,00" 代表 115.00，轉換時把逗號換成小數點再轉成數字。
+#   - 沒有 Order No./Arrive Date/on board date/MBL NO./Port of
+#     Loading/Port of discharge/Volume/Vessel/Container no.，全部留空
+#     讓 expand_to_rows() 補 N/A。
+
+def detect_yje(text: str) -> bool:
+    upper = text.upper()
+    return "YJE" in upper and "INTERNATIONAL LOGISTICS" in upper
+
+
+def _yje_clean_consignee(value: Optional[str]) -> Optional[str]:
+    """'PT. POU YUEN INDONESIA' -> 'PT POU YUEN INDONESIA'：正確答案統一
+    不帶句點的寫法，PDF 上偶爾會多一個句點，擷取後去掉。
+    """
+    if not value:
+        return value
+    return re.sub(r"^(PT)\.\s*", r"\1 ", value.strip())
+
+
+def _yje_clean_amount(text: Optional[str]) -> Optional[float]:
+    """歐式金額 'US$1,72' (逗號=小數點) -> 1.72。"""
+    if not text:
+        return None
+    text = text.strip().replace(",", ".")
+    try:
+        return float(text)
+    except ValueError:
+        return None
+
+
+_YJE_ITEM_PATTERN = re.compile(
+    r"^(?P<desc>[A-Za-z][A-Za-z0-9 +\-]*?)\s+\d+\s+SET\s+US\$(?P<amount>[\d,\.]+)\s*$",
+    re.MULTILINE,
+)
+
+
+def _yje_extract_items(text: str) -> List[Dict]:
+    items = []
+    for m in _YJE_ITEM_PATTERN.finditer(text):
+        items.append({
+            "description": m.group("desc").strip(),
+            "amount": _yje_clean_amount(m.group("amount")),
+        })
+    return items
+
+
+def parse_yje(text: str) -> Dict:
+    """注意：這是 multi_page 供應商，text 是『一頁』的文字。"""
+    header: Dict[str, Optional[str]] = {}
+
+    header["invoice_no"] = _search(r"Inv\.?\s*No\s*[:：]\s*(\S+)", text)
+    header["invoice_date"] = _search(r"Inv\s*Date\s*[:：]\s*(\S+)", text)
+    header["supplier"] = _search(r"AGENT\s*[:：]\s*(.+)$", text)
+    header["consignee"] = _yje_clean_consignee(_search(r"TO\s*[:：]\s*(.+)$", text))
+    header["bl_no"] = _search(r"HAWB\s*[:：]\s*(\S+)", text)
+
+    # 這種帳單沒有 Order No./Arrive Date/開船日/MBL NO./港口/材積/船名/
+    # 貨櫃資訊，留空給 expand_to_rows() 補 N/A
+    for code in ("order_no", "arrive_date", "onboard_date", "mbl_no",
+                 "port_of_loading", "port_of_discharge", "volume",
+                 "vessel", "container_no"):
+        header[code] = None
+
+    items = _yje_extract_items(text)
+    if not items:
+        items = [{"description": None, "amount": None}]
+
+    return {"header": header, "items": items}
+
+
+# ===========================================================================
+# 供應商 6b：PT TATA HARMONI SARANATAMA (⚠️ multi_page，YJE 帳單的第二種格式)
+# ===========================================================================
+#
+# 這是同一個供應商關係下的「第二種帳單格式」：YJE 的帳單上會寫
+# "AGENT: PT TATA HARMONI SARANATAMA"，而這裡是 TATA 自己開立的印尼文
+# 稅務/報關費用發票，版面、欄位、金額格式都跟 YJE 那份完全不同，所以另外
+# 寫一組 detect_tata()/parse_tata()，用不同的 key 註冊 (辨識關鍵字互不
+# 衝突：YJE 帳單裡沒有 "TAMAN DUTAMAS" 字樣，TATA 帳單裡也沒有
+# "INTERNATIONAL LOGISTICS" 字樣)。
+#
+# 版面特徵 (跟 INDOPROSTIME/MAERSK 一樣是單一空白分隔的並排欄位)：
+#   - 一份 PDF 一樣可能塞好幾張獨立發票、一頁一張，所以也是 multi_page=True。
+#   - "NO. DESCRIPTION AMOUNT (Rp)" 表格裡每筆費用前面有項次編號，
+#     "HANDLING FEE" 那一筆後面偶爾會多一個貨運追蹤號碼尾巴 (例如
+#     "HANDLING FEE YJE123965498")，正確答案只要 "HANDLING FEE" 本身，
+#     要把追蹤號碼去掉；判斷方式是看緊接在費用名稱後面的那個字有沒有
+#     包含數字 (追蹤號碼一定有數字，費用名稱單字不會)。
+#   - 正確答案除了表格裡列出的費用明細，還多一筆 "DPP"（未稅金額，
+#     表格下方單獨列出的小計），要額外抓出來當成一筆 Description/Amount。
+#   - 金額是英式千分位、無小數 ('159,840' -> 159840)。
+#   - Arrive Date/on board date 兩欄的值相同，都是來自 "Date :" 那個
+#     出貨日期欄位 (跟到達日/開船日不是嚴格對應，但正確答案兩欄填的是
+#     同一個值)。
+#   - SUPPLIER 固定是發票最下方 "Nama :" 那一行 ("PT. TATA HARMONI
+#     SARANATAMA")。
+
+def detect_tata(text: str) -> bool:
+    return "TAMAN DUTAMAS" in text.upper()
+
+
+_TATA_LABEL_WORDS = [
+    r"MAWB", r"HAWB", r"Telp", r"Attn", r"Flight", r"Date", r"QTY",
+    r"Shipper", r"Address", r"Consignee", r"ORIGIN",
+]
+_TATA_NEXT = "(?:" + "|".join(_TATA_LABEL_WORDS) + ")"
+_TATA_STOP = rf"(?=\s+{_TATA_NEXT}\b|\n|$)"
+
+
+def _tata_clean_amount(text: Optional[str]) -> Optional[int]:
+    """英式數字 '4,585,728' (逗號千分位，無小數) -> 4585728。"""
+    if not text:
+        return None
+    text = text.strip().replace(",", "")
+    return int(text) if text.isdigit() else None
+
+
+def _tata_parse_date(text: Optional[str]) -> Optional[str]:
+    """'2026-08-24' -> '24.08.2026'，跟其他供應商一樣統一成 'DD.MM.YYYY'
+    (正確答案 Excel 這幾欄是 Excel 日期格式)。
+    """
+    if not text:
+        return text
+    m = re.match(r"(\d{4})-(\d{1,2})-(\d{1,2})", text.strip())
+    if not m:
+        return text
+    year, month, day = m.groups()
+    return f"{int(day):02d}.{int(month):02d}.{year}"
+
+
+# 費用明細行，例如 "1 GUDANG FEE Rp 159,840" 或
+# "4 HANDLING FEE YJE123965498 Rp 4,585,728"：項次 + 費用名稱 + (偶爾多一個
+# 含數字的追蹤號碼尾巴) + Rp + 金額。用「後面緊接的字是否含數字」判斷那個字
+# 是追蹤號碼還是費用名稱的一部分，避免把 "LOCAL EXPRESS CHARGE" 這種全大寫
+# 費用名稱誤判成「名稱+尾碼」。
+_TATA_ITEM_PATTERN = re.compile(
+    r"^\d+\s+(?P<desc>[A-Z][A-Z ]*?)(?:\s+(?=[A-Z0-9]*\d)[A-Z0-9]+)?\s+Rp\s+(?P<amount>[\d,]+)\s*$",
+    re.MULTILINE,
+)
+_TATA_DPP_PATTERN = re.compile(r"^DPP\s+Rp\s+(?P<amount>[\d,]+)\s*$", re.MULTILINE)
+
+
+def _tata_extract_items(text: str) -> List[Dict]:
+    items = []
+    for m in _TATA_ITEM_PATTERN.finditer(text):
+        items.append({
+            "description": m.group("desc").strip(),
+            "amount": _tata_clean_amount(m.group("amount")),
+        })
+    dpp_m = _TATA_DPP_PATTERN.search(text)
+    if dpp_m:
+        items.append({"description": "DPP", "amount": _tata_clean_amount(dpp_m.group("amount"))})
+    return items
+
+
+def parse_tata(text: str) -> Dict:
+    """注意：這是 multi_page 供應商，text 是『一頁』的文字。"""
+    header: Dict[str, Optional[str]] = {}
+
+    header["invoice_no"] = _search(r"(?m)^NO\s*:\s*(\S+)", text)
+    header["invoice_date"] = _tata_parse_date(
+        _search(r"INV\s*Date\s*:\s*(\d{4}-\d{1,2}-\d{1,2})", text)
+    )
+    header["supplier"] = _search(r"Nama\s*:\s*(PT\..+)$", text)
+    header["consignee"] = _search(rf"\bTO\s*:\s*(.+?){_TATA_STOP}", text)
+    header["mbl_no"] = _search(rf"\bMAWB\s*:\s*(.+?){_TATA_STOP}", text)
+    header["bl_no"] = _search(rf"\bHAWB\s*:\s*(.+?){_TATA_STOP}", text)
+    header["vessel"] = _search(rf"\bFlight\s*:\s*(.+?){_TATA_STOP}", text)
+    header["volume"] = _search(rf"\bQTY\s*:\s*(.+?){_TATA_STOP}", text)
+    header["port_of_loading"] = _search(rf"\bORIGIN\s*:\s*(.+?){_TATA_STOP}", text)
+
+    ship_date = _tata_parse_date(_search(r"\bDate\s*:\s*(\d{4}-\d{1,2}-\d{1,2})", text))
+    header["arrive_date"] = ship_date
+    header["onboard_date"] = ship_date
+
+    # 這種帳單沒有 Order No./目的港/貨櫃資訊，留空給 expand_to_rows() 補 N/A
+    header["order_no"] = None
+    header["port_of_discharge"] = None
+    header["container_no"] = None
+
+    items = _tata_extract_items(text)
+    if not items:
+        items = [{"description": None, "amount": None}]
+
+    return {"header": header, "items": items}
+
+
 register_supplier("DWIHARTA", "PT. DWIHARTA LOGISTINDO", detect_dwiharta, parse_dwiharta)
 register_supplier("KUEHNE_NAGEL", "KUEHNE NAGEL INDONESIA", detect_kuehne_nagel, parse_kuehne_nagel)
 register_supplier("INDOPROSTIME", "PT. INDO PROSTIME EXPRESS", detect_indoprostime, parse_indoprostime)
@@ -730,4 +934,11 @@ register_supplier("MAERSK", "PT MAERSK LOGISTICS INDONESIA", detect_maersk, pars
 register_supplier(
     "HYPER_MEGA", "PT. HYPER MEGA SHIPPING", detect_hyper_mega, parse_hyper_mega,
     multi_page=True,
+)
+register_supplier(
+    "YJE", "YJE (ShenZhen) International Logistics / PT TATA HARMONI SARANATAMA",
+    detect_yje, parse_yje, multi_page=True,
+)
+register_supplier(
+    "TATA", "PT. TATA HARMONI SARANATAMA", detect_tata, parse_tata, multi_page=True,
 )
