@@ -263,7 +263,11 @@ def parse_kuehne_nagel(text: str) -> Dict:
         header["invoice_no"], header["invoice_date"] = m.group(1), m.group(2)
 
     header["bl_no"] = _kn_clean_tracking_no(_search(rf"KN TRACKING NO\.\s*(.+?){_KN_STOP}", text))
-    header["order_no"] = _search(rf"GTN SHIPPING ORDER NUMBER\s*\n\s*(.+?){_KN_STOP}", text)
+    # 注意：Order No. 欄位對應的是「COMMERCIAL INVOICE NUMBER」(例如
+    # RYH0810074280)，不是緊接在旁邊的「GTN SHIPPING ORDER NUMBER」
+    # (例如 VB26072003093319) —— 這兩個編號在版面上前後相鄰、很容易搞混，
+    # 但使用者核對過的正確答案是以 COMMERCIAL INVOICE NUMBER 為準。
+    header["order_no"] = _search(rf"COMMERCIAL INVOICE NUMBER\s*\n\s*(.+?){_KN_STOP}", text)
     header["vessel"] = _search(rf"VESSEL NAME\s*:\s*(.+?){_KN_STOP}", text)
     header["port_of_loading"] = _kn_clean_port(_search(rf"P\.\s*OF LOADING\s*:\s*(.+?){_KN_STOP}", text))
     header["port_of_discharge"] = _kn_clean_port(_search(rf"P\.\s*OF DISCHARGE\s*:\s*(.+?){_KN_STOP}", text))

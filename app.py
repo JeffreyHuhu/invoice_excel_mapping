@@ -7,15 +7,21 @@ app.py
 流程：辨識哪間供應商帳單 → 選取對應的帳單辨識系統 → 擷取資料 → 跟正確答案
        Excel 逐欄比對算出正確率。
 
-重試機制：每份 PDF 最多重新嘗試 20 次不同的擷取參數，只要正確率還沒到
-100% 就繼續換下一組參數再試，一達到 100% 立刻停止；20 次都試完仍未達
-100% 的話，就用這 20 次裡分數最高的一次，並產出核對報告方便人工複查。
+重試機制：每份 PDF 最多重新嘗試 100 次不同的擷取參數，只要正確率還沒到
+100% 就繼續換下一組參數再試，一達到 100% 立刻停止；100 次都試完仍未達
+100% 的話，就用這 100 次裡分數最高的一次，並產出核對報告方便人工複查。
+
+學習記憶：每次找到「比之前記錄更高分」的擷取設定時，會記錄到
+learned_configs.json，下次同一家供應商的帳單進來就優先套用這組設定當
+第 1 次嘗試，通常能一次就命中，不用每次都從頭試 100 組 (注意：這個記憶
+只在同一次 Streamlit 部署期間有效，重新部署/reboot 後會重置，除非把
+learned_configs.json 也提交回 GitHub)。
 
 按鈕：
-  🗑️ 清除索引：清空目前的比對結果與快取，方便下一次重新搜尋/上傳
+  🔄 重新查詢：清空目前的比對結果、快取，並清除已上傳的檔案，方便下一次重新查詢
   ⬇️ 下載核對報告：把正確率總覽 + 逐欄比對明細 (紅綠燈) 匯出成 Excel
 
-結果呈現順序：① 轉檔正確率 → ② 轉檔結果預覽 → ③ 逐欄比對明細
+結果呈現順序：① 轉檔正確率(大字級顯示) → ② 轉檔結果預覽 → ③ 逐欄比對明細
 
 用法：
     pip install streamlit pdfplumber openpyxl pandas
@@ -91,31 +97,60 @@ with st.expander(f"🏷️ 目前系統已支援 {len(registered)} 家供應商�
         st.write(f"- **{s['label']}** (代碼: `{s['key']}`)")
     st.caption("要新增供應商，請在 suppliers.py 增加一組辨識/擷取規則並註冊，不用改這個網頁程式。")
 
+# ---------------------------------------------------------------------------
+# 「重新查詢」按鈕：把檔案上傳元件的 key 綁定一個版本號，版本號加 1 之後
+# Streamlit 會把它們視為全新的元件重新渲染，藉此讓已上傳的檔案一併被清掉
+# (Streamlit 沒有直接清空 file_uploader 的 API，換 key 是官方建議的做法)。
+# 同時清空比對結果快取，讓使用者可以直接開始下一次全新的查詢。
+# ---------------------------------------------------------------------------
+if "uploader_version" not in st.session_state:
+    st.session_state["uploader_version"] = 0
+
+st.markdown(
+    """
+    <style>
+    div.stButton > button {
+        font-size: 22px !important;
+        font-weight: 700 !important;
+        padding: 0.9em 1.5em !important;
+        height: auto !important;
+        border-radius: 10px !important;
+    }
+    </style>
+    """,
+    unsafe_allow_html=True,
+)
+reset_clicked = st.button(
+    "🔄 重新查詢 (清空目前結果與已上傳的檔案，開始下一次查詢)",
+    help="清空比對結果、快取，並清除已上傳的 PDF / 正確答案 Excel，方便重新上傳新的一批檔案。",
+    use_container_width=True,
+)
+if reset_clicked:
+    st.session_state.pop("result_bundle", None)
+    st.session_state.pop("last_signature", None)
+    st.session_state["uploader_version"] += 1
+    st.rerun()
+
+uploader_key_suffix = st.session_state["uploader_version"]
+
 col_pdf, col_ref = st.columns(2)
 with col_pdf:
     uploaded_pdfs = st.file_uploader(
         "① 上傳 PDF 帳單 (可一次選取多個檔案、可混合不同供應商)",
-        type=["pdf"], accept_multiple_files=True, key="pdf_upload",
+        type=["pdf"], accept_multiple_files=True,
+        key=f"pdf_upload_{uploader_key_suffix}",
     )
 with col_ref:
     reference_excel = st.file_uploader(
         "② (選填) 上傳正確答案 Excel，用來自動比對並算出正確率",
-        type=["xlsx"], accept_multiple_files=False, key="reference_upload",
+        type=["xlsx"], accept_multiple_files=False,
+        key=f"reference_upload_{uploader_key_suffix}",
     )
     st.caption("沒有上傳的話，會改用『資料完整度』(欄位是否成功抓到值，而非 N/A) 作為代理指標。")
 
 if not uploaded_pdfs:
     st.info("請先上傳至少一份 PDF 帳單。")
     st.stop()
-
-clear_index_clicked = st.button(
-    "🗑️ 清除索引 (清空目前的比對結果與快取，方便下一次重新搜尋/上傳)",
-    help="更新過 suppliers.py 的擷取規則、換了一批檔案、或單純想清空重來時可以按這個按鈕。",
-)
-if clear_index_clicked:
-    st.session_state.pop("result_bundle", None)
-    st.session_state.pop("last_signature", None)
-    st.rerun()
 
 # ---------------------------------------------------------------------------
 # 用檔案內容算出簽章，判斷「這批檔案是不是已經處理過」；簽章不同(新上傳
@@ -193,6 +228,7 @@ if need_recompute:
                     "嘗試次數": f"{result['attempts_used']}/{MAX_EXTRACTION_ATTEMPTS}",
                     "是否達到100%": "✅ 是" if result["reached_100"] else "❌ 否",
                     "採用設定": result["config"] or "預設",
+                    "套用學習記憶": "✅ 是" if result.get("learned_applied") else "-",
                     "比對基準": "正確答案 Excel" if reference_rows is not None else "資料完整度自我檢查",
                 })
                 attempts_log.append({
@@ -239,24 +275,39 @@ if not all_export_rows:
     st.stop()
 
 # ---------------------------------------------------------------------------
-# ① 轉檔正確率 (%)
+# ① 轉檔正確率 (%) —— 大字級數字放在結果的最前方
 # ---------------------------------------------------------------------------
 
-st.subheader(f"📊 轉檔{score_label}")
+score_df = pd.DataFrame(score_rows)
+avg_score = score_df[score_label].str.rstrip("%").astype(float).mean()
+all_reached_100 = has_reference and all(r["是否達到100%"] == "✅ 是" for r in score_rows)
+not_reached_files = [r["來源檔案"] for r in score_rows if r.get("是否達到100%") == "❌ 否"]
+
+_big_color = "#1a7f37" if (not has_reference or all_reached_100) else "#c0392b"
+st.markdown(
+    f"""
+    <div style="text-align:center; padding: 12px 0 4px 0;">
+        <div style="font-size:96px; font-weight:800; line-height:1; color:{_big_color};">
+            {avg_score:.1f}%
+        </div>
+        <div style="font-size:20px; color:#666; margin-top:4px;">
+            整體{score_label}（所有 {len(score_rows)} 份 PDF 平均）
+        </div>
+    </div>
+    """,
+    unsafe_allow_html=True,
+)
+
+st.subheader(f"📊 轉檔{score_label}明細")
 
 if not has_reference:
     st.info(
-        "目前沒有上傳正確答案 Excel，以下是『資料完整度』：欄位有成功抓到值 "
+        "目前沒有上傳正確答案 Excel，以上是『資料完整度』：欄位有成功抓到值 "
         "(不是 N/A) 的比例，不是跟人工核對過的正確率；上傳正確答案 Excel "
         "後即可看到真正的逐欄比對正確率，並啟用重試迴圈與核對報告。"
     )
 
-score_df = pd.DataFrame(score_rows)
 st.dataframe(score_df, use_container_width=True)
-
-avg_score = score_df[score_label].str.rstrip("%").astype(float).mean()
-all_reached_100 = has_reference and all(r["是否達到100%"] == "✅ 是" for r in score_rows)
-not_reached_files = [r["來源檔案"] for r in score_rows if r.get("是否達到100%") == "❌ 否"]
 
 if has_reference and all_reached_100:
     st.success(f"🎉 全部 {len(score_rows)} 份帳單都在重試次數內達到 100% 正確率！")
@@ -266,9 +317,6 @@ elif has_reference and not_reached_files:
         f"仍未達到 100% 正確率，已產出核對報告供人工複查不相符的欄位：\n\n"
         + "\n".join(f"- {name}" for name in not_reached_files)
     )
-    st.metric(f"整體{score_label} (所有 PDF 平均)", f"{avg_score:.1f}%")
-else:
-    st.metric(f"整體{score_label} (所有 PDF 平均)", f"{avg_score:.1f}%")
 
 with st.expander(
     f"🔍 查看每份 PDF 重複嘗試 (最多 {MAX_EXTRACTION_ATTEMPTS} 次) 擷取設定時的分數"
