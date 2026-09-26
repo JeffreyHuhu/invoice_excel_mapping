@@ -364,11 +364,16 @@ st.divider()
 # ---------------------------------------------------------------------------
 
 if has_reference and compare_rows_all:
-    st.subheader("📋 逐欄比對明細（🟢相符 / 🔴不相符）")
+    st.subheader("📋 逐欄比對明細（🟢相符 / 🔴不相符 / ⚪正確答案為N/A，不計入正確率）")
     cmp_df = pd.DataFrame(compare_rows_all)
 
     def _highlight(row):
-        color = "background-color:#C6EFCE" if row["結果"].startswith("✅") else "background-color:#FFC7CE"
+        if row["結果"].startswith("✅"):
+            color = "background-color:#C6EFCE"
+        elif row["結果"].startswith("⚪"):
+            color = "background-color:#E7E6E6"
+        else:
+            color = "background-color:#FFC7CE"
         return [color] * len(row)
 
     # 注意：st.dataframe 的 height 參數在部分 Streamlit 版本中，傳入 None
