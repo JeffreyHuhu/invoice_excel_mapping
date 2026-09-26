@@ -148,6 +148,50 @@ st.markdown(
     unsafe_allow_html=True,
 )
 
+# 「① 上傳 PDF 帳單」/「② 上傳正確答案 Excel」整個上傳區域放大兩倍：
+# Streamlit 的 file_uploader 沒有內建大小參數，這裡直接針對它的內部元素
+# (拖曳區塊、圖示、文字、按鈕) 把字體/圖示/內距都放大約 2 倍，讓整個
+# 上傳介面 (包含虛線框範圍) 實際占用的空間也放大，而不是只放大文字。
+st.markdown(
+    """
+    <style>
+    /* 上傳元件標題文字 (「① 上傳 PDF 帳單...」/「② (選填) 上傳正確答案...」) */
+    [data-testid="stFileUploader"] label p {
+        font-size: 2em !important;
+        font-weight: 700 !important;
+    }
+    /* 拖曳上傳的虛線框區塊本身：內距、最小高度都放大兩倍 */
+    [data-testid="stFileUploaderDropzone"] {
+        padding: 2.4em 2em !important;
+        min-height: 220px !important;
+    }
+    /* 拖曳區塊裡的說明文字 ("Drag and drop file here"、檔案大小限制...) */
+    [data-testid="stFileUploaderDropzoneInstructions"] span,
+    [data-testid="stFileUploaderDropzoneInstructions"] small {
+        font-size: 2em !important;
+    }
+    [data-testid="stFileUploaderDropzoneInstructions"] small {
+        font-size: 1.5em !important;
+    }
+    /* 雲朵上傳圖示放大兩倍 */
+    [data-testid="stFileUploaderDropzoneInstructions"] svg {
+        width: 2.4em !important;
+        height: 2.4em !important;
+    }
+    /* 「Browse files」按鈕放大兩倍 */
+    [data-testid="stFileUploaderDropzone"] button {
+        font-size: 1.4em !important;
+        padding: 0.8em 1.4em !important;
+    }
+    /* 已上傳檔案清單 (檔名、大小、刪除按鈕) 跟著放大，維持視覺比例一致 */
+    [data-testid="stFileUploaderFile"] {
+        font-size: 1.6em !important;
+    }
+    </style>
+    """,
+    unsafe_allow_html=True,
+)
+
 uploader_key_suffix = st.session_state["uploader_version"]
 
 col_pdf, col_ref = st.columns(2)
