@@ -256,6 +256,16 @@ def _fill_na(value):
 def expand_to_rows(parsed: Dict) -> List[Dict[str, object]]:
     """把供應商 parse() 回傳的 {"header":.., "items":[..]} 展開成
     每筆費用一列的完整 row (欄位對應 FIELD_CODES，缺漏一律補 N/A)。
+
+    大部分供應商的抬頭欄位 (例如 Order No.) 整張帳單只有一個值，每筆費用
+    明細都套用同一個值即可。但少數供應商 (例如 PT. TRANS DAYA PRIMA 有多
+    筆費用明細時) 是「每一筆費用明細各自有自己的 Order No.」，不是整張
+    帳單共用一個。為了不用改動每個供應商的資料結構，這裡允許 items 裡的
+    每一筆 item dict『順便』帶上任何一個 HEADER_FIELD_CODES 欄位 (例如
+    {"description":.., "amount":.., "order_no": "這筆專屬的單號"})，
+    有帶的話就覆蓋掉整張帳單共用的抬頭值，只套用在這一列；沒有帶的欄位
+    仍然沿用抬頭值，其他供應商 (item 裡只有 description/amount) 完全不受
+    影響。
     """
     header = parsed.get("header", {}) or {}
     items = parsed.get("items") or [{}]
@@ -265,6 +275,9 @@ def expand_to_rows(parsed: Dict) -> List[Dict[str, object]]:
     rows = []
     for item in items:
         row = dict(header_row)
+        for code in HEADER_FIELD_CODES:
+            if code in item:
+                row[code] = _fill_na(item.get(code))
         row["description"] = _fill_na(item.get("description"))
         row["amount"] = _fill_na(item.get("amount"))
         rows.append(row)
@@ -388,20 +401,52 @@ def compare_rows(rows: List[Dict], reference_rows: pd.DataFrame) -> List[Dict]:
             "結果": status,
         })
 
-    ext_items = {(normalize_value(r.get("description")), normalize_value(r.get("amount")))
-                 for r in rows}
-    ref_items = {(normalize_value(r.get("description")), normalize_value(r.get("amount")))
-                 for _, r in reference_rows.iterrows()}
+    # 大部分供應商每張帳單只有「一個」Order No. (整張帳單共用，已經在上面
+    # 抬頭欄位比對過一次)。但少數供應商 (例如 PT. TRANS DAYA PRIMA 一張
+    # 帳單裡有好幾筆費用時) 是「每一筆費用明細各自有自己的 Order No.」，
+    # 光比對第一列的抬頭值沒辦法驗證到第二、第三筆費用的單號對不對。這裡
+    # 動態偵測：只要擷取結果或正確答案裡，同一張帳單的 Order No. 出現超過
+    # 一種不同的值，就自動改成「連 Order No. 一起」三個一組去比對每一筆
+    # 費用明細；否則沿用原本「只比 Description/Amount」兩個一組的做法，
+    # 對其餘 Order No. 整張帳單只有一個值的供應商完全不影響既有的比對結果
+    # 跟顯示格式。
+    ext_order_nos = {normalize_value(r.get("order_no")) for r in rows}
+    ref_order_nos = (
+        {normalize_value(v) for v in reference_rows["order_no"]}
+        if "order_no" in reference_rows.columns else set()
+    )
+    per_item_order_no = len(ext_order_nos) > 1 or len(ref_order_nos) > 1
 
-    for desc, amt in sorted(ext_items & ref_items):
-        results.append({"欄位": "Description/Amount", "擷取結果": f"{desc} / {amt}",
-                         "正確答案": f"{desc} / {amt}", "結果": "✅ 相符"})
-    for desc, amt in sorted(ext_items - ref_items):
-        results.append({"欄位": "Description/Amount", "擷取結果": f"{desc} / {amt}",
+    if per_item_order_no:
+        item_label = "Description/Amount/Order No."
+
+        def _item_key(r):
+            return (normalize_value(r.get("description")), normalize_value(r.get("amount")),
+                    normalize_value(r.get("order_no")))
+
+        def _item_fmt(t):
+            return f"{t[0]} / {t[1]} / {t[2]}"
+    else:
+        item_label = "Description/Amount"
+
+        def _item_key(r):
+            return (normalize_value(r.get("description")), normalize_value(r.get("amount")))
+
+        def _item_fmt(t):
+            return f"{t[0]} / {t[1]}"
+
+    ext_items = {_item_key(r) for r in rows}
+    ref_items = {_item_key(r) for _, r in reference_rows.iterrows()}
+
+    for key in sorted(ext_items & ref_items):
+        results.append({"欄位": item_label, "擷取結果": _item_fmt(key),
+                         "正確答案": _item_fmt(key), "結果": "✅ 相符"})
+    for key in sorted(ext_items - ref_items):
+        results.append({"欄位": item_label, "擷取結果": _item_fmt(key),
                          "正確答案": "(正確答案沒有)", "結果": "❌ 不相符"})
-    for desc, amt in sorted(ref_items - ext_items):
-        results.append({"欄位": "Description/Amount", "擷取結果": "(未擷取到)",
-                         "正確答案": f"{desc} / {amt}", "結果": "❌ 不相符"})
+    for key in sorted(ref_items - ext_items):
+        results.append({"欄位": item_label, "擷取結果": "(未擷取到)",
+                         "正確答案": _item_fmt(key), "結果": "❌ 不相符"})
 
     return results
 
