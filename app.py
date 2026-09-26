@@ -12,8 +12,10 @@ app.py
 100% 的話，就用這 20 次裡分數最高的一次，並產出核對報告方便人工複查。
 
 按鈕：
-  🔁 重新索引：強制重新跑一次整個擷取＋比對流程 (不必重新上傳檔案)
+  🗑️ 清除索引：清空目前的比對結果與快取，方便下一次重新搜尋/上傳
   ⬇️ 下載核對報告：把正確率總覽 + 逐欄比對明細 (紅綠燈) 匯出成 Excel
+
+結果呈現順序：① 轉檔正確率 → ② 轉檔結果預覽 → ③ 逐欄比對明細
 
 用法：
     pip install streamlit pdfplumber openpyxl pandas
@@ -106,15 +108,20 @@ if not uploaded_pdfs:
     st.info("請先上傳至少一份 PDF 帳單。")
     st.stop()
 
-reindex_clicked = st.button(
-    "🔁 重新索引 (強制重新跑一次擷取＋比對，不用重新上傳檔案)",
-    help="更新過 suppliers.py 的擷取規則、或單純想再重試一次時可以按這個按鈕。",
+clear_index_clicked = st.button(
+    "🗑️ 清除索引 (清空目前的比對結果與快取，方便下一次重新搜尋/上傳)",
+    help="更新過 suppliers.py 的擷取規則、換了一批檔案、或單純想清空重來時可以按這個按鈕。",
 )
+if clear_index_clicked:
+    st.session_state.pop("result_bundle", None)
+    st.session_state.pop("last_signature", None)
+    st.rerun()
 
 # ---------------------------------------------------------------------------
 # 用檔案內容算出簽章，判斷「這批檔案是不是已經處理過」；簽章不同(新上傳
-# 檔案或換了正確答案 Excel) 或按下「重新索引」按鈕時，才重新整個跑一次
-# 擷取流程，避免 Streamlit 每次互動 (例如編輯表格) 都重新解析一次 PDF。
+# 檔案或換了正確答案 Excel) 時，才重新整個跑一次擷取流程，避免 Streamlit
+# 每次互動 (例如編輯表格) 都重新解析一次 PDF。按「清除索引」後快取會被
+# 清空，下一次執行時一定會重新跑一次。
 # ---------------------------------------------------------------------------
 
 def _files_signature(files):
@@ -126,8 +133,7 @@ current_signature = (
     hashlib.md5(reference_excel.getvalue()).hexdigest() if reference_excel else None,
 )
 need_recompute = (
-    reindex_clicked
-    or st.session_state.get("last_signature") != current_signature
+    st.session_state.get("last_signature") != current_signature
     or "result_bundle" not in st.session_state
 )
 
@@ -233,40 +239,9 @@ if not all_export_rows:
     st.stop()
 
 # ---------------------------------------------------------------------------
-# 轉檔結果預覽
+# ① 轉檔正確率 (%)
 # ---------------------------------------------------------------------------
 
-preview_records = []
-for row in all_export_rows:
-    rec = {"供應商": row.get("__supplier_label", NA)}
-    for c in FIELD_CODES:
-        rec[DISPLAY_HEADERS[c].split("\n")[0]] = row.get(c, NA)
-    preview_records.append(rec)
-preview_df = pd.DataFrame(preview_records)
-
-st.subheader("✏️ 轉檔結果預覽（可直接在表格中修正錯誤欄位；抓不到的欄位顯示 N/A）")
-edited_df = st.data_editor(preview_df, num_rows="dynamic", use_container_width=True)
-
-display_to_code = {DISPLAY_HEADERS[c].split("\n")[0]: c for c in FIELD_CODES}
-export_rows = []
-for _, r in edited_df.iterrows():
-    row = {display_to_code[col]: r[col] for col in display_to_code}
-    row["__supplier_label"] = r["供應商"]
-    export_rows.append(row)
-
-excel_bytes = build_excel(export_rows)
-st.download_button(
-    "⬇️ 下載 Excel (彙整所有供應商的轉檔結果)",
-    data=excel_bytes,
-    file_name=f"帳單轉檔結果_{datetime.date.today().isoformat()}.xlsx",
-    mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-)
-
-# ---------------------------------------------------------------------------
-# 自動顯示正確率 (%)
-# ---------------------------------------------------------------------------
-
-st.divider()
 st.subheader(f"📊 轉檔{score_label}")
 
 if not has_reference:
@@ -302,6 +277,44 @@ with st.expander(
         st.write(f"**{log['檔案']}** (供應商: {log['供應商']})")
         st.dataframe(pd.DataFrame(log["嘗試紀錄"]), use_container_width=True)
 
+st.divider()
+
+# ---------------------------------------------------------------------------
+# ② 轉檔結果預覽
+# ---------------------------------------------------------------------------
+
+preview_records = []
+for row in all_export_rows:
+    rec = {"供應商": row.get("__supplier_label", NA)}
+    for c in FIELD_CODES:
+        rec[DISPLAY_HEADERS[c].split("\n")[0]] = row.get(c, NA)
+    preview_records.append(rec)
+preview_df = pd.DataFrame(preview_records)
+
+st.subheader("✏️ 轉檔結果預覽（可直接在表格中修正錯誤欄位；抓不到的欄位顯示 N/A）")
+edited_df = st.data_editor(preview_df, num_rows="dynamic", use_container_width=True)
+
+display_to_code = {DISPLAY_HEADERS[c].split("\n")[0]: c for c in FIELD_CODES}
+export_rows = []
+for _, r in edited_df.iterrows():
+    row = {display_to_code[col]: r[col] for col in display_to_code}
+    row["__supplier_label"] = r["供應商"]
+    export_rows.append(row)
+
+excel_bytes = build_excel(export_rows)
+st.download_button(
+    "⬇️ 下載 Excel (彙整所有供應商的轉檔結果)",
+    data=excel_bytes,
+    file_name=f"帳單轉檔結果_{datetime.date.today().isoformat()}.xlsx",
+    mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+)
+
+st.divider()
+
+# ---------------------------------------------------------------------------
+# ③ 逐欄比對明細
+# ---------------------------------------------------------------------------
+
 if has_reference and compare_rows_all:
     st.subheader("📋 逐欄比對明細（🟢相符 / 🔴不相符）")
     cmp_df = pd.DataFrame(compare_rows_all)
@@ -310,10 +323,14 @@ if has_reference and compare_rows_all:
         color = "background-color:#C6EFCE" if row["結果"].startswith("✅") else "background-color:#FFC7CE"
         return [color] * len(row)
 
+    # 注意：st.dataframe 的 height 參數在部分 Streamlit 版本中，傳入 None
+    # 或不合法的數值 (例如條件式算出負數/0) 會直接拋出
+    # StreamlitInvalidHeightError，且錯誤訊息會被 Streamlit Cloud 隱藏成
+    # 一句 "original error message is redacted"。這裡改成不指定 height，
+    # 讓 Streamlit 自行依資料筆數決定高度，避免整支 App 崩潰。
     st.dataframe(
         cmp_df.style.apply(_highlight, axis=1),
         use_container_width=True,
-        height=400 if not all_reached_100 else None,
     )
 
     report_bytes = build_verification_report_excel(score_rows, compare_rows_all)
