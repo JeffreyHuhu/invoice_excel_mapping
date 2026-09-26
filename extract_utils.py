@@ -421,6 +421,21 @@ def compare_multi_invoice_rows(rows: List[Dict], reference_df: Optional[pd.DataF
     reference_df (完整的正確答案表格，不是預先篩過某一張發票的子集) 找出
     同一個 invoice_no 的正確答案列，分別呼叫 compare_rows() 後把所有結果
     串起來，這樣每張發票的抬頭欄位都會各自比對一次。
+
+    ⚠️ 重要防呆 (2026-09 修正，適用「所有」multi_page 供應商，包含未來新增
+    的供應商，不用每加一家就重寫一次)：
+    如果某張發票的 invoice_no 在 reference_df 裡完全找不到對應的列 (最常見
+    情境：使用者一次上傳好幾家供應商的 PDF，但『正確答案 Excel』只包含其中
+    一部分供應商的資料，或是漏放了某張發票)，舊版做法是這張發票直接被
+    compare_rows() 回傳空 list、整個跳過不計入比對結果。這樣會造成一個很
+    隱密的假象：compute_accuracy() 看到「這份 PDF 完全沒有可比對的欄位」時
+    會依照『正確答案全是 N/A』的防禦邏輯回傳 1.0 (100%)，介面上看起來像是
+    滿分過關，但「逐欄比對明細」卻完全沒有這張發票的任何一列——使用者只會
+    看到正確率 100% 卻找不到比對明細，很容易誤以為是程式漏寫了這家供應商
+    的比對邏輯 (但其實只是正確答案 Excel 裡沒有這張發票的資料)。
+    這裡改成：找不到對應正確答案時，明確產生一筆「❌ 不相符」的提示列，
+    這樣 (1) compute_accuracy() 會正確反映『沒有比對到』不是『滿分』，
+    (2) 「逐欄比對明細」一定會顯示這張發票、並清楚寫出原因，不會整張消失。
     """
     if not rows or reference_df is None or reference_df.empty or "invoice_no" not in reference_df.columns:
         return []
@@ -429,6 +444,14 @@ def compare_multi_invoice_rows(rows: List[Dict], reference_df: Optional[pd.DataF
     ref_inv_norm = reference_df["invoice_no"].map(normalize_value)
     for inv_no, group_rows in groups.items():
         ref_subset = reference_df[ref_inv_norm == inv_no]
+        if ref_subset.empty:
+            results.append({
+                "欄位": "⚠️ Invoice No",
+                "擷取結果": group_rows[0].get("invoice_no", NA) if group_rows else NA,
+                "正確答案": "(正確答案 Excel 裡找不到這個發票號碼，請確認有沒有漏放這張發票的資料)",
+                "結果": "❌ 不相符",
+            })
+            continue
         results.extend(compare_rows(group_rows, ref_subset))
     return results
 
