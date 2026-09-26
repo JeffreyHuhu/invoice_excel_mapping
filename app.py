@@ -18,8 +18,10 @@ learned_configs.json，下次同一家供應商的帳單進來就優先套用這
 learned_configs.json 也提交回 GitHub)。
 
 按鈕：
+  ▶️ 開始執行比對：上傳檔案後不會自動跑，一定要按這個按鈕才會擷取＋比對
+                    並顯示結果 (換了檔案但還沒按這個按鈕時，畫面上會提醒)
   🔄 重新查詢：清空目前的比對結果、快取，並清除已上傳的檔案，方便下一次重新查詢
-  ⬇️ 下載核對報告：把正確率總覽 + 逐欄比對明細 (紅綠燈) 匯出成 Excel
+  ⬇️ 下載核對報告：把正確率總覽 + 逐欄比對明細 (紅綠燈/灰) 匯出成 Excel
 
 結果呈現順序：① 轉檔正確率(大字級顯示) → ② 轉檔結果預覽 → ③ 逐欄比對明細
 
@@ -153,10 +155,9 @@ if not uploaded_pdfs:
     st.stop()
 
 # ---------------------------------------------------------------------------
-# 用檔案內容算出簽章，判斷「這批檔案是不是已經處理過」；簽章不同(新上傳
-# 檔案或換了正確答案 Excel) 時，才重新整個跑一次擷取流程，避免 Streamlit
-# 每次互動 (例如編輯表格) 都重新解析一次 PDF。按「清除索引」後快取會被
-# 清空，下一次執行時一定會重新跑一次。
+# 用檔案內容算出簽章，判斷「這批檔案是不是已經處理過」，用來提醒使用者
+# 檔案換了但還沒重新執行 (擷取/比對本身一律等「執行比對」按鈕按下才會跑，
+# 不會因為換檔案就自動觸發，符合『上傳完要按按鈕才會顯示結果』的需求)。
 # ---------------------------------------------------------------------------
 
 def _files_signature(files):
@@ -167,12 +168,16 @@ current_signature = (
     _files_signature(uploaded_pdfs),
     hashlib.md5(reference_excel.getvalue()).hexdigest() if reference_excel else None,
 )
-need_recompute = (
-    st.session_state.get("last_signature") != current_signature
-    or "result_bundle" not in st.session_state
+
+st.write("")
+run_clicked = st.button(
+    "▶️ 開始執行比對 (擷取 PDF 並跟正確答案 Excel 比對)",
+    type="primary",
+    use_container_width=True,
+    help="上傳完 PDF (與選填的正確答案 Excel) 後，按這個按鈕才會開始擷取與比對，比對結果才會顯示在下方。",
 )
 
-if need_recompute:
+if run_clicked:
     reference_df = None
     if reference_excel is not None:
         try:
@@ -254,6 +259,17 @@ if need_recompute:
         "unknown_files": unknown_files,
     }
     st.session_state["last_signature"] = current_signature
+
+if "result_bundle" not in st.session_state:
+    # 還沒按過「執行比對」：不顯示任何轉檔/比對結果，只顯示提示。
+    st.info("⬆️ 上傳檔案後，請按上方「▶️ 開始執行比對」按鈕，比對結果才會顯示在這裡。")
+    st.stop()
+
+if st.session_state.get("last_signature") != current_signature:
+    st.warning(
+        "⚠️ 目前上傳的檔案跟上次按「執行比對」時不一樣了，以下仍是上一次的結果，"
+        "請重新按上方「▶️ 開始執行比對」以取得最新結果。"
+    )
 
 bundle = st.session_state["result_bundle"]
 has_reference = bundle["has_reference"]

@@ -295,12 +295,144 @@ def parse_kuehne_nagel(text: str) -> Dict:
 
 
 # ===========================================================================
+# 供應商 3：INDO PROSTIME EXPRESS (空運帳單 AIRFREIGHT INVOICE)
+# ===========================================================================
+#
+# 版面特徵：跟 DWIHARTA/KUEHNE NAGEL 一樣是左右並排欄位，但這份帳單並排欄位
+# 之間只用「一個空白」分隔 (不是兩個以上)，例如：
+#   "MAWB : 160-1655 0811 FREIGHT : COLLECT"
+#   "HAWB : PT20975640 QUANTITY : 1.00 PKGS"
+# 所以「遇到連續兩個以上空白就停止」這招在這裡沒用，改成完全依賴「遇到下
+# 一個已知欄位關鍵字就停止」(不要求前面有幾個空白)。另外「Number :」那一列
+# 因為版面關係跟收件人地址欄混在一起 (例如
+# "HARDASES ABADI INDONESIA,.PT Number : 101995")，所以 invoice_no/
+# invoice_date 直接用「只抓數字/日期格式」的簡單寫法，不用停止清單。
+#
+# 這家帳單沒有「開船日」欄位，但 FLIGHT 欄位尾碼其實藏著日期 (例如
+# 'CX 777/01092026' 代表 01.09.2026)，所以 onboard_date 是從已經抓到的
+# FLIGHT(vessel) 值反推出來的，不是直接抓某個「欄位:」的值。
+
+def detect_indoprostime(text: str) -> bool:
+    return "PROSTIME" in text.upper()
+
+
+_INDO_LABEL_WORDS = [
+    r"A/C\s*No\.?", r"A/C\s*name", r"Swift\s*code", r"Bank",
+    r"Number", r"Date", r"Order\s*No\.?", r"Currency\s*/\s*Rate",
+    r"MAWB", r"HAWB", r"QUANTITY", r"SHIPPER", r"GROSS\s*/\s*KG",
+    r"CNEE", r"CHARGE\s*/\s*KG", r"ORIGIN", r"FLIGHT", r"FREIGHT",
+    r"PKGS", r"D\s*E\s*S\s*C\s*R\s*I\s*P\s*T\s*I\s*O\s*N", r"AMOUNT",
+    r"Total", r"Cheque",
+]
+_INDO_NEXT = "(?:" + "|".join(_INDO_LABEL_WORDS) + ")"
+# 注意：這裡不像 DWIHARTA/KN 要求 "\s{2,}"，因為並排欄位只隔一個空白；
+# 只要「後面接著任何空白 + 下一個已知欄位關鍵字」就停止擷取。
+_INDO_STOP = rf"(?=\s+{_INDO_NEXT}\b|\n|$)"
+
+
+def _indo_add_space_after_pt(value: Optional[str]) -> Optional[str]:
+    """'PT.HARDASES ABADI INDONESIA' -> 'PT. HARDASES ABADI INDONESIA'：
+    PDF 版面把 'PT.' 跟公司名稱黏在一起、中間沒有空白，這裡補回一個空白，
+    跟正確答案 Excel 裡的寫法對齊 (正確答案 'PT.' 後面有空白)。
+    """
+    if not value:
+        return value
+    return re.sub(r"^(PT\.)(?=\S)", r"\1 ", value.strip())
+
+
+def _indo_parse_flight_date(vessel_value: Optional[str]) -> Optional[str]:
+    """從 FLIGHT 欄位尾碼反推日期，例如 'CX 777/01092026' -> '01/09/2026'
+    (尾碼 8 碼數字是 DDMMYYYY)。抓不到就回傳 None，讓 expand_to_rows()
+    補 N/A。
+    """
+    if not vessel_value:
+        return None
+    m = re.search(r"(\d{2})(\d{2})(\d{4})\s*$", vessel_value.strip())
+    if not m:
+        return None
+    day, month, year = m.groups()
+    return f"{day}/{month}/{year}"
+
+
+def _indo_clean_amount(text: Optional[str]) -> Optional[int]:
+    """英式數字 '416,729' (逗號千分位) -> 416729。"""
+    if not text:
+        return None
+    text = text.strip().replace(",", "")
+    return int(text) if text.isdigit() else None
+
+
+# 費用明細行，例如：
+#   "FREIGHT CHARGE (USD 23.54) (REIMBURSEMENT) 416,729"
+# 格式：全大寫的費用名稱 + 一個或兩個備註用括號 + 最後的金額。要求描述文字
+# 全大寫 (不能有小寫字母)，是為了避免誤抓到版面上其他也帶括號跟數字的雜訊
+# 行 (例如帳單最上方的 "Phone (021) 6268280")。
+_INDO_CHARGE_LINE_PATTERN = re.compile(
+    r"^(?P<desc>[A-Z][A-Z /]+?)\s*\(.+?\)(?:\s*\(.+?\))?\s+(?P<amount>[\d,]+)\s*$",
+    re.MULTILINE,
+)
+# 備援：少數帳單可能沒有括號備註，只有「全大寫費用名稱 + 金額」，這裡再抓
+# 一次，但要排除 "Total ..." 這種小計行 (不是實際費用明細)。
+_INDO_SIMPLE_CHARGE_LINE_PATTERN = re.compile(
+    r"^(?!Total\b)(?P<desc>[A-Z][A-Z /]+?)\s+(?P<amount>[\d,]+)\s*$",
+    re.MULTILINE,
+)
+
+
+def _indo_extract_charge_items(text: str) -> List[Dict]:
+    items = []
+    for m in _INDO_CHARGE_LINE_PATTERN.finditer(text):
+        items.append({
+            "description": m.group("desc").strip(),
+            "amount": _indo_clean_amount(m.group("amount")),
+        })
+    if not items:
+        for m in _INDO_SIMPLE_CHARGE_LINE_PATTERN.finditer(text):
+            items.append({
+                "description": m.group("desc").strip(),
+                "amount": _indo_clean_amount(m.group("amount")),
+            })
+    return items
+
+
+def parse_indoprostime(text: str) -> Dict:
+    header: Dict[str, Optional[str]] = {}
+
+    header["invoice_no"] = _search(r"Number\s*:\s*(\d+)", text)
+    header["invoice_date"] = _search(r"Date\s*:\s*(\d{1,2}/\d{1,2}/\d{4})", text)
+    header["supplier"] = _search(rf"A/C\s*name\s*:\s*(.+?){_INDO_STOP}", text)
+    header["consignee"] = _indo_add_space_after_pt(
+        _search(rf"\bCNEE\s*:\s*(.+?){_INDO_STOP}", text)
+    )
+    header["order_no"] = _search(rf"Order\s*No\.?\s*:\s*(.+?){_INDO_STOP}", text)
+    header["bl_no"] = _search(rf"\bHAWB\s*:\s*(.+?){_INDO_STOP}", text)
+    header["mbl_no"] = _search(rf"\bMAWB\s*:\s*(.+?){_INDO_STOP}", text)
+    header["port_of_loading"] = _search(rf"\bORIGIN\s*:\s*(.+?){_INDO_STOP}", text)
+    header["vessel"] = _search(rf"\bFLIGHT\s*:\s*(.+?){_INDO_STOP}", text)
+    header["volume"] = _search(rf"GROSS\s*/\s*KG\s*:\s*(.+?){_INDO_STOP}", text)
+    header["onboard_date"] = _indo_parse_flight_date(header.get("vessel"))
+
+    # 這種空運帳單沒有到達日/目的港/貨櫃資訊，留空給 expand_to_rows() 補 N/A
+    header["arrive_date"] = None
+    header["port_of_discharge"] = None
+    header["container_no"] = None
+
+    items = _indo_extract_charge_items(text)
+    if not items:
+        items = [{"description": None, "amount": None}]
+
+    return {"header": header, "items": items}
+
+
+# ===========================================================================
 # 註冊所有供應商
 # ===========================================================================
 # detect_kuehne_nagel() 的關鍵字 "KUEHNE"+"NAGEL" 很具體不會誤判，
-# detect_dwiharta() 同理只認 "DWIHARTA" 字樣，兩者互不衝突，順序不影響結果。
-# 未來新增供應商時，關鍵字盡量挑「該公司獨有、不會出現在其他供應商帳單」
-# 的字串 (公司全名、統編、帳單編號前綴等)。
+# detect_dwiharta() 同理只認 "DWIHARTA" 字樣，detect_indoprostime() 只認
+# "PROSTIME" 字樣，三者互不衝突，順序不影響結果。未來新增供應商時，關鍵字
+# 盡量挑「該公司獨有、不會出現在其他供應商帳單」的字串 (公司全名、統編、
+# 帳單編號前綴等)。
 
 register_supplier("DWIHARTA", "PT. DWIHARTA LOGISTINDO", detect_dwiharta, parse_dwiharta)
 register_supplier("KUEHNE_NAGEL", "KUEHNE NAGEL INDONESIA", detect_kuehne_nagel, parse_kuehne_nagel)
+register_supplier("INDOPROSTIME", "PT. INDO PROSTIME EXPRESS", detect_indoprostime, parse_indoprostime)
