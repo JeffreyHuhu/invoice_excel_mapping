@@ -290,6 +290,16 @@ def normalize_value(value) -> str:
     return text.rstrip(",")
 
 
+def _is_na(value) -> bool:
+    """判斷『正確答案』這一格是不是 N/A (代表這欄位對這張帳單不適用)。
+    涵蓋 None、空字串、以及不分大小寫/前後空白的 'N/A' 字樣。
+    """
+    if value is None:
+        return True
+    text = str(value).strip()
+    return text == "" or text.upper() == "N/A"
+
+
 def compare_rows(rows: List[Dict], reference_rows: pd.DataFrame) -> List[Dict]:
     """比對「一張帳單」擷取出來的 rows (可能有多筆費用) 與正確答案
     (reference_rows：同一張發票在正確答案 Excel 裡的所有列)。
@@ -307,12 +317,19 @@ def compare_rows(rows: List[Dict], reference_rows: pd.DataFrame) -> List[Dict]:
     for code in HEADER_FIELD_CODES:
         ext_val = first_row.get(code, NA)
         ref_val = ref_first.get(code, NA)
-        match = normalize_value(ext_val) == normalize_value(ref_val)
+        if _is_na(ref_val):
+            # 正確答案本來就是 N/A：代表這個欄位對這張帳單不適用 (例如沒有
+            # 提單的帳單，MBL NO./Container no. 本來就沒有值)，不管擷取結果
+            # 抓到什麼都不該算錯，也不計入正確率的分母 (使用者需求)。
+            status = "⚪ 略過（正確答案為 N/A）"
+        else:
+            match = normalize_value(ext_val) == normalize_value(ref_val)
+            status = "✅ 相符" if match else "❌ 不相符"
         results.append({
             "欄位": DISPLAY_HEADERS[code].split("\n")[0],
             "擷取結果": ext_val,
             "正確答案": ref_val,
-            "結果": "✅ 相符" if match else "❌ 不相符",
+            "結果": status,
         })
 
     ext_items = {(normalize_value(r.get("description")), normalize_value(r.get("amount")))
@@ -334,10 +351,17 @@ def compare_rows(rows: List[Dict], reference_rows: pd.DataFrame) -> List[Dict]:
 
 
 def compute_accuracy(results: List[Dict]) -> float:
-    if not results:
-        return 0.0
-    matched = sum(1 for r in results if r["結果"].startswith("✅"))
-    return matched / len(results)
+    """正確率 = 相符欄位數 / 有意義的比對欄位數。
+
+    正確答案是 N/A 的欄位 (結果以 "⚪" 開頭) 完全不計入分母，符合「正確答案
+    是 N/A 時，不管擷取結果如何都不影響正確率」的需求；如果一張帳單所有
+    欄位的正確答案都是 N/A (理論上不會發生，但防禦性處理)，視為 100%。
+    """
+    counted = [r for r in results if not r["結果"].startswith("⚪")]
+    if not counted:
+        return 1.0
+    matched = sum(1 for r in counted if r["結果"].startswith("✅"))
+    return matched / len(counted)
 
 
 def quality_score(rows: List[Dict]) -> float:
@@ -535,13 +559,15 @@ def build_verification_report_excel(score_rows: List[Dict], compare_rows_all: Li
     分頁1「正確率總覽」：每份 PDF 一列，顯示辨識到的供應商、最終正確率、
     用了幾次嘗試 (最多 20 次)、是否達到 100%。
     分頁2「逐欄比對明細」：每個欄位一列，相符/不相符用綠/紅底色標示，
-    方便直接找出哪些欄位還對不上，人工只需要複查標紅的部分。
+    正確答案是 N/A (不計入正確率) 的欄位用灰底標示，方便直接找出哪些欄位
+    還對不上，人工只需要複查標紅的部分。
     """
     wb = Workbook()
     bold = Font(bold=True)
     header_fill = PatternFill("solid", fgColor="DDEBF7")
     green = PatternFill("solid", fgColor="C6EFCE")
     red = PatternFill("solid", fgColor="FFC7CE")
+    grey = PatternFill("solid", fgColor="E7E6E6")  # 正確答案為 N/A、不計入正確率的欄位
 
     ws1 = wb.active
     ws1.title = "正確率總覽"
@@ -563,7 +589,13 @@ def build_verification_report_excel(score_rows: List[Dict], compare_rows_all: Li
         cell.fill = header_fill
     for r in compare_rows_all:
         ws2.append([r.get(c, NA) for c in cols2])
-        fill = green if str(r.get("結果", "")).startswith("✅") else red
+        status = str(r.get("結果", ""))
+        if status.startswith("✅"):
+            fill = green
+        elif status.startswith("⚪"):
+            fill = grey
+        else:
+            fill = red
         ws2.cell(row=ws2.max_row, column=6).fill = fill
     for col_letter, width in zip("ABCDEF", (24, 22, 18, 30, 30, 10)):
         ws2.column_dimensions[col_letter].width = width
