@@ -973,6 +973,123 @@ def parse_yje_or_tata(text: str) -> Dict:
     return parse_tata(text)
 
 
+# ===========================================================================
+# 供應商 7：PT. TRANS DAYA PRIMA (⚠️ multi_page：一份 PDF 裡有好幾張獨立發票)
+# ===========================================================================
+#
+# 版面特徵：跟 YJE/TATA/HYPER MEGA 一樣，一份 PDF 裡可能塞好幾張各自獨立的
+# "Sales Invoice"，一頁一張 (各自不同的發票號碼/日期/費用明細)，所以一樣要
+# multi_page=True 逐頁辨識/擷取。
+#
+#   - 抬頭三欄位 (Invoice Date、Invoice Number、收件人 Consignee) 版面固定
+#     在同一個位置：
+#       "Invoice Date Invoice Number
+#        26 Jan 2026 0183-TDP-GSI2-I-2026
+#        PT. GLOSTAR INDONESIA
+#        PT. GLOSTAR INDONESIA - JL. Raya Sukabumi ..."
+#     日期/發票號碼在同一行，收件人在緊接著的下一行 (下下一行才是重複一次
+#     的收件人+地址，不用管)。
+#   - 費用明細只有一筆，但表格欄寬不夠，「DO No.」欄位的值會被自動換行拆成
+#     兩截 (例如 "00055/TDP/SJ-" 留在費用那一行，"01/2026" 被擠到下一行)，
+#     這裡直接用「前綴 + 換行後的後綴」兩段一起抓、拼回完整的 DO No. 當
+#     Order No. 欄位值。
+#   - 費用名稱 (Description) 偶爾帶有貨櫃呎吋的引號 (例如
+#     'LCL Lokal Serang - GSI-2 40"' 代表 40 呎櫃)，正確答案裡這個引號被
+#     拿掉了 (只留 'LCL Lokal Serang - GSI-2 40')，擷取後要清掉引號字元。
+#   - 金額是印尼式千分位 (句點分隔、無小數)，例如 '2.975.000' -> 2975000。
+#   - 沒有到達日/開船日/提單/主提單/港口/材積/船名/貨櫃資訊，缺漏後續會
+#     自動補 N/A。
+
+def detect_trans(text: str) -> bool:
+    return "TRANS DAYA PRIMA" in text.upper()
+
+
+# 費用明細行 (含跨行的 DO No. 後綴)，例如：
+#   "LCL-FUSO Cikarang-GSI-2 00055/TDP/SJ- 22 Jan 2026 B 9581 JXS 1 2.975.000 2.975.000
+#    01/2026"
+# 格式：費用名稱 + DO No.前綴 + DO Date + 部門代碼(單一大寫字母+數字+字母) +
+# 數量 + 單價 + 總價 + 換行 + DO No.後綴。
+_TRANS_ITEM_PATTERN = re.compile(
+    r"^(?P<desc>.+?)\s+(?P<do_prefix>\S+)\s+(?P<do_date>\d{1,2}\s+[A-Za-z]{3}\s+\d{4})\s+"
+    r"(?P<dept>[A-Z]\s+\d+\s+[A-Z]+)\s+(?P<qty>\d+)\s+(?P<unit_price>[\d.,]+)\s+"
+    r"(?P<total>[\d.,]+)\s*\n(?P<do_suffix>\S+)",
+    re.MULTILINE,
+)
+
+
+def _trans_parse_date(text: Optional[str]) -> Optional[str]:
+    """'26 Jan 2026' -> '26.01.2026'，跟其他供應商一樣統一成 'DD.MM.YYYY'
+    (正確答案 Excel 這欄是 Excel 日期格式)。沿用 MAERSK 已定義的
+    _EN_MONTHS_ABBR 英文月份縮寫對照表，不用重複定義一份。
+    """
+    if not text:
+        return text
+    m = re.match(r"(\d{1,2})\s+([A-Za-z]{3})\s+(\d{4})", text.strip())
+    if not m:
+        return text
+    day, month_abbr, year = m.groups()
+    month = _EN_MONTHS_ABBR.get(month_abbr.lower())
+    if not month:
+        return text
+    return f"{int(day):02d}.{month:02d}.{year}"
+
+
+def _trans_clean_amount(text: Optional[str]) -> Optional[int]:
+    """印尼式數字 '2.975.000' (句點千分位，無小數) -> 2975000。"""
+    if not text:
+        return None
+    text = text.strip().replace(".", "").replace(",", "")
+    return int(text) if text.isdigit() else None
+
+
+def _trans_clean_desc(text: Optional[str]) -> Optional[str]:
+    """去掉貨櫃呎吋標示裡的引號字元 (例如 '... 40"' -> '... 40')，正確答案
+    是不帶引號的寫法。
+    """
+    if not text:
+        return text
+    return text.replace('"', "").strip()
+
+
+def parse_trans(text: str) -> Dict:
+    """注意：這是 multi_page 供應商，text 是『一頁』的文字。"""
+    header: Dict[str, Optional[str]] = {}
+
+    m = re.search(
+        r"Invoice\s*Number\s*\n\s*(\d{1,2}\s+[A-Za-z]{3}\s+\d{4})\s+(\S+)\s*\n(.+?)\n",
+        text,
+    )
+    if m:
+        header["invoice_date"] = _trans_parse_date(m.group(1))
+        header["invoice_no"] = m.group(2).strip()
+        header["consignee"] = m.group(3).strip()
+
+    header["supplier"] = _search(r"^(PT\.\s*TRANS\s*DAYA\s*PRIMA)", text)
+
+    # 這種帳單沒有到達日/開船日/提單/主提單/港口/材積/船名/貨櫃資訊，留空
+    # 給 expand_to_rows() 補 N/A
+    for code in ("arrive_date", "onboard_date", "bl_no", "mbl_no",
+                 "port_of_loading", "port_of_discharge", "volume",
+                 "vessel", "container_no"):
+        header[code] = None
+
+    items: List[Dict] = []
+    item_m = _TRANS_ITEM_PATTERN.search(text)
+    if item_m:
+        header["order_no"] = (item_m.group("do_prefix") + item_m.group("do_suffix")).strip()
+        items.append({
+            "description": _trans_clean_desc(item_m.group("desc")),
+            "amount": _trans_clean_amount(item_m.group("total")),
+        })
+    else:
+        header["order_no"] = None
+
+    if not items:
+        items = [{"description": None, "amount": None}]
+
+    return {"header": header, "items": items}
+
+
 register_supplier("DWIHARTA", "PT. DWIHARTA LOGISTINDO", detect_dwiharta, parse_dwiharta)
 register_supplier("KUEHNE_NAGEL", "KUEHNE NAGEL INDONESIA", detect_kuehne_nagel, parse_kuehne_nagel)
 register_supplier("INDOPROSTIME", "PT. INDO PROSTIME EXPRESS", detect_indoprostime, parse_indoprostime)
@@ -984,4 +1101,8 @@ register_supplier(
 register_supplier(
     "YJE_TATA", "YJE (ShenZhen) International Logistics / PT TATA HARMONI SARANATAMA",
     detect_yje_or_tata, parse_yje_or_tata, multi_page=True,
+)
+register_supplier(
+    "TRANS_DAYA_PRIMA", "PT. TRANS DAYA PRIMA", detect_trans, parse_trans,
+    multi_page=True,
 )
