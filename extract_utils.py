@@ -25,6 +25,8 @@ extract_utils.py
 
 import re
 import io
+import os
+import json
 import datetime
 from typing import Callable, Dict, List, Optional, Tuple
 
@@ -99,7 +101,7 @@ def extract_text_from_pdf(pdf_path: str, **pdfplumber_kwargs) -> str:
     return "\n".join(parts)
 
 
-def _generate_extraction_configs(max_attempts: int = 20) -> List[Dict]:
+def _generate_extraction_configs(max_attempts: int = 100) -> List[Dict]:
     """產生一組(最多 max_attempts 個)不同的 pdfplumber 擷取參數組合，
     給「重新嘗試擷取」的迴圈依序測試。第一組永遠是預設值 (最常見、最快)，
     之後依序嘗試不同的 x_tolerance / y_tolerance 組合 (影響同一列文字判斷
@@ -107,9 +109,10 @@ def _generate_extraction_configs(max_attempts: int = 20) -> List[Dict]:
     最後補上 layout=True (盡量保留原始版面座標間距) 這個較特殊的模式。
     """
     configs: List[Dict] = [{}]  # 第1次一定先試預設值
-    tolerances = [1, 1.5, 2, 2.5, 3, 4, 5, 6, 8, 10]
-    for y_tol in tolerances:
-        for x_tol in (1, 2, 3):
+    x_tolerances = [1, 1.5, 2, 2.5, 3, 3.5, 4, 4.5, 5]
+    y_tolerances = [1, 1.5, 2, 2.5, 3, 3.5, 4, 4.5, 5, 5.5, 6, 7, 8, 9, 10, 12, 15]
+    for y_tol in y_tolerances:
+        for x_tol in x_tolerances:
             if len(configs) >= max_attempts - 1:  # 留最後一格給 layout=True
                 break
             cfg = {"x_tolerance": x_tol, "y_tolerance": y_tol}
@@ -123,8 +126,49 @@ def _generate_extraction_configs(max_attempts: int = 20) -> List[Dict]:
 
 # 預設的「最多嘗試次數」：正確率沒有達到 100% 時，最多重新嘗試這麼多組
 # 不同的擷取參數，每組都算一次正確率，一達到 100% 就提早停止。
-MAX_EXTRACTION_ATTEMPTS = 20
+MAX_EXTRACTION_ATTEMPTS = 100
 EXTRACTION_CONFIGS: List[Dict] = _generate_extraction_configs(MAX_EXTRACTION_ATTEMPTS)
+
+
+# ---------------------------------------------------------------------------
+# 2.5 「學習記憶」：記住每家供應商目前已知能得到最高分的擷取設定
+# ---------------------------------------------------------------------------
+#
+# 迴圈每次找到「比目前記錄更高分」的設定時，就寫回這個 JSON 檔，下次同一家
+# 供應商的帳單進來時，會優先套用這組已知最佳設定當作第 1 次嘗試 (而不是
+# 每次都要從頭試 100 組)，等於系統會隨著使用次數愈多、愈快找到高分設定。
+#
+# 注意（重要限制）：這只是「同一次部署期間」的記憶。Streamlit Cloud 每次
+# reboot / 重新部署都會用 GitHub 上的原始碼重新建立環境，這個檔案若沒有
+# 一併提交回 GitHub，記憶就會被重置。若要讓記憶永久保留，需要把
+# learned_configs.json 這個檔案也上傳/提交到 repo 裡。
+LEARNED_CONFIGS_PATH = os.path.join(
+    os.path.dirname(os.path.abspath(__file__)), "learned_configs.json"
+)
+
+
+def _load_learned_configs() -> Dict[str, Dict]:
+    try:
+        with open(LEARNED_CONFIGS_PATH, "r", encoding="utf-8") as f:
+            return json.load(f)
+    except Exception:
+        return {}
+
+
+def _save_learned_config(supplier_key: Optional[str], config: Optional[Dict], score: float) -> None:
+    """只有『這次分數比之前記錄的更高』時才更新，避免學到比較差的設定。"""
+    if not supplier_key:
+        return
+    data = _load_learned_configs()
+    prev = data.get(supplier_key)
+    if prev is not None and score <= prev.get("score", -1):
+        return
+    data[supplier_key] = {"config": config or {}, "score": score}
+    try:
+        with open(LEARNED_CONFIGS_PATH, "w", encoding="utf-8") as f:
+            json.dump(data, f, ensure_ascii=False, indent=2)
+    except Exception:
+        pass  # 寫入失敗 (例如唯讀環境) 不影響主流程，只是這次沒學到
 
 
 # ---------------------------------------------------------------------------
@@ -323,22 +367,38 @@ def find_best_extraction(
     max_attempts: int = MAX_EXTRACTION_ATTEMPTS,
 ):
     """對同一份 PDF 重複嘗試擷取，直到正確率達到 100% 或用完 max_attempts
-    次嘗試為止 (預設最多 20 次，每次用不同的 pdfplumber 擷取參數)。
+    次嘗試為止 (預設最多 100 次，每次用不同的 pdfplumber 擷取參數)。
     每嘗試一次都重新評分，一旦達到 100% 就立刻停止 (不用浪費剩餘次數)；
-    如果 20 次都試完仍未達到 100%，回傳「這 20 次裡分數最高」的那次結果，
+    如果 100 次都試完仍未達到 100%，回傳「這 100 次裡分數最高」的那次結果，
     呼叫端可以據此產出核對報告 (書面記錄哪些欄位仍然對不上)。
 
+    「學習記憶」：如果這家供應商之前已經學到某組設定分數最高，這裡會把
+    那組設定排到第 1 次嘗試 (參見 _load_learned_configs())，通常能讓正確
+    答案在第 1 次就命中，不用每次都從頭試。跑完之後，只要這次找到的最佳
+    分數比之前記錄的更高，就會呼叫 _save_learned_config() 更新記憶，讓
+    系統隨著使用次數增加、愈來愈快抓到高分設定。
+
     回傳一個 dict，包含：
-      supplier_key   辨識到的供應商 key (或 None)
-      rows           最佳一次的展開列 (List[Dict])
-      score          最佳分數 0~1
-      config         最佳一次採用的擷取參數
-      results        該次的逐欄比對明細 (沒有正確答案時為 None)
-      attempts       全部嘗試紀錄 (每筆含第幾次、用的設定、當次分數)
-      attempts_used  實際用了幾次嘗試 (達到100%會提早停止，< max_attempts)
-      reached_100    是否有達到 100% 正確率 (沒有正確答案可比對時恆為 False)
+      supplier_key    辨識到的供應商 key (或 None)
+      rows            最佳一次的展開列 (List[Dict])
+      score           最佳分數 0~1
+      config          最佳一次採用的擷取參數
+      results         該次的逐欄比對明細 (沒有正確答案時為 None)
+      attempts        全部嘗試紀錄 (每筆含第幾次、用的設定、當次分數)
+      attempts_used   實際用了幾次嘗試 (達到100%會提早停止，< max_attempts)
+      reached_100     是否有達到 100% 正確率 (沒有正確答案可比對時恆為 False)
+      learned_applied 這次是否有套用「之前學到的最佳設定」當第 1 次嘗試
     """
-    configs = (configs or EXTRACTION_CONFIGS)[:max_attempts]
+    configs = list(configs or EXTRACTION_CONFIGS)[:max_attempts]
+
+    learned_entry = _load_learned_configs().get(supplier_key) if supplier_key else None
+    learned_config = learned_entry["config"] if learned_entry else None
+    if learned_config is not None:
+        # 把「學習到的最佳設定」排到第一個嘗試，其餘設定照原順序排在後面
+        # (去除重複，避免同一組設定被試兩次)。
+        configs = [learned_config] + [c for c in configs if c != learned_config]
+    configs = configs[:max_attempts]
+
     attempts: List[Dict] = []
     best = None
     detected_key = supplier_key
@@ -363,7 +423,12 @@ def find_best_extraction(
             results = None
             score = quality_score(rows)
 
-        attempts.append({"第幾次嘗試": i, "設定": cfg or "預設", "分數(%)": round(score * 100, 1)})
+        is_learned = (i == 1 and learned_config is not None and cfg == learned_config)
+        attempts.append({
+            "第幾次嘗試": i,
+            "設定": (str(cfg) if cfg else "預設") + ("（沿用學習記憶）" if is_learned else ""),
+            "分數(%)": round(score * 100, 1),
+        })
 
         if best is None or score > best["score"]:
             best = {"rows": rows, "score": score, "config": cfg, "results": results}
@@ -371,6 +436,8 @@ def find_best_extraction(
         if best["score"] >= 1.0:
             reached_100 = True
             break  # 已經 100% 正確率，不用再嘗試剩餘次數
+
+    _save_learned_config(detected_key, best["config"], best["score"])
 
     return {
         "supplier_key": detected_key,
@@ -381,6 +448,7 @@ def find_best_extraction(
         "attempts": attempts,
         "attempts_used": len(attempts),
         "reached_100": reached_100,
+        "learned_applied": learned_config is not None,
     }
 
 
