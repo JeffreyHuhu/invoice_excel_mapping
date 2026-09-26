@@ -2,15 +2,17 @@
 """
 app.py
 ======
-供應商帳單自動化系統 (全新重建版，鎖定 KUEHNE NAGEL 格式)
+多供應商帳單自動化系統 (Streamlit 網頁)
 
-流程：
-  1. 上傳 PDF 帳單 (Faktur Pajak + KN Sales Invoice 混合檔)
-  2. (選填) 上傳正確答案 Excel (跟 KUEHNE_NAGEL_資料模板.xlsx 同樣欄位順序)
-  3. 系統對每份 PDF 用多組擷取參數「重複執行」，每次都跟正確答案逐欄比對，
-     一旦正確率達到 100% 就提早停止，否則回傳嘗試過最高的正確率
-  4. 抓不到的欄位一律顯示 'N/A'
-  5. 正確率(%) 直接顯示在網頁上，並用紅綠燈標示每個欄位是否相符
+流程：辨識哪間供應商帳單 → 選取對應的帳單辨識系統 → 擷取資料 → 跟正確答案
+       Excel 逐欄比對算出正確率 (重複執行不同擷取設定，直到 100% 或試完為止)
+
+用法：
+    pip install streamlit pdfplumber openpyxl pandas
+    streamlit run app.py
+
+擴充：要支援第 21 家供應商，去 suppliers.py 加一組 detect_xxx()/parse_xxx()
+並呼叫 register_supplier() 即可，這支 app.py 完全不用改。
 """
 
 import datetime
@@ -20,6 +22,7 @@ import os
 import streamlit as st
 import pandas as pd
 
+import suppliers  # noqa: F401  (只是為了觸發所有供應商的 register_supplier())
 from extract_utils import (
     FIELD_CODES,
     DISPLAY_HEADERS,
@@ -28,19 +31,29 @@ from extract_utils import (
     read_reference_excel,
     build_excel,
     normalize_value,
+    detect_supplier,
+    extract_text_from_pdf,
+    supplier_label,
+    list_registered_suppliers,
 )
 
-st.set_page_config(page_title="供應商帳單自動化系統 (KUEHNE NAGEL)", layout="wide")
-st.title("📄➡️📊 供應商帳單自動化系統")
+st.set_page_config(page_title="多供應商帳單自動化系統", layout="wide")
+st.title("📄➡️📊 多供應商帳單自動化系統")
 st.caption(
-    "上傳 PDF 帳單後，系統會用多組擷取設定『重複執行』並自動跟正確答案 Excel 比對，"
-    "挑出正確率最高的結果 (可達 100% 就提早停止)，抓不到的欄位一律顯示 N/A。"
+    "流程：① 自動辨識帳單屬於哪家供應商 → ② 套用該供應商專屬的擷取規則 → "
+    "③ 跟正確答案 Excel 逐欄比對算出正確率 (重複嘗試多組設定，直到 100% 或試完為止)。"
 )
+
+registered = list_registered_suppliers()
+with st.expander(f"🏷️ 目前系統已支援 {len(registered)} 家供應商的辨識規則"):
+    for s in registered:
+        st.write(f"- **{s['label']}** (代碼: `{s['key']}`)")
+    st.caption("要新增供應商，請在 suppliers.py 增加一組辨識/擷取規則並註冊，不用改這個網頁程式。")
 
 col_pdf, col_ref = st.columns(2)
 with col_pdf:
     uploaded_pdfs = st.file_uploader(
-        "① 上傳 PDF 帳單 (可一次選取多個檔案)",
+        "① 上傳 PDF 帳單 (可一次選取多個檔案、可混合不同供應商)",
         type=["pdf"], accept_multiple_files=True, key="pdf_upload",
     )
 with col_ref:
@@ -67,54 +80,74 @@ if reference_excel is not None:
 has_reference = reference_df is not None
 score_label = "正確率" if has_reference else "資料完整度"
 
-all_rows = []
+all_export_rows = []
 score_rows = []
-compare_rows = []
+compare_rows_all = []
 attempts_log = []
+unknown_files = []
 
-with st.spinner("解析中 (每份 PDF 會重複嘗試多組設定，直到 100% 正確或試完所有設定)..."):
+with st.spinner("解析中 (每份 PDF 先辨識供應商，再重複嘗試多組擷取設定)..."):
     for f in uploaded_pdfs:
         with tempfile.NamedTemporaryFile(suffix=".pdf", delete=False) as tmp:
             tmp.write(f.getvalue())
             tmp_path = tmp.name
         try:
-            reference = None
-            if has_reference:
-                # 先用預設設定快速解析拿 Invoice No，藉此在正確答案 Excel
-                # 裡找出這份 PDF 對應的那一列
-                quick_row = find_best_extraction(tmp_path, reference=None, configs=[{}])[0]
-                inv_no = normalize_value(quick_row.get("invoice_no"))
+            # 第①步：辨識供應商 (用預設參數快速判斷一次)
+            quick_text = extract_text_from_pdf(tmp_path)
+            supplier_key = detect_supplier(quick_text)
+
+            if supplier_key is None:
+                unknown_files.append(f.name)
+
+            # 若有正確答案 Excel，先用預設設定拿 Invoice No，藉此在正確答案
+            # 裡找出這份 PDF 對應的那一列 (可能有好幾家供應商的答案混在同一份Excel)
+            reference_rows = None
+            if has_reference and "invoice_no" in reference_df.columns:
+                from extract_utils import parse_invoice_pdf
+                _, quick_rows, _ = parse_invoice_pdf(tmp_path, supplier_key=supplier_key)
+                inv_no = normalize_value(quick_rows[0].get("invoice_no"))
                 mask = reference_df["invoice_no"].map(normalize_value) == inv_no
                 candidate = reference_df[mask]
                 if not candidate.empty:
-                    reference = candidate.iloc[0].to_dict()
+                    reference_rows = candidate
 
-            best_row, best_score, best_cfg, best_results, attempts = find_best_extraction(
-                tmp_path, reference=reference
+            # 第②③步：套用對應供應商規則擷取，並重複嘗試設定直到最高正確率
+            detected_key, rows, score, cfg, results, attempts = find_best_extraction(
+                tmp_path, supplier_key=supplier_key, reference_rows=reference_rows
             )
 
-            row_with_file = {"來源檔案": f.name, **{DISPLAY_HEADERS[c].split("\n")[0]: best_row[c] for c in FIELD_CODES}}
-            all_rows.append((f.name, best_row))
+            label = supplier_label(detected_key)
+            for row in rows:
+                row["__supplier_label"] = label
+            all_export_rows.extend(rows)
 
             score_rows.append({
                 "來源檔案": f.name,
-                "Invoice No": best_row.get("invoice_no", NA),
-                score_label: f"{best_score * 100:.1f}%",
-                "採用設定": best_cfg or "預設",
-                "比對基準": "正確答案 Excel" if reference is not None else "資料完整度自我檢查",
+                "辨識供應商": label,
+                "Invoice No": rows[0].get("invoice_no", NA),
+                score_label: f"{score * 100:.1f}%",
+                "採用設定": cfg or "預設",
+                "比對基準": "正確答案 Excel" if reference_rows is not None else "資料完整度自我檢查",
             })
-            attempts_log.append({"檔案": f.name, "嘗試紀錄": attempts})
+            attempts_log.append({"檔案": f.name, "供應商": label, "嘗試紀錄": attempts})
 
-            if best_results is not None:
-                for r in best_results:
-                    compare_rows.append({"來源檔案": f.name, **r})
+            if results:
+                for r in results:
+                    compare_rows_all.append({"來源檔案": f.name, "供應商": label, **r})
 
         except Exception as e:  # noqa: BLE001
             st.error(f"❌ {f.name}：解析失敗 ({e})")
         finally:
             os.remove(tmp_path)
 
-if not all_rows:
+if unknown_files:
+    st.warning(
+        "⚠️ 以下檔案無法辨識供應商 (未命中任何已註冊的規則)，欄位皆以 N/A 填入。"
+        "請到 suppliers.py 新增這家供應商的辨識/擷取規則：\n\n"
+        + "\n".join(f"- {name}" for name in unknown_files)
+    )
+
+if not all_export_rows:
     st.stop()
 
 # ---------------------------------------------------------------------------
@@ -122,8 +155,8 @@ if not all_rows:
 # ---------------------------------------------------------------------------
 
 preview_records = []
-for fname, row in all_rows:
-    rec = {"來源檔案": fname}
+for row in all_export_rows:
+    rec = {"供應商": row.get("__supplier_label", NA)}
     for c in FIELD_CODES:
         rec[DISPLAY_HEADERS[c].split("\n")[0]] = row.get(c, NA)
     preview_records.append(rec)
@@ -132,17 +165,18 @@ preview_df = pd.DataFrame(preview_records)
 st.subheader("✏️ 轉檔結果預覽（可直接在表格中修正錯誤欄位；抓不到的欄位顯示 N/A）")
 edited_df = st.data_editor(preview_df, num_rows="dynamic", use_container_width=True)
 
-# 把編輯後的表格轉回內部欄位代碼，準備輸出 Excel
 display_to_code = {DISPLAY_HEADERS[c].split("\n")[0]: c for c in FIELD_CODES}
 export_rows = []
 for _, r in edited_df.iterrows():
-    export_rows.append({display_to_code[col]: r[col] for col in display_to_code})
+    row = {display_to_code[col]: r[col] for col in display_to_code}
+    row["__supplier_label"] = r["供應商"]
+    export_rows.append(row)
 
 excel_bytes = build_excel(export_rows)
 st.download_button(
-    "⬇️ 下載 Excel (符合 KUEHNE NAGEL 範本格式)",
+    "⬇️ 下載 Excel (彙整所有供應商的轉檔結果)",
     data=excel_bytes,
-    file_name=f"KUEHNE_NAGEL_轉檔結果_{datetime.date.today().isoformat()}.xlsx",
+    file_name=f"帳單轉檔結果_{datetime.date.today().isoformat()}.xlsx",
     mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
 )
 
@@ -171,12 +205,12 @@ else:
 
 with st.expander("🔍 查看每份 PDF 重複執行各組擷取設定時的分數"):
     for log in attempts_log:
-        st.write(f"**{log['檔案']}**")
+        st.write(f"**{log['檔案']}** (供應商: {log['供應商']})")
         st.dataframe(pd.DataFrame(log["嘗試紀錄"]), use_container_width=True)
 
-if has_reference and compare_rows:
+if has_reference and compare_rows_all:
     st.subheader("📋 逐欄比對明細（🟢相符 / 🔴不相符）")
-    cmp_df = pd.DataFrame(compare_rows)
+    cmp_df = pd.DataFrame(compare_rows_all)
 
     def _highlight(row):
         color = "background-color:#C6EFCE" if row["結果"].startswith("✅") else "background-color:#FFC7CE"
