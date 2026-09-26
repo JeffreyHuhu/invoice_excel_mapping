@@ -550,15 +550,184 @@ def parse_maersk(text: str) -> Dict:
 
 
 # ===========================================================================
+# 供應商 5：HYPER MEGA SHIPPING (⚠️ 特殊：一份 PDF 裡有好幾張各自獨立的發票)
+# ===========================================================================
+#
+# 這家供應商跟前四家有一個根本性的不同：其他供應商不管 PDF 有幾頁，整份都
+# 是「同一張發票」(欄位分散在不同頁面，但發票號碼只有一個)；HYPER MEGA
+# 則是把好幾張完全獨立的發票 (各自的發票號碼、日期、費用明細都不一樣)
+# 直接合併成一份 PDF、一頁就是一張發票。如果照舊把所有頁面文字合併成一個
+# 字串再抓欄位，正規表示式只會抓到「第一個」出現的發票號碼/日期，後面幾張
+# 發票的資料會直接遺失。
+#
+# 解法：註冊時傳入 multi_page=True，detect_hyper_mega()/parse_hyper_mega()
+# 改成「逐頁」被呼叫 (extract_utils.py 的 _parse_multi_page_pdf() 會對每一
+# 頁分別呼叫 detect()，承認的頁面才呼叫 parse() 並各自展開成列)，之後比對
+# 正確率時也會用 invoice_no 把列分組、各自跟正確答案表格裡對應的發票比對
+# (compare_multi_invoice_rows())，而不是只比對第一張發票。
+#
+# 版面特徵 (跟 INDOPROSTIME/MAERSK 一樣是單一空白分隔的並排欄位)：
+#   - "Shipper" 那一列版面重疊、文字層是亂序的 (例如
+#     'Shipper   : THE LOOK (MACAO...OFFSHOVReEss) eClO LTD : VANCOUVER 047S')，
+#     但很穩定地固定用「這一列最後一個冒號後面的內容」代表 Vessel 欄位值，
+#     不需要真的解出 Shipper 公司名稱本身。
+#   - "Consignee" 那一列在公司名稱後面也有一段類似的亂碼，用「第一個左括號
+#     之前」的文字取代 stop-lookahead 就好。
+#   - 少數頁面 MBL No. 後面會多一個「-」尾巴 (排版問題)，擷取後要去掉。
+
+def detect_hyper_mega(text: str) -> bool:
+    return "HYPER MEGA" in text.upper()
+
+
+_HYPER_LABEL_WORDS = [
+    r"I\s*N\s*V\s*O\s*I\s*C\s*E", r"NPWP", r"Invoice\s*No\.?", r"Invoice\s*Date",
+    r"Shipment\s*Type", r"Page", r"Order\s*No\.?", r"Port\s*of\s*Origin",
+    r"Arrive\s*Date", r"Port\s*of\s*Discharge", r"B/L\s*No\.?", r"Reference",
+    r"MBL\s*No\.?", r"CBM\s*/\s*Package", r"Shipper", r"Consignee",
+    r"Description", r"Payment\s*Term", r"Sub\s*Total", r"DPP", r"V\s*A\s*T",
+    r"GRAND\s*TOTAL",
+]
+_HYPER_NEXT = "(?:" + "|".join(_HYPER_LABEL_WORDS) + ")"
+_HYPER_STOP = rf"(?=\s+{_HYPER_NEXT}\b|\n|$)"
+
+_EN_MONTHS_FULL = {
+    "january": 1, "february": 2, "march": 3, "april": 4, "may": 5, "june": 6,
+    "july": 7, "august": 8, "september": 9, "october": 10, "november": 11,
+    "december": 12,
+}
+
+
+def _hyper_parse_date(text: Optional[str]) -> Optional[str]:
+    """'06 October 2025' -> '06.10.2025'，跟 MAERSK 一樣要轉成
+    'DD.MM.YYYY'，因為正確答案 Excel 的 Arrive Date 欄位是 Excel 日期
+    格式，比對時 normalize_value() 會把它格式化成這種點分隔格式。
+    """
+    if not text:
+        return text
+    m = re.match(r"(\d{1,2})\s+([A-Za-z]+)\s+(\d{4})", text.strip())
+    if not m:
+        return text
+    day, month_name, year = m.groups()
+    month = _EN_MONTHS_FULL.get(month_name.lower())
+    if not month:
+        return text
+    return f"{int(day):02d}.{month:02d}.{year}"
+
+
+def _hyper_clean_amount_id(text: Optional[str]) -> Optional[int]:
+    """印尼式數字 '16.990,00' (句點=千分位、逗號=小數) -> 16990。"""
+    if not text:
+        return None
+    text = text.strip().replace(".", "")
+    text = text.split(",")[0]
+    return int(text) if text.isdigit() else None
+
+
+def _hyper_clean_trailing_dash(value: Optional[str]) -> Optional[str]:
+    """少數頁面 MBL No. 後面多一個「-」尾巴 (排版問題)，例如
+    'OOLU2311247390-'，去掉結尾的連字號/多餘符號。
+    """
+    if not value:
+        return value
+    return value.strip().rstrip("-").strip()
+
+
+# 費用名稱裡「- 9 okt」這種印尼文月份縮寫的日期註記，使用者的正確答案會把
+# 它當成備註拿掉 (例如 'ADMINISTRATION FEE - 9 okt' -> 'ADMINISTRATION
+# FEE')，但像 'STORAGE CHARGE - Masa 1 : 3 Days' 這種「- Masa ...」是用來
+# 區分兩筆不同 STORAGE CHARGE 的關鍵字，正確答案反而完整保留，不能一併
+# 清掉。所以只清「- 數字 + 印尼文月份縮寫」這種明確是日期的樣式。
+_HYPER_DESC_DATE_SUFFIX = re.compile(
+    r"\s*-\s*\d{1,2}\s*(?:jan|feb|mar|apr|mei|jun|jul|agu|sep|okt|nov|des)\w*\s*$",
+    re.IGNORECASE,
+)
+
+
+def _hyper_clean_description(desc: Optional[str]) -> Optional[str]:
+    if not desc:
+        return desc
+    return _HYPER_DESC_DATE_SUFFIX.sub("", desc).strip()
+
+
+# 費用明細行，例如 "OCEAN FREIGHT CHARGES 1,000 IDR 16.990,00 16.990,00 1,1 %"
+# 或 "MONITORING CHARGE 2,000 IDR 300.000,00 600.000,00 11 %"：
+# 費用名稱 + 數量 + 幣別 IDR + 單價 + 金額 + VAT百分比。要的是「金額」那個
+# 數字 (VAT% 前面那個)，不是單價 (前一個數字)，因為數量不是 1 時兩者不同
+# (例如 MONITORING CHARGE 數量 2、單價 300,000、金額才是 600,000)。
+_HYPER_ITEM_PATTERN = re.compile(
+    r"^(?P<desc>[A-Z][A-Za-z0-9 \-:.]+?)\s+[\d,]+\s+IDR\s+[\d.,]+\s+"
+    r"(?P<amount>[\d.,]+)\s+[\d,]+\s*%\s*$",
+    re.MULTILINE,
+)
+
+
+def _hyper_extract_items(text: str) -> List[Dict]:
+    items = []
+    for m in _HYPER_ITEM_PATTERN.finditer(text):
+        items.append({
+            "description": _hyper_clean_description(m.group("desc").strip()),
+            "amount": _hyper_clean_amount_id(m.group("amount")),
+        })
+    return items
+
+
+def parse_hyper_mega(text: str) -> Dict:
+    """注意：這是 multi_page 供應商，text 是『一頁』的文字 (不是整份 PDF
+    合併後的文字)，呼叫端 (_parse_multi_page_pdf()) 只會對通過
+    detect_hyper_mega() 的頁面呼叫這個函式。
+    """
+    header: Dict[str, Optional[str]] = {}
+
+    header["invoice_no"] = _search(rf"Invoice\s*No\.?\s*:\s*(.+?){_HYPER_STOP}", text)
+    header["invoice_date"] = _hyper_parse_date(
+        _search(rf"Invoice\s*Date\s*:\s*(.+?){_HYPER_STOP}", text)
+    )
+    header["supplier"] = _search(r"(?i)^\s*(PT\.\s*Hyper\s*Mega\s*Shipping)", text)
+    header["consignee"] = _search(r"Consignee\s*:\s*([^(\n]+)", text)
+    header["order_no"] = _search(rf"Order\s*No\.?\s*:\s*(.+?){_HYPER_STOP}", text)
+    header["port_of_loading"] = _search(rf"Port\s*of\s*Origin\s*:\s*(.+?){_HYPER_STOP}", text)
+    header["arrive_date"] = _hyper_parse_date(
+        _search(rf"Arrive\s*Date\s*:\s*(.+?){_HYPER_STOP}", text)
+    )
+    header["port_of_discharge"] = _search(rf"Port\s*of\s*Discharge\s*:\s*(.+?){_HYPER_STOP}", text)
+    header["bl_no"] = _search(rf"B/L\s*No\.?\s*:\s*(.+?){_HYPER_STOP}", text)
+    header["mbl_no"] = _hyper_clean_trailing_dash(
+        _search(rf"MBL\s*No\.?\s*:\s*(.+?){_HYPER_STOP}", text)
+    )
+    # Vessel 欄位版面跟 Shipper 重疊、文字層亂序，但「這一列最後一個冒號
+    # 後面的內容」穩定地就是 Vessel 值 (參見本區塊開頭的說明)。
+    header["vessel"] = _search(r"Shipper\s*:.*:\s*(.+?)\s*$", text)
+    m = re.search(r"CBM\s*/\s*Package\s*:\s*(?:LCL|FCL)\s*/\s*([\d,]+)\s*/", text)
+    header["volume"] = m.group(1).replace(",", ".") if m else None
+
+    # 這種帳單沒有獨立的「開船日」欄位、也沒有貨櫃資訊，缺漏後續會自動
+    # 補 N/A。
+    header["onboard_date"] = None
+    header["container_no"] = None
+
+    items = _hyper_extract_items(text)
+    if not items:
+        items = [{"description": None, "amount": None}]
+
+    return {"header": header, "items": items}
+
+
+# ===========================================================================
 # 註冊所有供應商
 # ===========================================================================
 # detect_kuehne_nagel() 的關鍵字 "KUEHNE"+"NAGEL" 很具體不會誤判，
 # detect_dwiharta() 同理只認 "DWIHARTA" 字樣，detect_indoprostime() 只認
-# "PROSTIME" 字樣，detect_maersk() 只認 "MAERSK" 字樣，四者互不衝突，順序
-# 不影響結果。未來新增供應商時，關鍵字盡量挑「該公司獨有、不會出現在其他
-# 供應商帳單」的字串 (公司全名、統編、帳單編號前綴等)。
+# "PROSTIME" 字樣，detect_maersk() 只認 "MAERSK" 字樣，detect_hyper_mega()
+# 只認 "HYPER MEGA" 字樣，五者互不衝突，順序不影響結果。未來新增供應商時，
+# 關鍵字盡量挑「該公司獨有、不會出現在其他供應商帳單」的字串 (公司全名、
+# 統編、帳單編號前綴等)；如果新供應商也是「一份 PDF 有好幾張獨立發票」，
+# 記得跟 HYPER MEGA 一樣在 register_supplier() 傳入 multi_page=True。
 
 register_supplier("DWIHARTA", "PT. DWIHARTA LOGISTINDO", detect_dwiharta, parse_dwiharta)
 register_supplier("KUEHNE_NAGEL", "KUEHNE NAGEL INDONESIA", detect_kuehne_nagel, parse_kuehne_nagel)
 register_supplier("INDOPROSTIME", "PT. INDO PROSTIME EXPRESS", detect_indoprostime, parse_indoprostime)
 register_supplier("MAERSK", "PT MAERSK LOGISTICS INDONESIA", detect_maersk, parse_maersk)
+register_supplier(
+    "HYPER_MEGA", "PT. HYPER MEGA SHIPPING", detect_hyper_mega, parse_hyper_mega,
+    multi_page=True,
+)

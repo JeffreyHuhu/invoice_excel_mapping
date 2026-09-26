@@ -101,6 +101,15 @@ def extract_text_from_pdf(pdf_path: str, **pdfplumber_kwargs) -> str:
     return "\n".join(parts)
 
 
+def extract_pages_from_pdf(pdf_path: str, **pdfplumber_kwargs) -> List[str]:
+    """跟 extract_text_from_pdf() 一樣，但個別回傳『每一頁』的文字 (不合併成
+    一個字串)。給 multi_page 供應商 (一份 PDF 裡有好幾張各自獨立的發票，
+    一頁一張) 逐頁辨識/擷取用。
+    """
+    with pdfplumber.open(pdf_path) as pdf:
+        return [page.extract_text(**pdfplumber_kwargs) or "" for page in pdf.pages]
+
+
 def _generate_extraction_configs(max_attempts: int = 100) -> List[Dict]:
     """產生一組(最多 max_attempts 個)不同的 pdfplumber 擷取參數組合，
     給「重新嘗試擷取」的迴圈依序測試。第一組永遠是預設值 (最常見、最快)，
@@ -126,7 +135,7 @@ def _generate_extraction_configs(max_attempts: int = 100) -> List[Dict]:
 
 # 預設的「最多嘗試次數」：正確率沒有達到 100% 時，最多重新嘗試這麼多組
 # 不同的擷取參數，每組都算一次正確率，一達到 100% 就提早停止。
-MAX_EXTRACTION_ATTEMPTS = 100
+MAX_EXTRACTION_ATTEMPTS = 20
 EXTRACTION_CONFIGS: List[Dict] = _generate_extraction_configs(MAX_EXTRACTION_ATTEMPTS)
 
 
@@ -175,7 +184,7 @@ def _save_learned_config(supplier_key: Optional[str], config: Optional[Dict], sc
 # 3. 供應商辨識與註冊表
 # ---------------------------------------------------------------------------
 #
-# 每個供應商模組 (suppliers.py) 呼叫 register_supplier() 註冊三樣東西：
+# 每個供應商模組 (suppliers.py) 呼叫 register_supplier() 註冊：
 #   - key        內部代碼，例如 "DWIHARTA"
 #   - label      顯示名稱
 #   - detect_fn  detect(text) -> bool，判斷這份PDF文字是不是這家供應商
@@ -183,14 +192,23 @@ def _save_learned_config(supplier_key: Optional[str], config: Optional[Dict], sc
 #                header 裡的 key 對應 HEADER_FIELD_CODES，
 #                items 是一個 list，每筆是 {"description":.., "amount":..}，
 #                至少要回傳一筆 (抓不到費用明細就回傳一筆全空的)。
+#   - multi_page 選填，預設 False。極少數供應商會把「好幾張不同發票號碼的
+#                獨立帳單」放在同一份 PDF 裡、一頁一張 (例如 HYPER MEGA)，
+#                跟其他供應商「不管幾頁都是同一張發票」完全不同。這種情況
+#                設 multi_page=True，detect_fn/parse_fn 改成逐頁呼叫 (每次
+#                傳入『這一頁』的文字，而不是整份 PDF 合併後的文字)，
+#                找出每一頁各自的發票，分別展開成列。
 
 SUPPLIER_REGISTRY: Dict[str, Dict] = {}
 
 
 def register_supplier(key: str, label: str,
                        detect_fn: Callable[[str], bool],
-                       parse_fn: Callable[[str], Dict]) -> None:
-    SUPPLIER_REGISTRY[key] = {"label": label, "detect": detect_fn, "parse": parse_fn}
+                       parse_fn: Callable[[str], Dict],
+                       multi_page: bool = False) -> None:
+    SUPPLIER_REGISTRY[key] = {
+        "label": label, "detect": detect_fn, "parse": parse_fn, "multi_page": multi_page,
+    }
 
 
 def detect_supplier(text: str) -> Optional[str]:
@@ -215,6 +233,14 @@ def supplier_label(key: Optional[str]) -> str:
 def list_registered_suppliers() -> List[Dict[str, str]]:
     """回傳目前已註冊的供應商清單 (給網頁上顯示用)。"""
     return [{"key": k, "label": v["label"]} for k, v in SUPPLIER_REGISTRY.items()]
+
+
+def is_multi_page_supplier(key: Optional[str]) -> bool:
+    """這家供應商是不是『一份 PDF 裡有好幾張各自獨立的發票，一頁一張』
+    (參見 register_supplier() 的 multi_page 說明)。找不到這家供應商時視為
+    False (走一般的單張發票流程)。
+    """
+    return bool(key and key in SUPPLIER_REGISTRY and SUPPLIER_REGISTRY[key].get("multi_page"))
 
 
 # ---------------------------------------------------------------------------
@@ -245,13 +271,43 @@ def expand_to_rows(parsed: Dict) -> List[Dict[str, object]]:
     return rows
 
 
+def _parse_multi_page_pdf(pdf_path: str, key: str, **pdfplumber_kwargs) -> List[Dict]:
+    """multi_page 供應商專用：逐頁辨識+擷取，每一頁『承認』的就各自展開成
+    一組列，回傳所有頁面的列攤平在一起 (一個 list，裡面可能混著好幾張
+    不同發票的列，用 invoice_no 欄位分辨屬於哪一張)。一頁都沒認出來時，
+    回傳一筆全 N/A 的列，跟其他供應商『抓不到就整張 N/A』的行為一致。
+    """
+    entry = SUPPLIER_REGISTRY[key]
+    pages = extract_pages_from_pdf(pdf_path, **pdfplumber_kwargs)
+    rows: List[Dict] = []
+    for page_text in pages:
+        try:
+            if not entry["detect"](page_text):
+                continue
+        except Exception:
+            continue
+        parsed = entry["parse"](page_text)
+        rows.extend(expand_to_rows(parsed))
+    if not rows:
+        rows = expand_to_rows({"header": {}, "items": [{}]})
+    return rows
+
+
 def parse_invoice_pdf(pdf_path: str, supplier_key: Optional[str] = None,
                        **pdfplumber_kwargs) -> Tuple[Optional[str], List[Dict], str]:
     """讀取PDF、自動判斷供應商 (若未指定)、用對應規則擷取欄位。
     回傳 (辨識到的供應商key或None, 展開後的rows列表, 原始文字)。
+
+    對 multi_page 供應商 (參見 register_supplier())，rows 可能包含好幾張
+    不同發票各自的列 (一頁一張發票)，呼叫端要用 invoice_no 分組。
     """
     text = extract_text_from_pdf(pdf_path, **pdfplumber_kwargs)
     key = supplier_key or detect_supplier(text)
+
+    if is_multi_page_supplier(key):
+        rows = _parse_multi_page_pdf(pdf_path, key, **pdfplumber_kwargs)
+        return key, rows, text
+
     if key and key in SUPPLIER_REGISTRY:
         parsed = SUPPLIER_REGISTRY[key]["parse"](text)
     else:
@@ -350,6 +406,33 @@ def compare_rows(rows: List[Dict], reference_rows: pd.DataFrame) -> List[Dict]:
     return results
 
 
+def _group_rows_by_invoice(rows: List[Dict]) -> Dict[str, List[Dict]]:
+    groups: Dict[str, List[Dict]] = {}
+    for row in rows:
+        inv_no = normalize_value(row.get("invoice_no"))
+        groups.setdefault(inv_no, []).append(row)
+    return groups
+
+
+def compare_multi_invoice_rows(rows: List[Dict], reference_df: Optional[pd.DataFrame]) -> List[Dict]:
+    """multi_page 供應商專用比對：rows 裡可能混著好幾張不同發票各自的列
+    (一份 PDF 有好幾頁、每頁是一張獨立發票)，所以不能像一般供應商一樣只
+    取第一列當抬頭比對——這裡先用 invoice_no 把 rows 分組，每組各自去
+    reference_df (完整的正確答案表格，不是預先篩過某一張發票的子集) 找出
+    同一個 invoice_no 的正確答案列，分別呼叫 compare_rows() 後把所有結果
+    串起來，這樣每張發票的抬頭欄位都會各自比對一次。
+    """
+    if not rows or reference_df is None or reference_df.empty or "invoice_no" not in reference_df.columns:
+        return []
+    results: List[Dict] = []
+    groups = _group_rows_by_invoice(rows)
+    ref_inv_norm = reference_df["invoice_no"].map(normalize_value)
+    for inv_no, group_rows in groups.items():
+        ref_subset = reference_df[ref_inv_norm == inv_no]
+        results.extend(compare_rows(group_rows, ref_subset))
+    return results
+
+
 def compute_accuracy(results: List[Dict]) -> float:
     """正確率 = 相符欄位數 / 有意義的比對欄位數。
 
@@ -412,6 +495,11 @@ def find_best_extraction(
       attempts_used   實際用了幾次嘗試 (達到100%會提早停止，< max_attempts)
       reached_100     是否有達到 100% 正確率 (沒有正確答案可比對時恆為 False)
       learned_applied 這次是否有套用「之前學到的最佳設定」當第 1 次嘗試
+
+    注意：對 multi_page 供應商 (一份 PDF 裡有好幾張各自獨立的發票)，
+    reference_rows 這裡預期是「完整」的正確答案表格 (不要預先篩成某一張
+    發票)，內部會用 invoice_no 自己分組比對；其他一般供應商則維持原本的
+    用法：reference_rows 是呼叫端已經篩好、只屬於這張發票的那幾列。
     """
     configs = list(configs or EXTRACTION_CONFIGS)[:max_attempts]
 
@@ -423,25 +511,35 @@ def find_best_extraction(
         configs = [learned_config] + [c for c in configs if c != learned_config]
     configs = configs[:max_attempts]
 
+    is_multi = is_multi_page_supplier(supplier_key)
+
     attempts: List[Dict] = []
     best = None
     detected_key = supplier_key
     reached_100 = False
 
     for i, cfg in enumerate(configs, start=1):
-        text = extract_text_from_pdf(pdf_path, **cfg)
-        key = supplier_key or detect_supplier(text)
-        detected_key = detected_key or key
-
-        if key and key in SUPPLIER_REGISTRY:
-            parsed = SUPPLIER_REGISTRY[key]["parse"](text)
+        if is_multi:
+            # multi_page 供應商：這份 PDF 可能是好幾張各自獨立的發票 (一頁
+            # 一張)，rows 會混著所有頁面/發票的列，reference_rows 這裡預期
+            # 是「完整」的正確答案表格 (呼叫端不要預先篩成某一張發票)，
+            # 靠 compare_multi_invoice_rows() 自己用 invoice_no 分組比對。
+            key = supplier_key
+            rows = _parse_multi_page_pdf(pdf_path, key, **cfg)
         else:
-            parsed = {"header": {}, "items": [{}]}
-        rows = expand_to_rows(parsed)
+            text = extract_text_from_pdf(pdf_path, **cfg)
+            key = supplier_key or detect_supplier(text)
+            if key and key in SUPPLIER_REGISTRY:
+                parsed = SUPPLIER_REGISTRY[key]["parse"](text)
+            else:
+                parsed = {"header": {}, "items": [{}]}
+            rows = expand_to_rows(parsed)
+        detected_key = detected_key or key
 
         has_ref = reference_rows is not None and not reference_rows.empty
         if has_ref:
-            results = compare_rows(rows, reference_rows)
+            results = compare_multi_invoice_rows(rows, reference_rows) if is_multi \
+                else compare_rows(rows, reference_rows)
             score = compute_accuracy(results)
         else:
             results = None

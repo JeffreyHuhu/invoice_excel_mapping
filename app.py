@@ -7,13 +7,13 @@ app.py
 流程：辨識哪間供應商帳單 → 選取對應的帳單辨識系統 → 擷取資料 → 跟正確答案
        Excel 逐欄比對算出正確率。
 
-重試機制：每份 PDF 最多重新嘗試 100 次不同的擷取參數，只要正確率還沒到
-100% 就繼續換下一組參數再試，一達到 100% 立刻停止；100 次都試完仍未達
-100% 的話，就用這 100 次裡分數最高的一次，並產出核對報告方便人工複查。
+重試機制：每份 PDF 最多重新嘗試 20 次不同的擷取參數，只要正確率還沒到
+100% 就繼續換下一組參數再試，一達到 100% 立刻停止；20 次都試完仍未達
+100% 的話，就用這 20 次裡分數最高的一次，並產出核對報告方便人工複查。
 
 學習記憶：每次找到「比之前記錄更高分」的擷取設定時，會記錄到
 learned_configs.json，下次同一家供應商的帳單進來就優先套用這組設定當
-第 1 次嘗試，通常能一次就命中，不用每次都從頭試 100 組 (注意：這個記憶
+第 1 次嘗試，通常能一次就命中，不用每次都從頭試 20 組 (注意：這個記憶
 只在同一次 Streamlit 部署期間有效，重新部署/reboot 後會重置，除非把
 learned_configs.json 也提交回 GitHub)。
 
@@ -23,7 +23,12 @@ learned_configs.json 也提交回 GitHub)。
   🔄 重新查詢：清空目前的比對結果、快取，並清除已上傳的檔案，方便下一次重新查詢
   ⬇️ 下載核對報告：把正確率總覽 + 逐欄比對明細 (紅綠燈/灰) 匯出成 Excel
 
-結果呈現順序：① 轉檔正確率(大字級顯示) → ② 轉檔結果預覽 → ③ 逐欄比對明細
+結果呈現順序：① 轉檔正確率(大字級顯示) → ② 逐欄比對明細 → ③ 轉檔結果預覽
+
+特殊供應商：HYPER MEGA 一份 PDF 裡可能塞了好幾張各自獨立的發票 (一頁一
+張，各自的發票號碼/日期/費用明細都不同)，跟其他供應商「不管幾頁都是同
+一張發票」不一樣；這種 multi_page 供應商的比對是用 invoice_no 分組後各
+自跟正確答案表格比對，詳見 extract_utils.py / suppliers.py 裡的說明。
 
 用法：
     pip install streamlit pdfplumber openpyxl pandas
@@ -68,6 +73,7 @@ try:
         parse_invoice_pdf,
         supplier_label,
         list_registered_suppliers,
+        is_multi_page_supplier,
     )
 except ImportError as e:
     st.set_page_config(page_title="多供應商帳單自動化系統 - 啟動失敗", layout="wide")
@@ -117,11 +123,25 @@ st.markdown(
     """
     <style>
     div.stButton > button {
-        font-size: 22px !important;
-        font-weight: 700 !important;
-        padding: 0.9em 1.5em !important;
+        font-size: 28px !important;
+        font-weight: 800 !important;
+        padding: 1.2em 1.8em !important;
         height: auto !important;
-        border-radius: 10px !important;
+        border-radius: 12px !important;
+    }
+    /* 「重新查詢」按鈕塗成藍色，跟主要動作的「開始執行比對」區分開來。
+       CSS 沒辦法直接用按鈕文字選取，改用「緊接在一個隱形標記元素後面的
+       按鈕」這個常見手法：在按鈕前面放一個帶 id 的隱形標記，用 :has()
+       選到「包含這個標記的區塊」，再用 + 選到它後面緊接著的區塊裡的按鈕。 */
+    div:has(> #reset-btn-marker) + div button {
+        background-color: #1565C0 !important;
+        border-color: #1565C0 !important;
+        color: #FFFFFF !important;
+    }
+    div:has(> #reset-btn-marker) + div button:hover {
+        background-color: #0D47A1 !important;
+        border-color: #0D47A1 !important;
+        color: #FFFFFF !important;
     }
     </style>
     """,
@@ -174,6 +194,7 @@ with col_run:
         help="上傳完 PDF (與選填的正確答案 Excel) 後，按這個按鈕才會開始擷取與比對，比對結果才會顯示在下方。",
     )
 with col_reset:
+    st.markdown('<span id="reset-btn-marker"></span>', unsafe_allow_html=True)
     reset_clicked = st.button(
         "🔄 重新查詢",
         use_container_width=True,
@@ -215,14 +236,24 @@ if run_clicked:
                 if supplier_key is None:
                     unknown_files.append(f.name)
 
+                is_multi = is_multi_page_supplier(supplier_key)
+
                 reference_rows = None
                 if has_reference and "invoice_no" in reference_df.columns:
-                    _, quick_rows, _ = parse_invoice_pdf(tmp_path, supplier_key=supplier_key)
-                    inv_no = normalize_value(quick_rows[0].get("invoice_no"))
-                    mask = reference_df["invoice_no"].map(normalize_value) == inv_no
-                    candidate = reference_df[mask]
-                    if not candidate.empty:
-                        reference_rows = candidate
+                    if is_multi:
+                        # multi_page 供應商 (例如 HYPER MEGA)：一份 PDF 裡
+                        # 可能混著好幾張不同發票，沒辦法只靠「第一筆」的
+                        # invoice_no 篩出對應答案；直接把完整的正確答案表
+                        # 格傳進去，find_best_extraction() 內部會自己用
+                        # invoice_no 分組、各自比對。
+                        reference_rows = reference_df
+                    else:
+                        _, quick_rows, _ = parse_invoice_pdf(tmp_path, supplier_key=supplier_key)
+                        inv_no = normalize_value(quick_rows[0].get("invoice_no"))
+                        mask = reference_df["invoice_no"].map(normalize_value) == inv_no
+                        candidate = reference_df[mask]
+                        if not candidate.empty:
+                            reference_rows = candidate
 
                 result = find_best_extraction(
                     tmp_path, supplier_key=supplier_key, reference_rows=reference_rows
@@ -233,10 +264,18 @@ if run_clicked:
                     row["__supplier_label"] = label
                 all_export_rows.extend(result["rows"])
 
+                distinct_invoice_nos = sorted({
+                    str(row.get("invoice_no", NA)) for row in result["rows"]
+                })
+                invoice_no_display = (
+                    distinct_invoice_nos[0] if len(distinct_invoice_nos) == 1
+                    else f"共 {len(distinct_invoice_nos)} 張發票: " + ", ".join(distinct_invoice_nos)
+                )
+
                 score_rows.append({
                     "來源檔案": f.name,
                     "辨識供應商": label,
-                    "Invoice No": result["rows"][0].get("invoice_no", NA),
+                    "Invoice No": invoice_no_display,
                     score_label: f"{result['score'] * 100:.1f}%",
                     "嘗試次數": f"{result['attempts_used']}/{MAX_EXTRACTION_ATTEMPTS}",
                     "是否達到100%": "✅ 是" if result["reached_100"] else "❌ 否",
@@ -352,39 +391,7 @@ with st.expander(
 st.divider()
 
 # ---------------------------------------------------------------------------
-# ② 轉檔結果預覽
-# ---------------------------------------------------------------------------
-
-preview_records = []
-for row in all_export_rows:
-    rec = {"供應商": row.get("__supplier_label", NA)}
-    for c in FIELD_CODES:
-        rec[DISPLAY_HEADERS[c].split("\n")[0]] = row.get(c, NA)
-    preview_records.append(rec)
-preview_df = pd.DataFrame(preview_records)
-
-st.subheader("✏️ 轉檔結果預覽（可直接在表格中修正錯誤欄位；抓不到的欄位顯示 N/A）")
-edited_df = st.data_editor(preview_df, num_rows="dynamic", use_container_width=True)
-
-display_to_code = {DISPLAY_HEADERS[c].split("\n")[0]: c for c in FIELD_CODES}
-export_rows = []
-for _, r in edited_df.iterrows():
-    row = {display_to_code[col]: r[col] for col in display_to_code}
-    row["__supplier_label"] = r["供應商"]
-    export_rows.append(row)
-
-excel_bytes = build_excel(export_rows)
-st.download_button(
-    "⬇️ 下載 Excel (彙整所有供應商的轉檔結果)",
-    data=excel_bytes,
-    file_name=f"帳單轉檔結果_{datetime.date.today().isoformat()}.xlsx",
-    mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-)
-
-st.divider()
-
-# ---------------------------------------------------------------------------
-# ③ 逐欄比對明細
+# ② 逐欄比對明細
 # ---------------------------------------------------------------------------
 
 if has_reference and compare_rows_all:
@@ -417,3 +424,35 @@ if has_reference and compare_rows_all:
         file_name=f"核對報告_{datetime.date.today().isoformat()}.xlsx",
         mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
     )
+
+    st.divider()
+
+# ---------------------------------------------------------------------------
+# ③ 轉檔結果預覽
+# ---------------------------------------------------------------------------
+
+preview_records = []
+for row in all_export_rows:
+    rec = {"供應商": row.get("__supplier_label", NA)}
+    for c in FIELD_CODES:
+        rec[DISPLAY_HEADERS[c].split("\n")[0]] = row.get(c, NA)
+    preview_records.append(rec)
+preview_df = pd.DataFrame(preview_records)
+
+st.subheader("✏️ 轉檔結果預覽（可直接在表格中修正錯誤欄位；抓不到的欄位顯示 N/A）")
+edited_df = st.data_editor(preview_df, num_rows="dynamic", use_container_width=True)
+
+display_to_code = {DISPLAY_HEADERS[c].split("\n")[0]: c for c in FIELD_CODES}
+export_rows = []
+for _, r in edited_df.iterrows():
+    row = {display_to_code[col]: r[col] for col in display_to_code}
+    row["__supplier_label"] = r["供應商"]
+    export_rows.append(row)
+
+excel_bytes = build_excel(export_rows)
+st.download_button(
+    "⬇️ 下載 Excel (彙整所有供應商的轉檔結果)",
+    data=excel_bytes,
+    file_name=f"帳單轉檔結果_{datetime.date.today().isoformat()}.xlsx",
+    mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+)
