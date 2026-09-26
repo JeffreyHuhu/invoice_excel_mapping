@@ -911,7 +911,14 @@ def parse_tata(text: str) -> Dict:
     header["volume"] = _search(rf"\bQTY\s*:\s*(.+?){_TATA_STOP}", text)
     header["port_of_loading"] = _search(rf"\bORIGIN\s*:\s*(.+?){_TATA_STOP}", text)
 
-    ship_date = _tata_parse_date(_search(r"\bDate\s*:\s*(\d{4}-\d{1,2}-\d{1,2})", text))
+    # 注意：不能用 r"\bDate\s*:\s*..." 這種寬鬆寫法，因為同一頁最上方
+    # "INV Date :2026-08-24 15:55:13" 也符合這個樣式 (字面上 "Date :" 前面
+    # 剛好也有一個單字邊界)，會被誤抓成「出貨日期」；這裡用負向後顧排除
+    # 緊接在 "INV " 後面的那個 "Date :"，只抓 Consignee 那一行真正的出貨
+    # 日期 "Date :2026-08-16"。
+    ship_date = _tata_parse_date(
+        _search(r"(?<!INV )Date\s*:\s*(\d{4}-\d{1,2}-\d{1,2})", text)
+    )
     header["arrive_date"] = ship_date
     header["onboard_date"] = ship_date
 
@@ -927,6 +934,45 @@ def parse_tata(text: str) -> Dict:
     return {"header": header, "items": items}
 
 
+# ---------------------------------------------------------------------------
+# YJE 與 TATA 合併成同一個「供應商群組」註冊 (重要修正)
+# ---------------------------------------------------------------------------
+#
+# 問題根因：使用者反映「有時候 TATA 的帳單會跟 YJE 合成同一份 PDF 一起請
+# 款」，但之前是把 YJE、TATA 各自獨立註冊成兩個供應商 (key="YJE"、
+# key="TATA")。多供應商辨識/擷取流程是「先用整份 PDF 的文字判斷屬於哪一個
+# 供應商 key (detect_supplier())，再固定用那一個 key 對應的
+# detect()/parse() 逐頁處理 (_parse_multi_page_pdf())」。當同一份 PDF 裡
+# 同時混著 YJE 格式頁面跟 TATA 格式頁面時，整份 PDF 的文字裡「YJE」跟
+# 「TATA」的關鍵字都會出現，detect_supplier() 依序詢問每個已註冊供應商，
+# 一旦先問到的 "YJE" 承認了 (回傳 True)，就會把整份 PDF 都當成 "YJE" 這個
+# key 處理；之後逐頁擷取時，只會用 YJE 自己的 detect_yje()/parse_yje() 去
+# 跑每一頁，TATA 格式的頁面因為通不過 detect_yje() 而被直接跳過、不會被
+# 擷取，也就不會出現在「逐欄比對明細」裡——這就是使用者回報「TATA 沒有顯示
+# 出來」的真正原因，不是 TATA 的擷取規則本身壞掉。
+#
+# 修正方式：不要分成兩個供應商 key，改成註冊「同一個」multi_page 供應商，
+# 但 detect()/parse() 內部『每一頁』都同時检查兩種格式——是 YJE 格式就用
+# parse_yje()，是 TATA 格式就用 parse_tata()，兩種格式都不是才判定這頁不
+# 屬於這個供應商。這樣不管一份 PDF 裡是純 YJE、純 TATA，還是兩種混在一起，
+# 每一頁都會被個別正確辨識並擷取，不會因為「整份 PDF 先綁定同一個 key」而
+# 漏掉另一種格式的頁面。
+
+def detect_yje_or_tata(text: str) -> bool:
+    return detect_yje(text) or detect_tata(text)
+
+
+def parse_yje_or_tata(text: str) -> Dict:
+    """注意：這是 multi_page 供應商，text 是『一頁』的文字。每一頁各自
+    判斷是 YJE 格式還是 TATA 格式，呼叫對應的 parse 函式；因為只有先通過
+    detect_yje_or_tata() 的頁面才會呼叫到這裡，所以這兩個條件已經涵蓋了
+    所有會進來的頁面。
+    """
+    if detect_yje(text):
+        return parse_yje(text)
+    return parse_tata(text)
+
+
 register_supplier("DWIHARTA", "PT. DWIHARTA LOGISTINDO", detect_dwiharta, parse_dwiharta)
 register_supplier("KUEHNE_NAGEL", "KUEHNE NAGEL INDONESIA", detect_kuehne_nagel, parse_kuehne_nagel)
 register_supplier("INDOPROSTIME", "PT. INDO PROSTIME EXPRESS", detect_indoprostime, parse_indoprostime)
@@ -936,9 +982,6 @@ register_supplier(
     multi_page=True,
 )
 register_supplier(
-    "YJE", "YJE (ShenZhen) International Logistics / PT TATA HARMONI SARANATAMA",
-    detect_yje, parse_yje, multi_page=True,
-)
-register_supplier(
-    "TATA", "PT. TATA HARMONI SARANATAMA", detect_tata, parse_tata, multi_page=True,
+    "YJE_TATA", "YJE (ShenZhen) International Logistics / PT TATA HARMONI SARANATAMA",
+    detect_yje_or_tata, parse_yje_or_tata, multi_page=True,
 )
