@@ -93,12 +93,16 @@ except ImportError as e:
 
 st.set_page_config(page_title="多供應商帳單自動化系統", layout="wide")
 st.title("📄➡️📊 多供應商帳單自動化系統")
+# 流程說明改成①②③由上而下各自一行 (並列顯示，不要擠成一段用箭頭串起來的
+# 長文字)，字體再放大 1.5 倍 (原本 19px -> 約 29px)。
 st.markdown(
     f"""
-    <div style="font-size:19px; color:#000000; font-weight:500; line-height:1.6; margin-bottom:12px;">
-        流程：① 自動辨識帳單屬於哪家供應商 → ② 套用該供應商專屬的擷取規則 →
-        ③ 跟正確答案 Excel 逐欄比對算出正確率 (正確率未滿 100% 時，最多重新嘗試
-        {MAX_EXTRACTION_ATTEMPTS} 次不同的擷取參數，一達到 100% 就停止)。
+    <div style="font-size:29px; color:#000000; font-weight:500; line-height:1.7; margin-bottom:16px;">
+        <div>① 自動辨識帳單屬於哪家供應商</div>
+        <div>② 套用該供應商專屬的擷取規則</div>
+        <div>③ 跟正確答案 Excel 逐欄比對算出正確率
+            (正確率未滿 100% 時，最多重新嘗試 {MAX_EXTRACTION_ATTEMPTS}
+            次不同的擷取參數，一達到 100% 就停止)</div>
     </div>
     """,
     unsafe_allow_html=True,
@@ -122,12 +126,23 @@ if "uploader_version" not in st.session_state:
 st.markdown(
     """
     <style>
-    div.stButton > button {
-        font-size: 28px !important;
+    /* 全站「所有」按鈕都放大兩倍：st.button() 產生的按鈕外層是
+       div.stButton，st.download_button() 產生的則是 div.stDownloadButton
+       (先前這裡只寫了 div.stButton，下載按鈕沒被放大到，這次一併補上，
+       並且統一列出 data-testid 版的選擇器，避免以後 Streamlit 版本更新把
+       class 名稱換掉又漏掉某種按鈕)。往後若又新增其他 st.button() /
+       st.download_button()，都會自動套用到這組放大樣式，不用每次手動加。 */
+    div.stButton > button,
+    div.stDownloadButton > button,
+    div.stFormSubmitButton > button,
+    div[data-testid="stButton"] > button,
+    div[data-testid="stDownloadButton"] > button,
+    div[data-testid="stFormSubmitButton"] > button {
+        font-size: 32px !important;
         font-weight: 800 !important;
-        padding: 1.2em 1.8em !important;
+        padding: 1.4em 2em !important;
         height: auto !important;
-        border-radius: 12px !important;
+        border-radius: 14px !important;
     }
     /* 「重新查詢」按鈕塗成藍色，跟主要動作的「開始執行比對」區分開來。
        CSS 沒辦法直接用按鈕文字選取，改用「緊接在一個隱形標記元素後面的
