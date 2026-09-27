@@ -1274,6 +1274,136 @@ def parse_femaria(text: str) -> Dict:
     return {"header": header, "items": items}
 
 
+# ===========================================================================
+# 供應商 9：PT. EXPRESS MAXIMUM (單頁、單張發票，費用明細表格)
+# ===========================================================================
+#
+# 版面特徵：費用明細每一列在 PDF 裡實際橫跨兩行 (SHIPPER 欄位名稱、ATTN
+# 欄位人名太長會換行接到下一行，例如 "BIG" 換行接 "CORPORATION")，但這兩個
+# 欄位都不是正確答案要比對的欄位，所以直接用 fullmatch 只認第一行 (有完整
+# 9 個欄位、以兩個逗號分隔數字結尾的那一行)，換行的接續行 (只有零星文字、
+# 對不上這個樣式) 直接跳過即可，不需要特別處理續行合併。
+#
+# 費用明細行的 9 個欄位依序是：
+#   DATE  SHIPPER  AWB_NO  DESCRIPTION  ATTN  C/T  W/T  CHARGE(USD)
+#   CHARGE(IDR)  TAX(IDR)
+# 正確答案的 Amount 欄位對應 CHARGE(IDR) (倒數第二個數字)，不是 CHARGE(USD)
+# 也不是最後的 TAX(IDR)。到達日/開船日/提單號碼/主提單號碼都是這一列自己
+# 的 DATE/AWB_NO，不是整張帳單共用一個值，所以每筆費用都各自帶自己的
+# arrive_date/onboard_date/bl_no/mbl_no，讓 expand_to_rows() 做逐筆覆蓋
+# (即使這次的樣本兩筆費用剛好同一個 AWB/日期，未來遇到同一張發票裡有多個
+# 不同貨運批次時也不會出錯)。
+_EXPRESS_ITEM_PATTERN = re.compile(
+    r"^\d{1,2}/[A-Za-z]{3}/\d{2}\s+\S+\s+(?P<awb>\S+)\s+(?P<desc>[A-Z]+)\s+\S+\s+"
+    r"[\d.]+\s+[\d.]+\s+[\d.,]+\s+(?P<amount>[\d,]+)\s+[\d,]+$"
+)
+_EXPRESS_DATE_PATTERN = re.compile(r"^(\d{1,2})/([A-Za-z]{3})/(\d{2})")
+
+
+def detect_express(text: str) -> bool:
+    return "EXPRESS MAXIMUM" in text.upper()
+
+
+def _express_add_space_after_pt(value: Optional[str]) -> Optional[str]:
+    """'PT.EXPRESS MAXIMUM' -> 'PT. EXPRESS MAXIMUM'。"""
+    if not value:
+        return value
+    return re.sub(r"^(PT\.)(\S)", r"\1 \2", value.strip())
+
+
+def _express_parse_long_date(text: Optional[str]) -> Optional[str]:
+    """'1 September 2026' -> '01.09.2026' (跟 HYPER_MEGA 共用的英文月份
+    全名對照表 _EN_MONTHS_FULL)。
+    """
+    if not text:
+        return text
+    m = re.match(r"(\d{1,2})\s+([A-Za-z]+)\s+(\d{4})", text.strip())
+    if not m:
+        return text
+    day, month_name, year = m.groups()
+    month = _EN_MONTHS_FULL.get(month_name.lower())
+    if not month:
+        return text
+    return f"{int(day):02d}.{month:02d}.{year}"
+
+
+def _express_parse_item_date(text: Optional[str]) -> Optional[str]:
+    """'26/Aug/26' (DD/英文月份縮寫/YY) -> '26.08.2026'，年份只有兩位數，
+    這張帳單樣本都是 2000 年後的日期，補成 20YY。
+    """
+    if not text:
+        return text
+    m = _EXPRESS_DATE_PATTERN.match(text.strip())
+    if not m:
+        return text
+    day, month_abbr, year_2digit = m.groups()
+    month = _EN_MONTHS_ABBR.get(month_abbr.lower())
+    if not month:
+        return text
+    return f"{int(day):02d}.{month:02d}.20{year_2digit}"
+
+
+def _express_clean_amount(text: Optional[str]) -> Optional[int]:
+    """英式千分位逗號 '3,737,160' -> 3737160。"""
+    if not text:
+        return None
+    text = text.strip().replace(",", "")
+    return int(text) if text.isdigit() else None
+
+
+def _express_extract_items(text: str) -> List[Dict]:
+    """逐行掃描費用明細表格區塊，只認完整的 9 欄費用行 (換行的續行文字對
+    不上樣式，直接被跳過)。每筆費用各自帶自己的 arrive_date/onboard_date/
+    bl_no/mbl_no (都來自同一行的 DATE/AWB_NO)，交給 expand_to_rows() 做
+    逐筆覆蓋。
+    """
+    items: List[Dict] = []
+    for line in text.split("\n"):
+        stripped = line.strip()
+        m = _EXPRESS_ITEM_PATTERN.match(stripped)
+        if not m:
+            continue
+        date_m = _EXPRESS_DATE_PATTERN.match(stripped)
+        item_date = _express_parse_item_date(date_m.group(0)) if date_m else None
+        awb = m.group("awb").strip()
+        items.append({
+            "description": m.group("desc").strip(),
+            "amount": _express_clean_amount(m.group("amount")),
+            "arrive_date": item_date,
+            "onboard_date": item_date,
+            "bl_no": awb,
+            "mbl_no": awb,
+        })
+    return items
+
+
+def parse_express(text: str) -> Dict:
+    header: Dict[str, Optional[str]] = {}
+
+    header["supplier"] = _express_add_space_after_pt(
+        _search(r"^(PT\.\s*EXPRESS\s*MAXIMUM)", text)
+    )
+    header["consignee"] = _search(r"COMPANY\s*:\s*(.+?)\s*$", text)
+    header["invoice_no"] = _search(r"INVOICE\s+NO\s*:\s*(\S+)", text)
+    header["invoice_date"] = _express_parse_long_date(
+        _search(r"Tangerang\s*,\s*(\d{1,2}\s+[A-Za-z]+\s+\d{4})", text)
+    )
+
+    # 這種帳單沒有 Order No./啟運港/目的港/材積/船名/貨櫃號碼，留空給
+    # expand_to_rows() 補 N/A。到達日/開船日/提單號碼/主提單號碼改成逐筆
+    # 費用各自帶自己的值 (見下面 _express_extract_items())。
+    for code in ("order_no", "port_of_loading", "port_of_discharge",
+                 "volume", "vessel", "container_no",
+                 "arrive_date", "onboard_date", "bl_no", "mbl_no"):
+        header[code] = None
+
+    items = _express_extract_items(text)
+    if not items:
+        items = [{"description": None, "amount": None}]
+
+    return {"header": header, "items": items}
+
+
 register_supplier("DWIHARTA", "PT. DWIHARTA LOGISTINDO", detect_dwiharta, parse_dwiharta)
 register_supplier("KUEHNE_NAGEL", "KUEHNE NAGEL INDONESIA", detect_kuehne_nagel, parse_kuehne_nagel)
 register_supplier("INDOPROSTIME", "PT. INDO PROSTIME EXPRESS", detect_indoprostime, parse_indoprostime)
@@ -1291,3 +1421,4 @@ register_supplier(
     multi_page=True,
 )
 register_supplier("FEMARIA", "PT. FEMARIA BUANA CARGO", detect_femaria, parse_femaria)
+register_supplier("EXPRESS_MAXIMUM", "PT. EXPRESS MAXIMUM", detect_express, parse_express)
