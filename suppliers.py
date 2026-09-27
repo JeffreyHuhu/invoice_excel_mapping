@@ -1638,7 +1638,156 @@ def parse_pancaran(text: str) -> Dict:
         items = [{"description": None, "amount": None}]
 
     return {"header": header, "items": items}
+
+
 register_supplier(
     "PANCARAN", "PT. PANCARAN SRIKANDI LOGISTIK",
     detect_pancaran, parse_pancaran,
+)
+
+
+# ===========================================================================
+# 供應商 12：PT BIROTIKA SEMESTA / DHL EXPRESS (掃描檔 PDF，需要 OCR)
+# ===========================================================================
+#
+# 這是本系統第一家「掃描檔」供應商：PDF 本身沒有文字層 (extract_text()
+# 一律回傳空字串)，全部文字都要靠 extract_utils.py 的 OCR 備援機制
+# (_ocr_page_text()) 辨識出來，這支 parse 函式只要跟其他供應商一樣處理
+# 「已經是文字」的內容就好，不用自己碰 OCR。
+#
+# 這份帳單一張發票橫跨兩頁掃描圖檔：第 1 頁是「服務類型/金額」總覽表
+# (品項/金額都在這一頁，OCR 品質也最好)；第 2 頁是「Air Waybill/Shippers
+# Reference/Shipment Origin Date」明細表，且第 2 頁整頁被掃描成轉了 90 度
+# (OCR 備援機制裡的方向偵測會自動轉正，這裡不用處理)，轉正後 OCR 出來的
+# 文字順序仍然會把同一列的欄位「擠成一行」(不像原始表格那樣分欄)，但因為
+# 一張發票只有一列資料，用「這一行前三個數字依序是 Air Waybill/Shippers
+# Reference/Shipment Origin Date」的位置規則就能可靠取出。
+#
+# 已知的 OCR 誤判：Invoice Number 裡的數字 '0' 常被辨識成英文字母 'O'
+# (例如 'JKTIR00818492' 被讀成 'JKTIROO818492' 或 'JKTIRO0818492')，這個
+# 發票編號的格式固定是「英文字母開頭 + 純數字」，前面的英文字母部分剛好
+# 不含字母 O，所以直接把整個擷取到的編號裡的 'O' 全部換成 '0' 是安全的
+# 修正方式；之後如果遇到其他 OCR 常誤判的字元，比照這個做法在擷取後加一
+# 個修正函式即可。
+def detect_dhl(text: str) -> bool:
+    upper = text.upper()
+    return "BIROTIKA SEMESTA" in upper or "DHL EXPRESS" in upper
+
+
+_DHL_ITEM_PATTERN = re.compile(r"^([A-Z][A-Z /]+[A-Z])\s+([\d,]+)$")
+_DHL_AWB_ROW_PATTERN = re.compile(
+    r"(\d{6,12})\s+(\d{6,12})\s+(\d{1,2}-\d{1,2}-\d{4})\s+JKT"
+)
+
+
+def _dhl_fix_ocr_zero(value: Optional[str]) -> Optional[str]:
+    """OCR 常把發票編號裡的數字 '0' 認成英文字母 'O'，這裡統一換回來。"""
+    if not value:
+        return value
+    return value.replace("O", "0")
+
+
+def _dhl_parse_date(text: Optional[str]) -> Optional[str]:
+    """'31-12-2024' (DD-MM-YYYY) -> '31.12.2024'。"""
+    if not text:
+        return text
+    m = re.match(r"(\d{1,2})-(\d{1,2})-(\d{4})", text.strip())
+    if not m:
+        return text
+    day, month, year = m.groups()
+    return f"{int(day):02d}.{int(month):02d}.{year}"
+
+
+def _dhl_clean_amount(text: Optional[str]) -> Optional[int]:
+    """'662,295' (逗號千分位、無小數) -> 662295。"""
+    if not text:
+        return None
+    text = text.strip().replace(",", "")
+    return int(text) if text.isdigit() else None
+
+
+def _dhl_extract_items(text: str) -> List[Dict]:
+    """從第 1 頁「Analysis of Extra Charges」區塊逐行擷取費用名稱/金額，
+    這個區塊 OCR 品質最好、沒有跟其他欄位擠在同一行，比第 2 頁明細表
+    可靠。
+    """
+    items: List[Dict] = []
+    for line in text.split("\n"):
+        m = _DHL_ITEM_PATTERN.match(line.strip())
+        if not m:
+            continue
+        desc = m.group(1).strip()
+        if desc in ("TOTAL EXTRA CHARGES", "TOTAL DISCOUNTS", "TOTAL VAT"):
+            continue
+        items.append({
+            "description": desc,
+            "amount": _dhl_clean_amount(m.group(2)),
+        })
+    return items
+
+
+def parse_dhl(text: str) -> Dict:
+    header: Dict[str, Optional[str]] = {}
+
+    # 收件公司名稱是整份 OCR 文字的第一行 (信封抬頭最上面一行)，比用通用
+    # 正則表達式亂猜「以 PT 結尾的行」更準，避免誤吃到後面其他也以 PT
+    # 結尾的行 (例如銀行匯款資訊那一段)。
+    first_line = text.split("\n", 1)[0].strip()
+    header["consignee"] = first_line or None
+    header["supplier"] = _search(r"(PT\s+BIROTIKA\s+SEMESTA)\s*/\s*DHL\s+EXPRESS", text)
+    if header["supplier"]:
+        header["supplier"] = f"{header['supplier']} / DHL EXPRESS"
+    # OCR 把這四個標籤跟四個值分別掃描成「標籤欄一整排、值欄一整排」
+    # (先四行標籤：Invoice Number:/Account Number:/Tax ID:/Invoice Date:，
+    # 空一行，再四行對應的值)，不是每個標籤緊接著自己的值，所以不能直接
+    # 用「Invoice Number: 後面第一個字」抓 (那樣會抓到下一個標籤
+    # "Account")，要整塊比對位置對應。
+    m = re.search(
+        r"Invoice\s+Number\s*:\s*\n"
+        r"Account\s+Number\s*:\s*\n"
+        r"Tax\s+ID\s*:\s*\n"
+        r"Invoice\s+Date\s*:\s*\n\s*\n"
+        r"(\S+)\n(\S+)\n(\S+)\n(\d{1,2}-\d{1,2}-\d{4})",
+        text,
+    )
+    if m:
+        header["invoice_no"] = _dhl_fix_ocr_zero(m.group(1))
+        header["invoice_date"] = _dhl_parse_date(m.group(4))
+    else:
+        # 備援：萬一標籤/值的行數對不上 (OCR 結果不穩定)，改用發票號碼
+        # 固定格式 (JKTxxx開頭) 直接在全文找，日期則從 "Invoice Date:"
+        # 後面找最近的一個日期。
+        header["invoice_no"] = _dhl_fix_ocr_zero(
+            _search(r"\b([A-Z]{2,6}[O0-9]{6,})\b", text)
+        )
+        header["invoice_date"] = _dhl_parse_date(
+            _search(r"Invoice\s+Date\s*:\s*\n?\s*(\d{1,2}-\d{1,2}-\d{4})", text)
+        )
+
+    m = _DHL_AWB_ROW_PATTERN.search(text)
+    if m:
+        header["bl_no"] = m.group(1)
+        header["order_no"] = m.group(2)
+        header["onboard_date"] = _dhl_parse_date(m.group(3))
+    else:
+        header["bl_no"] = None
+        header["order_no"] = None
+        header["onboard_date"] = None
+
+    # 這種帳單沒有到達日/主提單號碼/啟運港/目的港/材積/船名/貨櫃號碼，
+    # 留空給 expand_to_rows() 補 N/A。
+    for code in ("arrive_date", "mbl_no", "port_of_loading",
+                 "port_of_discharge", "volume", "vessel", "container_no"):
+        header[code] = None
+
+    items = _dhl_extract_items(text)
+    if not items:
+        items = [{"description": None, "amount": None}]
+
+    return {"header": header, "items": items}
+
+
+register_supplier(
+    "DHL", "PT BIROTIKA SEMESTA / DHL EXPRESS",
+    detect_dhl, parse_dhl,
 )

@@ -97,15 +97,22 @@ st.set_page_config(page_title="多供應商帳單自動化系統", layout="wide"
 # Streamlit 會把它們視為全新的元件重新渲染，藉此讓已上傳的檔案一併被清掉
 # (Streamlit 沒有直接清空 file_uploader 的 API，換 key 是官方建議的做法)。
 # 同時清空比對結果快取，讓使用者可以直接開始下一次全新的查詢。
-# 這裡把按鈕跟標題「併排」放在同一列 (用 st.columns 分左右兩欄，標題靠
-# 左、按鈕靠右緊接在標題後面)，並且要在檔案上傳元件 (file_uploader)
-# 建立之前就先處理完點擊事件，這樣版本號 +1 才能在同一次重新執行時就
-# 套用到底下的 file_uploader key 上。按鈕改成 use_container_width=False，
-# 讓按鈕維持自己原本的大小、緊靠著欄位左邊 (也就是緊接在標題後面)，而不
-# 是被拉伸去塞滿整個右欄、看起來離標題很遠。
+# 這裡把按鈕放在標題「旁邊」(同一列、緊貼著標題文字，不是隔著一大段空白
+# 的右欄)，並且要在檔案上傳元件 (file_uploader) 建立之前就先處理完點擊
+# 事件，這樣版本號 +1 才能在同一次重新執行時就套用到底下的 file_uploader
+# key 上。
+#
+# st.columns() 給的欄寬只是「container 總寬度的比例」，不會自動貼合內容
+# 寬度，如果直接用 st.columns([3,2]) 這種比例分欄，在寬螢幕上標題文字跟
+# 按鈕之間永遠會有一大段空白，看起來不像「旁邊」。這裡改用一個隱形標記
+# (跟下面「重新查詢按鈕塗色」用的是同一種手法) + CSS，把這一整列
+# (st.columns 的 stHorizontalBlock) 改成 flex 排版、兩欄都改成
+# 「依內容自動縮寬」(flex: 0 0 auto)，這樣兩欄會緊貼在一起、齊左對齊，
+# 按鈕才會真正貼在標題文字右邊，不受螢幕寬度影響。
 if "uploader_version" not in st.session_state:
     st.session_state["uploader_version"] = 0
 
+st.markdown('<span id="title-row-marker"></span>', unsafe_allow_html=True)
 title_col, reset_col = st.columns([3, 2])
 with title_col:
     st.title("📄➡️📊 多供應商帳單自動化系統")
@@ -179,14 +186,29 @@ st.markdown(
         border-color: #0D47A1 !important;
         color: #FFFFFF !important;
     }
-    /* 「重新查詢」按鈕再放大 1.5 倍：在全站按鈕已經放大兩倍
-       (32px / padding 1.4em 2em) 的基礎上，這個按鈕再乘以 1.5 倍
-       (32px*1.5=48px、1.4em*1.5=2.1em、2em*1.5=3em)，用同一個
+    /* 「重新查詢」按鈕再放大：在全站按鈕已經放大兩倍
+       (32px / padding 1.4em 2em) 的基礎上，這個按鈕再放大到接近兩倍
+       (32px*1.75=56px、1.4em*1.75≈2.5em、2em*1.75=3.5em)，用同一個
        #reset-btn-marker 選到的按鈕，優先權要比上面那組全站放大規則高，
        所以擺在它後面。 */
     div:has(> #reset-btn-marker) + div button {
-        font-size: 48px !important;
-        padding: 2.1em 3em !important;
+        font-size: 56px !important;
+        padding: 2.5em 3.5em !important;
+    }
+    /* 標題那一列 (見上面的 #title-row-marker) 改成「依內容自動縮寬」的
+       flex 排版，讓「重新查詢」按鈕緊貼在標題文字右邊，不受螢幕寬度影響
+       (預設 st.columns 是依比例撐滿整個寬度，兩欄中間永遠會空一大段)。 */
+    div:has(> #title-row-marker) + div[data-testid="stHorizontalBlock"] {
+        display: flex !important;
+        flex-wrap: nowrap !important;
+        align-items: center !important;
+        justify-content: flex-start !important;
+        gap: 32px !important;
+    }
+    div:has(> #title-row-marker) + div[data-testid="stHorizontalBlock"] > div[data-testid="column"] {
+        flex: 0 0 auto !important;
+        width: auto !important;
+        min-width: 0 !important;
     }
     </style>
     """,
@@ -473,6 +495,37 @@ if has_reference and compare_rows_all:
     st.subheader("📋 逐欄比對明細（🟢相符 / 🔴不相符 / ⚪正確答案為N/A，不計入正確率）")
     cmp_df = pd.DataFrame(compare_rows_all)
 
+    # -----------------------------------------------------------------------
+    # 篩選功能：檔案很多、欄位很多的時候，逐欄比對明細會很長，這裡加幾個
+    # 篩選條件 (來源檔案/供應商/欄位/比對結果) 讓使用者可以只看想看的部分，
+    # 例如只看某一份檔案的「🔴不相符」列，方便抓錯。篩選只影響畫面上顯示
+    # 的表格，下面的「⬇️ 下載核對報告」仍然是完整、未篩選的全部資料，避免
+    # 使用者不小心只匯出篩選後的一部分。
+    # -----------------------------------------------------------------------
+    filter_cols = st.columns(4)
+    with filter_cols[0]:
+        file_options = sorted(cmp_df["來源檔案"].unique()) if "來源檔案" in cmp_df.columns else []
+        selected_files = st.multiselect("依來源檔案篩選", file_options, placeholder="全部檔案")
+    with filter_cols[1]:
+        supplier_options = sorted(cmp_df["供應商"].unique()) if "供應商" in cmp_df.columns else []
+        selected_suppliers = st.multiselect("依供應商篩選", supplier_options, placeholder="全部供應商")
+    with filter_cols[2]:
+        field_options = sorted(cmp_df["欄位"].unique()) if "欄位" in cmp_df.columns else []
+        selected_fields = st.multiselect("依欄位篩選", field_options, placeholder="全部欄位")
+    with filter_cols[3]:
+        result_options = sorted(cmp_df["結果"].unique()) if "結果" in cmp_df.columns else []
+        selected_results = st.multiselect("依比對結果篩選", result_options, placeholder="全部結果")
+
+    filtered_cmp_df = cmp_df
+    if selected_files:
+        filtered_cmp_df = filtered_cmp_df[filtered_cmp_df["來源檔案"].isin(selected_files)]
+    if selected_suppliers:
+        filtered_cmp_df = filtered_cmp_df[filtered_cmp_df["供應商"].isin(selected_suppliers)]
+    if selected_fields:
+        filtered_cmp_df = filtered_cmp_df[filtered_cmp_df["欄位"].isin(selected_fields)]
+    if selected_results:
+        filtered_cmp_df = filtered_cmp_df[filtered_cmp_df["結果"].isin(selected_results)]
+
     def _highlight(row):
         if row["結果"].startswith("✅"):
             color = "background-color:#C6EFCE"
@@ -482,15 +535,19 @@ if has_reference and compare_rows_all:
             color = "background-color:#FFC7CE"
         return [color] * len(row)
 
-    # 注意：st.dataframe 的 height 參數在部分 Streamlit 版本中，傳入 None
-    # 或不合法的數值 (例如條件式算出負數/0) 會直接拋出
-    # StreamlitInvalidHeightError，且錯誤訊息會被 Streamlit Cloud 隱藏成
-    # 一句 "original error message is redacted"。這裡改成不指定 height，
-    # 讓 Streamlit 自行依資料筆數決定高度，避免整支 App 崩潰。
-    st.dataframe(
-        cmp_df.style.apply(_highlight, axis=1),
-        use_container_width=True,
-    )
+    if filtered_cmp_df.empty:
+        st.info("沒有符合篩選條件的資料列，請調整上面的篩選條件。")
+    else:
+        st.caption(f"目前顯示 {len(filtered_cmp_df)} / {len(cmp_df)} 列")
+        # 注意：st.dataframe 的 height 參數在部分 Streamlit 版本中，傳入 None
+        # 或不合法的數值 (例如條件式算出負數/0) 會直接拋出
+        # StreamlitInvalidHeightError，且錯誤訊息會被 Streamlit Cloud 隱藏成
+        # 一句 "original error message is redacted"。這裡改成不指定 height，
+        # 讓 Streamlit 自行依資料筆數決定高度，避免整支 App 崩潰。
+        st.dataframe(
+            filtered_cmp_df.style.apply(_highlight, axis=1),
+            use_container_width=True,
+        )
 
     report_bytes = build_verification_report_excel(score_rows, compare_rows_all)
     st.download_button(
