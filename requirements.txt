@@ -2,3 +2,5 @@ streamlit==1.64.0
 pdfplumber==0.11.10
 openpyxl==3.1.5
 pandas==2.3.3
+pytesseract==0.3.13
+Pillow>=10.0.0

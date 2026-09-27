@@ -36,6 +36,13 @@ from openpyxl import Workbook, load_workbook
 from openpyxl.styles import Font, PatternFill, Alignment
 from openpyxl.utils import get_column_letter
 
+try:
+    import pytesseract
+    _OCR_AVAILABLE = True
+except ImportError:
+    pytesseract = None
+    _OCR_AVAILABLE = False
+
 NA = "N/A"  # 抓不到值時，一律填這個 (使用者需求)
 
 # ---------------------------------------------------------------------------
@@ -83,11 +90,54 @@ DISPLAY_HEADERS: Dict[str, str] = {
 # 2. PDF 文字擷取 (可調參數，供迴圈嘗試不同設定用)
 # ---------------------------------------------------------------------------
 
+# 掃描檔 (沒有文字層的 PDF，例如 DHL 帳單是掃描件轉存的 PDF) OCR 快取：
+# key 是 (pdf_path, page_index)，value 是 OCR 出來的文字。OCR 本身不受
+# pdfplumber_kwargs (x_tolerance 等只對「有文字層」的 PDF 有意義) 影響，
+# find_best_extraction() 會用不同的 kwargs 重複呼叫這支函式最多 20 次，
+# 用快取避免同一頁被重複 OCR 20 次、白白浪費時間。
+_OCR_TEXT_CACHE: Dict[Tuple[str, int], str] = {}
+
+
+def _ocr_page_text(pdf_path: str, page_index: int, page) -> str:
+    """對「沒有文字層」的單一頁面做 OCR，回傳辨識出來的文字。
+
+    掃描件常常整頁被掃描成歪的或轉了 90/180/270 度 (例如 DHL 帳單第 2 頁)，
+    直接 OCR 轉錯方向的圖片只會得到亂碼，所以先用 pytesseract 的方向偵測
+    (image_to_osd) 抓出建議的旋轉角度，轉正後再正式辨識文字。方向偵測本身
+    有時會失敗 (太乾淨的圖、文字太少)，失敗就當作不用轉直接 OCR，不要讓
+    整個擷取流程掛掉。
+    """
+    cache_key = (pdf_path, page_index)
+    if cache_key in _OCR_TEXT_CACHE:
+        return _OCR_TEXT_CACHE[cache_key]
+
+    text = ""
+    if _OCR_AVAILABLE:
+        try:
+            image = page.to_image(resolution=300).original
+            try:
+                osd = pytesseract.image_to_osd(image)
+                m = re.search(r"Rotate:\s*(\d+)", osd)
+                rotate_by = int(m.group(1)) if m else 0
+            except Exception:
+                rotate_by = 0
+            if rotate_by:
+                image = image.rotate(-rotate_by, expand=True)
+            text = pytesseract.image_to_string(image) or ""
+        except Exception:
+            text = ""
+
+    _OCR_TEXT_CACHE[cache_key] = text
+    return text
+
+
 def extract_text_from_pdf(pdf_path: str, **pdfplumber_kwargs) -> str:
     """讀取 PDF 全部頁面文字並合併成一個字串。
 
-    帳單是「可編輯 PDF」，pdfplumber 可以直接抓到文字層。若遇到沒有文字層
-    的掃描檔，這裡會回傳空字串，使用端應提示改用 OCR 或人工輸入。
+    帳單大多是「可編輯 PDF」，pdfplumber 可以直接抓到文字層。若遇到沒有
+    文字層的掃描檔 (例如某一頁整頁都是圖片)，該頁會改用 OCR (見
+    _ocr_page_text()) 辨識文字，不用另外設定，系統會自動判斷每一頁要不要
+    用 OCR。
 
     pdfplumber_kwargs 轉給 page.extract_text()，例如 x_tolerance、
     y_tolerance、layout。不同供應商/不同份 PDF 的版面留白不盡相同，同一組
@@ -96,18 +146,27 @@ def extract_text_from_pdf(pdf_path: str, **pdfplumber_kwargs) -> str:
     """
     parts = []
     with pdfplumber.open(pdf_path) as pdf:
-        for page in pdf.pages:
-            parts.append(page.extract_text(**pdfplumber_kwargs) or "")
+        for i, page in enumerate(pdf.pages):
+            text = page.extract_text(**pdfplumber_kwargs) or ""
+            if not text.strip():
+                text = _ocr_page_text(pdf_path, i, page)
+            parts.append(text)
     return "\n".join(parts)
 
 
 def extract_pages_from_pdf(pdf_path: str, **pdfplumber_kwargs) -> List[str]:
     """跟 extract_text_from_pdf() 一樣，但個別回傳『每一頁』的文字 (不合併成
     一個字串)。給 multi_page 供應商 (一份 PDF 裡有好幾張各自獨立的發票，
-    一頁一張) 逐頁辨識/擷取用。
+    一頁一張) 逐頁辨識/擷取用。同樣會對沒有文字層的頁面自動改用 OCR。
     """
+    pages_text = []
     with pdfplumber.open(pdf_path) as pdf:
-        return [page.extract_text(**pdfplumber_kwargs) or "" for page in pdf.pages]
+        for i, page in enumerate(pdf.pages):
+            text = page.extract_text(**pdfplumber_kwargs) or ""
+            if not text.strip():
+                text = _ocr_page_text(pdf_path, i, page)
+            pages_text.append(text)
+    return pages_text
 
 
 def _generate_extraction_configs(max_attempts: int = 100) -> List[Dict]:
