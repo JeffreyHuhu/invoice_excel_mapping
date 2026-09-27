@@ -1421,4 +1421,109 @@ register_supplier(
     multi_page=True,
 )
 register_supplier("FEMARIA", "PT. FEMARIA BUANA CARGO", detect_femaria, parse_femaria)
+# ===========================================================================
+# 供應商 10：PT. PAN EKSPRES INTERNATIONAL (單頁、單張發票，費用明細表格)
+# ===========================================================================
+#
+# 版面特徵：左右兩欄並排 (跟 DWIHARTA 類似)，例如同一列左邊是收件公司/
+# 抬頭欄位，右邊緊接著 WO.No/Inv.No/Inv.Date 等欄位，用「遇到下一個已知
+# 欄位關鍵字就停止擷取」的方式抓值。CONSIGNEE 比較特殊：「TO :」跟它的值
+# 不在同一行 (那一行右邊剛好被 "WO.No : ..." 佔走)，值是接在下一行、
+# 銜接到 "Inv.No" 關鍵字前面。
+#
+# 到達日/開船日分別對應 ETA (估計到達時間) / ETD (估計出發時間)，日期格式
+# 是 'DD-Mon-YYYY' (三字英文月份縮寫)，沿用 MAERSK 已定義的
+# _EN_MONTHS_ABBR 對照表。
+#
+# 費用明細行格式："編號 費用名稱 數量 單位 幣別 單價 金額"，例如：
+#   "1 HANDLING SERVICE 1 Dokumen IDR 450,000.00 450,000.00"
+# 表頭本身就明寫最後一欄是 "Amount"，所以直接取最後一個數字。
+def detect_pan_ekspres(text: str) -> bool:
+    return "PAN EKSPRES INTERNATIONAL" in text.upper()
+
+
+_PAN_ITEM_PATTERN = re.compile(
+    r"^\d+\s+(?P<desc>.+?)\s+[\d.]+\s+\S+\s+[A-Z]{3}\s+[\d,]+\.\d{2}\s+"
+    r"(?P<amount>[\d,]+\.\d{2})$"
+)
+
+
+def _pan_parse_date(text: Optional[str]) -> Optional[str]:
+    """'09-Sep-2026' -> '09.09.2026' (跟 MAERSK/TRANS_DAYA_PRIMA 共用的
+    英文月份縮寫對照表 _EN_MONTHS_ABBR)。
+    """
+    if not text:
+        return text
+    m = re.match(r"(\d{1,2})-([A-Za-z]{3})-(\d{4})", text.strip())
+    if not m:
+        return text
+    day, month_abbr, year = m.groups()
+    month = _EN_MONTHS_ABBR.get(month_abbr.lower())
+    if not month:
+        return text
+    return f"{int(day):02d}.{month:02d}.{year}"
+
+
+def _pan_clean_amount(text: Optional[str]) -> Optional[int]:
+    """'450,000.00' (逗號千分位、句點小數) -> 450000。"""
+    if not text:
+        return None
+    text = text.strip().replace(",", "")
+    try:
+        return int(round(float(text)))
+    except ValueError:
+        return None
+
+
+def _pan_extract_items(text: str) -> List[Dict]:
+    items: List[Dict] = []
+    for line in text.split("\n"):
+        m = _PAN_ITEM_PATTERN.match(line.strip())
+        if not m:
+            continue
+        items.append({
+            "description": m.group("desc").strip(),
+            "amount": _pan_clean_amount(m.group("amount")),
+        })
+    return items
+
+
+def parse_pan_ekspres(text: str) -> Dict:
+    header: Dict[str, Optional[str]] = {}
+
+    header["supplier"] = _search(r"^(PT\.\s*PAN\s*EKSPRES\s*INTERNATIONAL)", text)
+    header["consignee"] = _search(r"TO\s*:.*?\n\s*(.+?)\s+Inv\.No", text)
+    header["invoice_no"] = _search(r"Inv\.No\s*:\s*(\S+)", text)
+    header["invoice_date"] = _pan_parse_date(
+        _search(r"Inv\.Date\s*:\s*(\d{1,2}-[A-Za-z]{3}-\d{4})", text)
+    )
+    header["bl_no"] = _search(r"BL\.No\s*:\s*(\S+)", text)
+    header["mbl_no"] = header["bl_no"]
+    header["vessel"] = _search(r"Vessel\s*:\s*(.+?)\s*$", text)
+    header["port_of_loading"] = _search(r"POL\s*:\s*(.+?)\s+No AJU", text)
+    header["port_of_discharge"] = _search(r"POD\s*:\s*(.+?)\s+Party", text)
+    header["volume"] = _search(r"Party\s*:\s*(.+?)\s*$", text)
+    header["arrive_date"] = _pan_parse_date(
+        _search(r"ETA\s*:\s*(\d{1,2}-[A-Za-z]{3}-\d{4})", text)
+    )
+    header["onboard_date"] = _pan_parse_date(
+        _search(r"ETD\s*:\s*(\d{1,2}-[A-Za-z]{3}-\d{4})", text)
+    )
+
+    # 這種帳單沒有 Order No./貨櫃號碼 (Container No 這欄印出來但值是空的)，
+    # 留空給 expand_to_rows() 補 N/A。
+    header["order_no"] = None
+    header["container_no"] = None
+
+    items = _pan_extract_items(text)
+    if not items:
+        items = [{"description": None, "amount": None}]
+
+    return {"header": header, "items": items}
+
+
 register_supplier("EXPRESS_MAXIMUM", "PT. EXPRESS MAXIMUM", detect_express, parse_express)
+register_supplier(
+    "PAN_EKSPRES", "PT. PAN EKSPRES INTERNATIONAL",
+    detect_pan_ekspres, parse_pan_ekspres,
+)
