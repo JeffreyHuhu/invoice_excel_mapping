@@ -97,9 +97,12 @@ st.set_page_config(page_title="多供應商帳單自動化系統", layout="wide"
 # Streamlit 會把它們視為全新的元件重新渲染，藉此讓已上傳的檔案一併被清掉
 # (Streamlit 沒有直接清空 file_uploader 的 API，換 key 是官方建議的做法)。
 # 同時清空比對結果快取，讓使用者可以直接開始下一次全新的查詢。
-# 這裡把按鈕移到畫面「右上方」(跟標題同一列，靠右對齊)，並且要在檔案上傳
-# 元件 (file_uploader) 建立之前就先處理完點擊事件，這樣版本號 +1 才能在
-# 同一次重新執行時就套用到底下的 file_uploader key 上。
+# 這裡把按鈕跟標題「併排」放在同一列 (用 st.columns 分左右兩欄，標題靠
+# 左、按鈕靠右緊接在標題後面)，並且要在檔案上傳元件 (file_uploader)
+# 建立之前就先處理完點擊事件，這樣版本號 +1 才能在同一次重新執行時就
+# 套用到底下的 file_uploader key 上。按鈕改成 use_container_width=False，
+# 讓按鈕維持自己原本的大小、緊靠著欄位左邊 (也就是緊接在標題後面)，而不
+# 是被拉伸去塞滿整個右欄、看起來離標題很遠。
 if "uploader_version" not in st.session_state:
     st.session_state["uploader_version"] = 0
 
@@ -111,7 +114,7 @@ with reset_col:
     st.markdown('<span id="reset-btn-marker"></span>', unsafe_allow_html=True)
     reset_clicked = st.button(
         "🔄 重新查詢",
-        use_container_width=True,
+        use_container_width=False,
         help="清空比對結果、快取，並清除已上傳的 PDF / 正確答案 Excel，方便重新上傳新的一批檔案。",
     )
 if reset_clicked:

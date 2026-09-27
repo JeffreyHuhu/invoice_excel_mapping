@@ -1527,3 +1527,118 @@ register_supplier(
     "PAN_EKSPRES", "PT. PAN EKSPRES INTERNATIONAL",
     detect_pan_ekspres, parse_pan_ekspres,
 )
+
+
+# ===========================================================================
+# 供應商 11：PT. PANCARAN SRIKANDI LOGISTIK (單頁、單張發票，費用明細表格)
+# ===========================================================================
+#
+# 版面特徵：
+#   - Invoice No 的標籤跟值分兩行印出 ("Invoice No:" 換行才是
+#     "INV.2609.0014")。
+#   - REFERENCE NO. (對應 Order No.) 跟 Container No. 這兩個欄位的值都很
+#     長，會換行接到下一行，而且換行處常常跟右邊另一欄的文字擠在同一行
+#     (例如 REFERENCE NO. 那一行右邊接著 Qty/Commodity 說明文字)。正確
+#     答案 Excel 裡這兩欄本身也是保留原本 PDF 斷行位置的多行文字 (用
+#     '\n' 分段，比對時 normalize_value() 會把換行當空白處理，所以只要
+#     斷行的文字內容跟順序一樣，斷在哪一行不影響比對結果)。
+#   - REFERENCE NO. 只取「值」的第一個字詞 (中間用空白隔開的字才是接在
+#     它後面的 Qty/Commodity 說明，不算 Order No. 的一部分)，續行同理只
+#     取續行的第一個字詞。
+#   - Container No. 沒有额外文字混在同一行，續行只要是「全部由大寫字母/
+#     數字/逗號組成」的整行文字，就當作是還在延續同一個貨櫃號碼清單，
+#     遇到不是這種格式的行 (例如換頁後單獨一個逗號、或後面的 Amount
+#     表格) 就停止。
+def detect_pancaran(text: str) -> bool:
+    return "PANCARAN SRIKANDI LOGISTIK" in text.upper()
+
+
+_PANCARAN_ITEM_PATTERN = re.compile(
+    r"^\d+\s+(?P<desc>.+?)\s+\d+\s+[\d,]+\s+(?P<amount>[\d,]+)$"
+)
+
+
+def _pancaran_clean_amount(text: Optional[str]) -> Optional[int]:
+    """'75,660,000' (逗號千分位、無小數) -> 75660000。"""
+    if not text:
+        return None
+    text = text.strip().replace(",", "")
+    return int(text) if text.isdigit() else None
+
+
+def _pancaran_extract_order_no(text: str) -> Optional[str]:
+    lines = text.split("\n")
+    for i, line in enumerate(lines):
+        m = re.search(r"REFERENCE\s+NO\.\s*:\s*(\S+)", line)
+        if not m:
+            continue
+        parts = [m.group(1)]
+        if i + 1 < len(lines):
+            nxt = lines[i + 1].strip()
+            if nxt.startswith("/"):
+                m2 = re.match(r"(\S+)", nxt)
+                if m2:
+                    parts.append(m2.group(1))
+        return "\n".join(parts)
+    return None
+
+
+def _pancaran_extract_container_no(text: str) -> Optional[str]:
+    lines = text.split("\n")
+    for i, line in enumerate(lines):
+        m = re.search(r"JOB\s+NO\.\s*:\s*\S+\s+(.+)$", line)
+        if not m:
+            continue
+        parts = [m.group(1).strip()]
+        j = i + 1
+        while j < len(lines):
+            nxt = lines[j].strip()
+            if len(nxt) > 1 and re.fullmatch(r"[A-Z0-9,]+", nxt):
+                parts.append(nxt)
+                j += 1
+            else:
+                break
+        return "\n".join(parts)
+    return None
+
+
+def _pancaran_extract_items(text: str) -> List[Dict]:
+    items: List[Dict] = []
+    for line in text.split("\n"):
+        m = _PANCARAN_ITEM_PATTERN.match(line.strip())
+        if not m:
+            continue
+        items.append({
+            "description": m.group("desc").strip(),
+            "amount": _pancaran_clean_amount(m.group("amount")),
+        })
+    return items
+
+
+def parse_pancaran(text: str) -> Dict:
+    header: Dict[str, Optional[str]] = {}
+
+    header["supplier"] = _search(r"A\.N\.\s*(PT\..+?)\s*$", text)
+    header["consignee"] = _search(r"CONSIGNEE\s*:\s*(.+?)\s*$", text)
+    header["invoice_no"] = _search(r"Invoice\s+No\s*:\s*\n\s*(\S+)", text)
+    header["invoice_date"] = _express_parse_long_date(
+        _search(r"DATE\s*:\s*(\d{1,2}\s+[A-Za-z]+\s+\d{4})", text)
+    )
+    header["order_no"] = _pancaran_extract_order_no(text)
+    header["container_no"] = _pancaran_extract_container_no(text)
+
+    # 這種帳單沒有到達日/開船日/提單號碼/主提單號碼/啟運港/目的港/材積/
+    # 船名，留空給 expand_to_rows() 補 N/A。
+    for code in ("arrive_date", "onboard_date", "bl_no", "mbl_no",
+                 "port_of_loading", "port_of_discharge", "volume", "vessel"):
+        header[code] = None
+
+    items = _pancaran_extract_items(text)
+    if not items:
+        items = [{"description": None, "amount": None}]
+
+    return {"header": header, "items": items}
+register_supplier(
+    "PANCARAN", "PT. PANCARAN SRIKANDI LOGISTIK",
+    detect_pancaran, parse_pancaran,
+)
