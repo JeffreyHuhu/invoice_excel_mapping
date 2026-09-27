@@ -103,7 +103,7 @@ st.set_page_config(page_title="多供應商帳單自動化系統", layout="wide"
 if "uploader_version" not in st.session_state:
     st.session_state["uploader_version"] = 0
 
-title_col, reset_col = st.columns([5, 1])
+title_col, reset_col = st.columns([3, 2])
 with title_col:
     st.title("📄➡️📊 多供應商帳單自動化系統")
 with reset_col:
@@ -175,6 +175,15 @@ st.markdown(
         background-color: #0D47A1 !important;
         border-color: #0D47A1 !important;
         color: #FFFFFF !important;
+    }
+    /* 「重新查詢」按鈕再放大 1.5 倍：在全站按鈕已經放大兩倍
+       (32px / padding 1.4em 2em) 的基礎上，這個按鈕再乘以 1.5 倍
+       (32px*1.5=48px、1.4em*1.5=2.1em、2em*1.5=3em)，用同一個
+       #reset-btn-marker 選到的按鈕，優先權要比上面那組全站放大規則高，
+       所以擺在它後面。 */
+    div:has(> #reset-btn-marker) + div button {
+        font-size: 48px !important;
+        padding: 2.1em 3em !important;
     }
     </style>
     """,

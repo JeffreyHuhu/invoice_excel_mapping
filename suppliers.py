@@ -1162,6 +1162,118 @@ def parse_trans(text: str) -> Dict:
     return {"header": header, "items": items}
 
 
+# ===========================================================================
+# 供應商 8：PT. FEMARIA BUANA CARGO (單頁、單張發票，費用明細表格)
+# ===========================================================================
+#
+# 版面特徵：抬頭欄位分散在多行、常常跟右邊另一個欄位擠在同一行 (例如
+# "To : Pouchen Indonesia,PT Invoice IDR No. : 53299/PCI/INV/2026")，用
+# 「遇到下一個已知欄位關鍵字就停止擷取」的方式抓值。
+#
+# 費用明細行格式："編號.(代碼)-費用名稱 中間的參考碼 金額"，例如：
+#   "1.(602)-LIFTOFF HJS/K20260136472IHM 699.300,00"
+#   "5.HANDLING CHARGES PPh 23 300.000,00"     (中間參考碼可能是兩個字 "PPh 23")
+#   "4.BIAYA SEGEL CONTAINER - 25.000,00"       (中間參考碼可能只是一個 "-")
+# 金額都是最後一欄 (Amount IDR)，因為 Amout USD / Kurs 兩欄是空的，
+# pdfplumber 抽取出來的文字只剩一個數字。
+#
+# 已知問題：原始 PDF 裡有些費用名稱底層文字本身就沒有空格 (不是
+# pdfplumber 抽取參數的問題，用任何 x_tolerance 測試結果都一樣)，例如
+# "THC-TERMINALHANDLINGCHARGE" 應該是 "THC-TERMINAL HANDLING CHARGE"。
+# 這種已知的沾黏文字用 _FEMARIA_DESC_FIXUPS 對照表修正，之後如果遇到其他
+# 沾黏的費用名稱，比照這個表補上新的一筆即可，不用改其他程式碼。
+_FEMARIA_DESC_FIXUPS = {
+    "THC-TERMINALHANDLINGCHARGE": "THC-TERMINAL HANDLING CHARGE",
+}
+
+_FEMARIA_ITEM_PATTERN = re.compile(
+    r"^\d+\.\s*(?P<desc>.+?)\s+(?P<ref>-|PPh\s*23|\S+)\s+(?P<amount>[\d.,]+)$"
+)
+
+
+def detect_femaria(text: str) -> bool:
+    return "FEMARIA BUANA CARGO" in text.upper()
+
+
+def _femaria_parse_date(text: Optional[str]) -> Optional[str]:
+    """'2026-01-09' (YYYY-MM-DD) -> '09.01.2026'，統一成跟其他供應商一樣
+    的 'DD.MM.YYYY'。
+    """
+    if not text:
+        return text
+    m = re.match(r"(\d{4})-(\d{1,2})-(\d{1,2})", text.strip())
+    if not m:
+        return text
+    year, month, day = m.groups()
+    return f"{int(day):02d}.{int(month):02d}.{year}"
+
+
+def _femaria_clean_amount(text: Optional[str]) -> Optional[int]:
+    """印尼式數字 '2.276.380,00' (句點千分位、逗號小數) -> 2276380。"""
+    if not text:
+        return None
+    text = text.strip().split(",")[0].replace(".", "")
+    return int(text) if text.lstrip("-").isdigit() else None
+
+
+def _femaria_clean_desc(text: Optional[str]) -> Optional[str]:
+    """去掉開頭 '(代碼)-' 的費用代碼前綴，並修正已知的沾黏文字。"""
+    if not text:
+        return text
+    text = re.sub(r"^\(\d+\)-", "", text.strip()).strip()
+    return _FEMARIA_DESC_FIXUPS.get(text, text)
+
+
+def _femaria_add_space_after_comma(value: Optional[str]) -> Optional[str]:
+    """'Pouchen Indonesia,PT' -> 'Pouchen Indonesia, PT'。"""
+    if not value:
+        return value
+    return re.sub(r",(\S)", r", \1", value.strip())
+
+
+def _femaria_extract_items(text: str) -> List[Dict]:
+    items: List[Dict] = []
+    for line in text.split("\n"):
+        m = _FEMARIA_ITEM_PATTERN.match(line.strip())
+        if not m:
+            continue
+        items.append({
+            "description": _femaria_clean_desc(m.group("desc")),
+            "amount": _femaria_clean_amount(m.group("amount")),
+        })
+    return items
+
+
+def parse_femaria(text: str) -> Dict:
+    header: Dict[str, Optional[str]] = {}
+
+    header["supplier"] = _search(r"^(PT\.\s*FEMARIA\s*BUANA\s*CARGO)", text)
+    header["consignee"] = _femaria_add_space_after_comma(
+        _search(r"To\s*:\s*(.+?)\s+Invoice\s+IDR\s+No", text)
+    )
+    header["invoice_no"] = _search(r"Invoice\s+IDR\s+No\.\s*:\s*(\S+)", text)
+    header["invoice_date"] = _femaria_parse_date(
+        _search(r"Jakarta\s*,\s*(\d{4}-\d{1,2}-\d{1,2})", text)
+    )
+    header["volume"] = _search(r"Detail pty.*?:\s*\((.+?)\)", text)
+    header["vessel"] = _search(r"Vessel\s*/\s*Voyage\s*:\s*(.+?)\s+ATA", text)
+    header["bl_no"] = _search(r"BL/AWB\s+No\.\s*:\s*(\S+)", text)
+    header["mbl_no"] = header["bl_no"]
+
+    # 這種帳單沒有到達日/開船日/啟運港/目的港/貨櫃號碼/Order No.，留空給
+    # expand_to_rows() 補 N/A (SPJK/SPJM Date、ATA、Uitslag Date 印出來的都是
+    # 假的佔位日期 '0000-00-00 00:00:00'，不是真的日期，所以不擷取)。
+    for code in ("order_no", "arrive_date", "onboard_date",
+                 "port_of_loading", "port_of_discharge", "container_no"):
+        header[code] = None
+
+    items = _femaria_extract_items(text)
+    if not items:
+        items = [{"description": None, "amount": None}]
+
+    return {"header": header, "items": items}
+
+
 register_supplier("DWIHARTA", "PT. DWIHARTA LOGISTINDO", detect_dwiharta, parse_dwiharta)
 register_supplier("KUEHNE_NAGEL", "KUEHNE NAGEL INDONESIA", detect_kuehne_nagel, parse_kuehne_nagel)
 register_supplier("INDOPROSTIME", "PT. INDO PROSTIME EXPRESS", detect_indoprostime, parse_indoprostime)
@@ -1178,3 +1290,4 @@ register_supplier(
     "TRANS_DAYA_PRIMA", "PT. TRANS DAYA PRIMA", detect_trans, parse_trans,
     multi_page=True,
 )
+register_supplier("FEMARIA", "PT. FEMARIA BUANA CARGO", detect_femaria, parse_femaria)
