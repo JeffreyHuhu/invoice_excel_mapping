@@ -137,10 +137,10 @@ if reset_clicked:
     st.rerun()
 
 # 流程說明改成①②③由上而下各自一行 (並列顯示，不要擠成一段用箭頭串起來的
-# 長文字)，字體指定為固定的 14px。
+# 長文字)，字體指定為固定的 16px。
 st.markdown(
     f"""
-    <div style="font-size:14px; color:#000000; font-weight:500; line-height:1.7; margin-bottom:16px;">
+    <div style="font-size:16px; color:#000000; font-weight:500; line-height:1.7; margin-bottom:16px;">
         <div>① 自動辨識帳單屬於哪家供應商</div>
         <div>② 套用該供應商專屬的擷取規則</div>
         <div>③ 跟正確答案 Excel 逐欄比對算出正確率
@@ -172,7 +172,7 @@ st.markdown(
     div[data-testid="stButton"] > button,
     div[data-testid="stDownloadButton"] > button,
     div[data-testid="stFormSubmitButton"] > button {
-        font-size: 14px !important;
+        font-size: 16px !important;
         font-weight: 800 !important;
         padding: 1.4em 2em !important;
         height: auto !important;
@@ -191,12 +191,11 @@ st.markdown(
         border-color: #64B5F6 !important;
         color: #0D3B66 !important;
     }
-    /* 「重新查詢」按鈕跟其他按鈕統一改成一樣的字體大小 (14px)，不再特別
-       放大，維持較大的內距讓按鈕本身還是比一般按鈕醒目一點。顏色也統一
-       跟其他按鈕一樣是淺藍色 (見上面全站按鈕的規則)，這裡不用再另外塗色。 */
+    /* 「重新查詢」按鈕縮小成一般按鈕的一半大小 (內距改成全站按鈕的 50%：
+       1.4em/2em -> 0.7em/1em)，字體大小則沿用上面全站按鈕統一的 16px，
+       不再另外放大/縮小字體，只縮小按鈕本身的內距 (視覺上的按鈕面積)。 */
     div:has(> #reset-btn-marker) + div button {
-        font-size: 14px !important;
-        padding: 2.5em 3.5em !important;
+        padding: 0.7em 1em !important;
     }
     /* 標題那一列 (見上面的 #title-row-marker) 改成「依內容自動縮寬」的
        flex 排版，並把「重新查詢」按鈕推到最右邊 (空間用 space-between
@@ -235,9 +234,10 @@ st.markdown(
 st.markdown(
     """
     <style>
-    /* 上傳元件標題文字 (「① 上傳 PDF 帳單...」/「② (選填) 上傳正確答案...」) */
+    /* 上傳元件標題文字 (「① 上傳 PDF 帳單...」/「② (選填) 上傳正確答案...」)
+       字體指定為固定的 16px。 */
     [data-testid="stFileUploader"] label p {
-        font-size: 1.6em !important;
+        font-size: 16px !important;
         font-weight: 700 !important;
     }
     /* 拖曳上傳的虛線框區塊本身：內距、最小高度都放大兩倍 */
