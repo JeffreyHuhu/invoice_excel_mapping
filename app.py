@@ -76,7 +76,7 @@ try:
         is_multi_page_supplier,
     )
 except ImportError as e:
-    st.set_page_config(page_title="多供應商帳單自動化系統 - 啟動失敗", layout="wide")
+    st.set_page_config(page_title="供應商帳單自動化辨識系統 - 啟動失敗", layout="wide")
     st.error(
         f"❌ 系統啟動失敗，缺少必要的 Python 套件：`{e}`\n\n"
         "這通常代表 Streamlit Cloud 沒有正確安裝 `requirements.txt` 裡列出的套件"
@@ -91,7 +91,7 @@ except ImportError as e:
     )
     st.stop()
 
-st.set_page_config(page_title="多供應商帳單自動化系統", layout="wide")
+st.set_page_config(page_title="供應商帳單自動化辨識系統", layout="wide")
 
 # 「重新查詢」按鈕：把檔案上傳元件的 key 綁定一個版本號，版本號加 1 之後
 # Streamlit 會把它們視為全新的元件重新渲染，藉此讓已上傳的檔案一併被清掉
@@ -115,7 +115,7 @@ if "uploader_version" not in st.session_state:
 st.markdown('<span id="title-row-marker"></span>', unsafe_allow_html=True)
 title_col, reset_col = st.columns([3, 2])
 with title_col:
-    st.title("📄➡️📊 多供應商帳單自動化系統")
+    st.title("📄➡️📊 供應商帳單自動化辨識系統")
 with reset_col:
     st.write("")  # 讓按鈕跟標題文字的垂直位置對齊，不要黏在最上緣
     st.markdown('<span id="reset-btn-marker"></span>', unsafe_allow_html=True)
@@ -131,10 +131,11 @@ if reset_clicked:
     st.rerun()
 
 # 流程說明改成①②③由上而下各自一行 (並列顯示，不要擠成一段用箭頭串起來的
-# 長文字)，字體再放大 1.5 倍 (原本 19px -> 約 29px)。
+# 長文字)，字體再放大 1.5 倍 (原本 19px -> 約 29px)，後來全站字體又統一縮小
+# 成 0.8 倍 (29px -> 23px)。
 st.markdown(
     f"""
-    <div style="font-size:29px; color:#000000; font-weight:500; line-height:1.7; margin-bottom:16px;">
+    <div style="font-size:23px; color:#000000; font-weight:500; line-height:1.7; margin-bottom:16px;">
         <div>① 自動辨識帳單屬於哪家供應商</div>
         <div>② 套用該供應商專屬的擷取規則</div>
         <div>③ 跟正確答案 Excel 逐欄比對算出正確率
@@ -166,7 +167,7 @@ st.markdown(
     div[data-testid="stButton"] > button,
     div[data-testid="stDownloadButton"] > button,
     div[data-testid="stFormSubmitButton"] > button {
-        font-size: 32px !important;
+        font-size: 26px !important;
         font-weight: 800 !important;
         padding: 1.4em 2em !important;
         height: auto !important;
@@ -186,13 +187,10 @@ st.markdown(
         border-color: #0D47A1 !important;
         color: #FFFFFF !important;
     }
-    /* 「重新查詢」按鈕再放大：在全站按鈕已經放大兩倍
-       (32px / padding 1.4em 2em) 的基礎上，這個按鈕再放大到接近兩倍
-       (32px*1.75=56px、1.4em*1.75≈2.5em、2em*1.75=3.5em)，用同一個
-       #reset-btn-marker 選到的按鈕，優先權要比上面那組全站放大規則高，
-       所以擺在它後面。 */
+    /* 「重新查詢」按鈕再放大：在全站按鈕的字體大小基礎上再放大一些，
+       整體字體後來又統一縮小成 0.8 倍 (56px*0.8=45px)。 */
     div:has(> #reset-btn-marker) + div button {
-        font-size: 56px !important;
+        font-size: 45px !important;
         padding: 2.5em 3.5em !important;
     }
     /* 標題那一列 (見上面的 #title-row-marker) 改成「依內容自動縮寬」的
@@ -224,7 +222,7 @@ st.markdown(
     <style>
     /* 上傳元件標題文字 (「① 上傳 PDF 帳單...」/「② (選填) 上傳正確答案...」) */
     [data-testid="stFileUploader"] label p {
-        font-size: 2em !important;
+        font-size: 1.6em !important;
         font-weight: 700 !important;
     }
     /* 拖曳上傳的虛線框區塊本身：內距、最小高度都放大兩倍 */
@@ -232,27 +230,30 @@ st.markdown(
         padding: 2.4em 2em !important;
         min-height: 220px !important;
     }
-    /* 拖曳區塊裡的說明文字 ("Drag and drop file here"、檔案大小限制...) */
+    /* 拖曳區塊裡的說明文字 ("Drag and drop file here"、檔案大小限制...)
+       字體後來又統一縮小成 0.8 倍 (2em->1.6em、1.5em->1.2em)。 */
     [data-testid="stFileUploaderDropzoneInstructions"] span,
     [data-testid="stFileUploaderDropzoneInstructions"] small {
-        font-size: 2em !important;
+        font-size: 1.6em !important;
     }
     [data-testid="stFileUploaderDropzoneInstructions"] small {
-        font-size: 1.5em !important;
+        font-size: 1.2em !important;
     }
     /* 雲朵上傳圖示放大兩倍 */
     [data-testid="stFileUploaderDropzoneInstructions"] svg {
         width: 2.4em !important;
         height: 2.4em !important;
     }
-    /* 「Browse files」按鈕放大兩倍 */
+    /* 「Browse files」按鈕放大兩倍，字體後來又統一縮小成 0.8 倍
+       (1.4em->1.12em)。 */
     [data-testid="stFileUploaderDropzone"] button {
-        font-size: 1.4em !important;
+        font-size: 1.12em !important;
         padding: 0.8em 1.4em !important;
     }
-    /* 已上傳檔案清單 (檔名、大小、刪除按鈕) 跟著放大，維持視覺比例一致 */
+    /* 已上傳檔案清單 (檔名、大小、刪除按鈕) 跟著放大，維持視覺比例一致，
+       字體後來又統一縮小成 0.8 倍 (1.6em->1.28em)。 */
     [data-testid="stFileUploaderFile"] {
-        font-size: 1.6em !important;
+        font-size: 1.28em !important;
     }
     </style>
     """,
@@ -447,10 +448,10 @@ _big_color = "#1a7f37" if (not has_reference or all_reached_100) else "#c0392b"
 st.markdown(
     f"""
     <div style="text-align:center; padding: 12px 0 4px 0;">
-        <div style="font-size:96px; font-weight:800; line-height:1; color:{_big_color};">
+        <div style="font-size:77px; font-weight:800; line-height:1; color:{_big_color};">
             {avg_score:.1f}%
         </div>
-        <div style="font-size:20px; color:#666; margin-top:4px;">
+        <div style="font-size:16px; color:#666; margin-top:4px;">
             整體{score_label}（所有 {len(score_rows)} 份 PDF 平均）
         </div>
     </div>
