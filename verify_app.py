@@ -52,6 +52,8 @@ try:
     import suppliers  # noqa: F401 (觸發所有供應商的 register_supplier())
     from extract_utils import (
         NA,
+        FIELD_CODES,
+        DISPLAY_HEADERS,
         find_best_extraction,
         detect_supplier,
         extract_text_from_pdf,
@@ -214,7 +216,7 @@ if reset_clicked:
     st.session_state.pop("verify_result", None)
     st.session_state.pop("verify_signature", None)
     for k in list(st.session_state.keys()):
-        if k.startswith("err_") or k.startswith("fix_"):
+        if k.startswith("err_") or k.startswith("fix_") or k.startswith("confirmed_"):
             del st.session_state[k]
     st.session_state["uploader_version"] += 1
     st.rerun()
@@ -258,15 +260,9 @@ file_signature = hashlib.md5(uploaded_pdf.getvalue()).hexdigest()
 
 run_clicked = st.button("▶️ 開始擷取", type="primary", use_container_width=True)
 
-# 只有「換了新檔案」或「按下開始擷取」才重新跑一次擷取，避免使用者每次
-# 勾選/輸入正確答案 (Streamlit 每次互動都會重新執行整支程式) 都重新跑一次
-# 最多 20 次的擷取重試迴圈，浪費運算資源、也會讓畫面一直閃爍重置。
-need_extract = (
-    run_clicked
-    or st.session_state.get("verify_signature") != file_signature
-)
-
-if need_extract:
+# 一定要按下「▶️ 開始擷取」才會真的執行擷取；換了新檔案不會自動觸發，
+# 避免使用者還沒按按鈕、畫面就自己跑起來，甚至誤用上一份檔案的殘留結果。
+if run_clicked:
     with tempfile.NamedTemporaryFile(suffix=".pdf", delete=False) as tmp:
         tmp.write(uploaded_pdf.getvalue())
         tmp_path = tmp.name
@@ -278,11 +274,17 @@ if need_extract:
 
     st.session_state["verify_result"] = result
     st.session_state["verify_signature"] = file_signature
-    # 換了新檔案，把之前殘留的標記狀態清掉，避免誤把上一份帳單的錯誤標記
-    # 誤植到這一份帳單上。
+    # 換了新檔案重新擷取，把之前殘留的標記狀態清掉，避免誤把上一份帳單
+    # 的錯誤標記/確認狀態誤植到這一份帳單上。
     for k in list(st.session_state.keys()):
-        if k.startswith("err_") or k.startswith("fix_"):
+        if k.startswith("err_") or k.startswith("fix_") or k.startswith("confirmed_"):
             del st.session_state[k]
+
+# 目前上傳的檔案還沒按過「開始擷取」(或換了檔案但沿用的是上一份的結果)，
+# 就不要顯示任何擷取結果，避免看到不是這份檔案的資料。
+if st.session_state.get("verify_signature") != file_signature:
+    st.info("請按上方「▶️ 開始擷取」，開始擷取這份帳單的資料。")
+    st.stop()
 
 result = st.session_state.get("verify_result")
 if result is None:
@@ -372,10 +374,89 @@ for inv_no, idxs in invoice_groups:
 
 st.info(f"目前已標記 **{marked_count}** / {total_fields} 個欄位為錯誤，其餘視為忽略。")
 
+# 全部欄位都正確 (沒有任何標記) 的話，要求使用者按下「確認無誤」才能繼續
+# 產生執行結果，避免使用者根本還沒看完就直接下載。標記過至少一個錯誤，
+# 則視為已經完成核對，不需要再另外確認。
+confirm_key = f"confirmed_{file_signature}"
+if marked_count == 0:
+    if st.button("✅ 確認無誤（此帳單所有欄位都正確）"):
+        st.session_state[confirm_key] = True
+        st.rerun()
+
+ready_for_export = marked_count > 0 or st.session_state.get(confirm_key, False)
+
 # ---------------------------------------------------------------------------
-# ③ 產生回饋記錄 Excel
+# ③ 下載執行結果 / 回饋記錄
 # ---------------------------------------------------------------------------
-st.subheader("③ 下載回饋記錄")
+st.subheader("③ 下載執行結果")
+
+if not ready_for_export:
+    st.caption("請先核對以上欄位：有錯誤請標記並填入正確答案；全部正確請按上方「✅ 確認無誤」。")
+
+
+def _resolve_final_value(code: str, row_idx: int, inv_no: str, row: dict, marks: dict):
+    """算出這個欄位「最終」該輸出的值：如果被標記為錯誤，改用人工填的正確
+    答案；沒有標記就沿用系統擷取值。品項欄位 (description/amount) 用
+    row_idx 當 key、抬頭欄位用 inv_no 當 key，跟畫面上核對時用的 key
+    規則完全一致。
+    """
+    item_err_key = f"err_{file_signature}_{row_idx}_{code}"
+    if marks.get(item_err_key):
+        return marks.get(f"fix_{file_signature}_{row_idx}_{code}", "") or "N/A"
+    header_err_key = f"err_{file_signature}_{inv_no}_{code}"
+    if marks.get(header_err_key):
+        return marks.get(f"fix_{file_signature}_{inv_no}_{code}", "") or "N/A"
+    return row.get(code, NA)
+
+
+def _build_result_excel(rows_: list, invoice_groups_: list, marks: dict, supplier_key_: str) -> bytes:
+    """把人工核對後的「最終」資料 (擷取值，被標記錯誤的欄位改用人工輸入
+    的正確答案) 輸出成跟使用者提供的 Excel 範本一樣的格式：表頭在第1列、
+    從 A 欄開始依標準欄位順序排列，一張工作表對應這份帳單的供應商，
+    可以直接拿來當作這家供應商之後的「正確答案 Excel」使用。
+    """
+    wb = Workbook()
+    ws = wb.active
+    ws.title = (supplier_key_ or "未知供應商")[:31]
+
+    bold = Font(bold=True)
+    header_fill = PatternFill("solid", fgColor="DDEBF7")
+    wrap_center = Alignment(wrap_text=True, vertical="center", horizontal="center")
+
+    for idx, code in enumerate(FIELD_CODES, start=1):
+        cell = ws.cell(row=1, column=idx, value=DISPLAY_HEADERS[code])
+        cell.font = bold
+        cell.fill = header_fill
+        cell.alignment = wrap_center
+        ws.column_dimensions[get_column_letter(idx)].width = 20
+
+    r = 2
+    for inv_no, idxs in invoice_groups_:
+        for row_idx in idxs:
+            row_ = rows_[row_idx]
+            for idx, code in enumerate(FIELD_CODES, start=1):
+                ws.cell(row=r, column=idx, value=_resolve_final_value(code, row_idx, inv_no, row_, marks))
+            r += 1
+
+    buf = io.BytesIO()
+    wb.save(buf)
+    return buf.getvalue()
+
+
+if ready_for_export:
+    result_bytes = _build_result_excel(rows, invoice_groups, st.session_state, detected_key)
+    st.download_button(
+        "⬇️ 下載執行結果 (Excel)",
+        data=result_bytes,
+        file_name=f"執行結果_{uploaded_pdf.name.rsplit('.', 1)[0]}.xlsx",
+        mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+    )
+    st.caption(
+        "執行結果 Excel 是核對後的「最終」資料 (標記錯誤的欄位已換成您填的正確答案)，"
+        "欄位順序跟範本一致，可直接拿來當作這家供應商之後的正確答案 Excel。"
+    )
+
+st.subheader("④ 下載回饋記錄")
 
 
 def _build_feedback_excel(file_name: str, supplier_lbl: str, supplier_key_: str,
