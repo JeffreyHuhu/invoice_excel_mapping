@@ -374,24 +374,10 @@ for inv_no, idxs in invoice_groups:
 
 st.info(f"目前已標記 **{marked_count}** / {total_fields} 個欄位為錯誤，其餘視為忽略。")
 
-# 全部欄位都正確 (沒有任何標記) 的話，要求使用者按下「確認無誤」才能繼續
-# 產生執行結果，避免使用者根本還沒看完就直接下載。標記過至少一個錯誤，
-# 則視為已經完成核對，不需要再另外確認。
-confirm_key = f"confirmed_{file_signature}"
-if marked_count == 0:
-    if st.button("✅ 確認無誤（此帳單所有欄位都正確）"):
-        st.session_state[confirm_key] = True
-        st.rerun()
-
-ready_for_export = marked_count > 0 or st.session_state.get(confirm_key, False)
-
 # ---------------------------------------------------------------------------
-# ③ 下載執行結果 / 回饋記錄
+# ③ 確認核對結果並匯出 Excel
 # ---------------------------------------------------------------------------
-st.subheader("③ 下載執行結果")
-
-if not ready_for_export:
-    st.caption("請先核對以上欄位：有錯誤請標記並填入正確答案；全部正確請按上方「✅ 確認無誤」。")
+st.subheader("③ 確認核對結果並匯出 Excel")
 
 
 def _resolve_final_value(code: str, row_idx: int, inv_no: str, row: dict, marks: dict):
@@ -443,18 +429,31 @@ def _build_result_excel(rows_: list, invoice_groups_: list, marks: dict, supplie
     return buf.getvalue()
 
 
-if ready_for_export:
+# 「確認無誤」按鈕跟「匯出 EXCEL 檔案」按鈕並排放在一起：確認按鈕只是讓
+# 使用者明確表態「這份帳單全部正確」(全部都沒標記錯誤時才會出現)，跟
+# 匯出 Excel 是兩件獨立的事，不需要等按過確認才能匯出，任何時候都可以
+# 直接匯出目前的核對結果。
+confirm_key = f"confirmed_{file_signature}"
+confirm_col, export_col = st.columns(2)
+with confirm_col:
+    if marked_count == 0:
+        if st.button("✅ 確認無誤（此帳單所有欄位都正確）"):
+            st.session_state[confirm_key] = True
+            st.rerun()
+        if st.session_state.get(confirm_key):
+            st.caption("已確認此帳單全部正確。")
+with export_col:
     result_bytes = _build_result_excel(rows, invoice_groups, st.session_state, detected_key)
     st.download_button(
-        "⬇️ 下載執行結果 (Excel)",
+        "📥 匯出 EXCEL 檔案",
         data=result_bytes,
         file_name=f"執行結果_{uploaded_pdf.name.rsplit('.', 1)[0]}.xlsx",
         mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
     )
-    st.caption(
-        "執行結果 Excel 是核對後的「最終」資料 (標記錯誤的欄位已換成您填的正確答案)，"
-        "欄位順序跟範本一致，可直接拿來當作這家供應商之後的正確答案 Excel。"
-    )
+st.caption(
+    "匯出的 EXCEL 檔案是「目前」核對後的最終資料 (標記錯誤的欄位已換成您填的正確答案，"
+    "其餘沿用系統擷取值)，欄位順序跟範本一致，可直接拿來當作這家供應商之後的正確答案 Excel。"
+)
 
 st.subheader("④ 下載回饋記錄")
 
