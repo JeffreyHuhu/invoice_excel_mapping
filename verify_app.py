@@ -151,6 +151,44 @@ st.markdown(
         width: auto !important;
         min-width: 0 !important;
     }
+    /* 整體版面再簡潔一點：縮小 Streamlit 預設區塊之間的垂直間距、頁面
+       上下留白、分隔線的留白，畫面才不會顯得鬆散。 */
+    .block-container {
+        padding-top: 2rem !important;
+        padding-bottom: 2rem !important;
+    }
+    div[data-testid="stVerticalBlock"] {
+        gap: 0.4rem !important;
+    }
+    hr {
+        margin: 0.6rem 0 !important;
+    }
+    /* 上傳 PDF 的拖曳框放大兩倍：Streamlit 的 file_uploader 沒有內建大小
+       參數，直接放大它的內部元素 (虛線框內距/最小高度、說明文字、圖示、
+       Browse files 按鈕、已上傳檔案清單)，做法跟供應商帳單自動化辨識
+       系統 (app.py) 當初「放大兩倍」的版本一致。 */
+    [data-testid="stFileUploaderDropzone"] {
+        padding: 2.4em 2em !important;
+        min-height: 220px !important;
+    }
+    [data-testid="stFileUploaderDropzoneInstructions"] span,
+    [data-testid="stFileUploaderDropzoneInstructions"] small {
+        font-size: 2em !important;
+    }
+    [data-testid="stFileUploaderDropzoneInstructions"] small {
+        font-size: 1.5em !important;
+    }
+    [data-testid="stFileUploaderDropzoneInstructions"] svg {
+        width: 2.4em !important;
+        height: 2.4em !important;
+    }
+    [data-testid="stFileUploaderDropzone"] button {
+        font-size: 1.4em !important;
+        padding: 0.8em 1.4em !important;
+    }
+    [data-testid="stFileUploaderFile"] {
+        font-size: 1.6em !important;
+    }
     </style>
     """,
     unsafe_allow_html=True,
@@ -183,7 +221,7 @@ if reset_clicked:
 
 st.markdown(
     """
-    <div style="font-size:16px; color:#000000; font-weight:500; line-height:1.7; margin:12px 0 20px;">
+    <div style="font-size:16px; color:#000000; font-weight:500; line-height:1.5; margin:8px 0 12px;">
         <div>① 上傳一份供應商帳單 PDF，系統自動辨識供應商並擷取欄位</div>
         <div>② 逐欄核對擷取結果：沒問題不用動作，有錯誤才按「❌ 標記為錯誤」並填入正確答案</div>
         <div>③ 核對完成後下載「回饋記錄 Excel」，可據此修正供應商帳單自動化辨識系統的擷取規則</div>
@@ -291,8 +329,10 @@ def _field_row(label: str, value, err_key: str, fix_key: str) -> None:
     global marked_count, total_fields
     total_fields += 1
     col_label, col_value, col_flag, col_fix = st.columns([2, 3, 2, 3])
-    col_label.markdown(f"**{label}**")
-    col_value.write(value)
+    col_label.markdown(f"<span style='font-size:16px; font-weight:700;'>{label}</span>", unsafe_allow_html=True)
+    # 用固定 16px 的 span 顯示擷取值，不要用 st.write() 直接印數字/文字，
+    # 避免金額 (數字) 跟其他欄位 (文字) 顯示出來的字體大小不一致。
+    col_value.markdown(f"<span style='font-size:16px;'>{value}</span>", unsafe_allow_html=True)
     marked = col_flag.checkbox("❌ 標記為錯誤", key=err_key)
     if marked:
         marked_count += 1
@@ -324,7 +364,6 @@ for inv_no, idxs in invoice_groups:
     st.markdown(f"**費用項目與金額一覽（共 {len(idxs)} 筆）**")
     for pos, row_idx in enumerate(idxs, start=1):
         row = rows[row_idx]
-        st.markdown(f"品項 {pos}")
         for code, label in ITEM_DISPLAY_FIELDS:
             _field_row(
                 label,
