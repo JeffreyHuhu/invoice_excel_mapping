@@ -309,7 +309,6 @@ for inv_no, idxs in invoice_groups:
     st.markdown(f"#### 📄 發票號碼：{inv_no}")
     header_row = rows[idxs[0]]
 
-    st.markdown("**抬頭欄位（同一張發票僅顯示一次，適用底下所有品項）**")
     for code, label in HEADER_DISPLAY_FIELDS:
         _field_row(
             label,
@@ -318,31 +317,21 @@ for inv_no, idxs in invoice_groups:
             f"fix_{file_signature}_{inv_no}_{code}",
         )
 
-    # 先直接列出這張發票「所有」費用項目跟金額的一覽表，不用點開才看得到，
-    # 一份 PDF 帳單可能有好幾張發票、每張發票又有好幾筆費用，這裡讓使用者
-    # 一眼就看到全部品項，不用逐一展開才能確認有沒有漏看。
+    # 直接列出這張發票「所有」費用項目跟金額，並且直接在這裡放「標記為
+    # 錯誤」的核對欄位，不用另外收合/展開才看得到，一份 PDF 帳單可能有
+    # 好幾張發票、每張發票又有好幾筆費用，這樣使用者一眼就能看到全部
+    # 品項並直接核對，不用多一層點擊。
     st.markdown(f"**費用項目與金額一覽（共 {len(idxs)} 筆）**")
-    overview_lines = "\n".join(
-        f"| {pos} | {rows[row_idx].get('description', NA)} | {rows[row_idx].get('amount', NA)} |"
-        for pos, row_idx in enumerate(idxs, start=1)
-    )
-    st.markdown(f"| 品項 | 費用名稱 | 金額 |\n|---|---|---|\n{overview_lines}")
-
-    st.markdown("**逐筆核對費用名稱／金額**")
     for pos, row_idx in enumerate(idxs, start=1):
         row = rows[row_idx]
-        desc = row.get("description", NA)
-        amount = row.get("amount", NA)
-        # 一律直接展開 (不預設收合)，讓所有品項的核對欄位都能直接看到、
-        # 不用每一筆都手動點開，畫面才夠清楚明瞭。
-        with st.expander(f"品項 {pos}：{desc}　|　金額：{amount}", expanded=True):
-            for code, label in ITEM_DISPLAY_FIELDS:
-                _field_row(
-                    label,
-                    row.get(code, NA),
-                    f"err_{file_signature}_{row_idx}_{code}",
-                    f"fix_{file_signature}_{row_idx}_{code}",
-                )
+        st.markdown(f"品項 {pos}")
+        for code, label in ITEM_DISPLAY_FIELDS:
+            _field_row(
+                label,
+                row.get(code, NA),
+                f"err_{file_signature}_{row_idx}_{code}",
+                f"fix_{file_signature}_{row_idx}_{code}",
+            )
     st.divider()
 
 st.info(f"目前已標記 **{marked_count}** / {total_fields} 個欄位為錯誤，其餘視為忽略。")
