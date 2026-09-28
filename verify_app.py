@@ -82,6 +82,7 @@ HEADER_DISPLAY_FIELDS = [
     ("invoice_no", "發票號碼"),
     ("supplier", "供應商名稱"),
     ("consignee", "集團公司名稱"),
+    ("order_no", "Order No."),
     ("arrive_date", "到達日"),
     ("onboard_date", "開船日"),
     ("bl_no", "提單號碼"),
@@ -317,12 +318,24 @@ for inv_no, idxs in invoice_groups:
             f"fix_{file_signature}_{inv_no}_{code}",
         )
 
-    st.markdown("**品項明細（費用名稱／金額，同一張發票可能有多筆，逐筆核對）**")
+    # 先直接列出這張發票「所有」費用項目跟金額的一覽表，不用點開才看得到，
+    # 一份 PDF 帳單可能有好幾張發票、每張發票又有好幾筆費用，這裡讓使用者
+    # 一眼就看到全部品項，不用逐一展開才能確認有沒有漏看。
+    st.markdown(f"**費用項目與金額一覽（共 {len(idxs)} 筆）**")
+    overview_lines = "\n".join(
+        f"| {pos} | {rows[row_idx].get('description', NA)} | {rows[row_idx].get('amount', NA)} |"
+        for pos, row_idx in enumerate(idxs, start=1)
+    )
+    st.markdown(f"| 品項 | 費用名稱 | 金額 |\n|---|---|---|\n{overview_lines}")
+
+    st.markdown("**逐筆核對費用名稱／金額**")
     for pos, row_idx in enumerate(idxs, start=1):
         row = rows[row_idx]
         desc = row.get("description", NA)
         amount = row.get("amount", NA)
-        with st.expander(f"品項 {pos}：{desc}　|　金額：{amount}", expanded=(len(idxs) <= 3)):
+        # 一律直接展開 (不預設收合)，讓所有品項的核對欄位都能直接看到、
+        # 不用每一筆都手動點開，畫面才夠清楚明瞭。
+        with st.expander(f"品項 {pos}：{desc}　|　金額：{amount}", expanded=True):
             for code, label in ITEM_DISPLAY_FIELDS:
                 _field_row(
                     label,
