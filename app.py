@@ -115,7 +115,13 @@ if "uploader_version" not in st.session_state:
 st.markdown('<span id="title-row-marker"></span>', unsafe_allow_html=True)
 title_col, reset_col = st.columns([3, 2])
 with title_col:
-    st.title("📄➡️📊 供應商帳單自動化辨識系統")
+    # 標題字體指定為固定的 50px：st.title() 沒有開放字級參數 (固定用
+    # Streamlit 內建的 h1 樣式)，改用 st.markdown 自己畫一個 <h1>，才能
+    # 精準控制成使用者要的 50px，不受 Streamlit 版本內建樣式影響。
+    st.markdown(
+        '<h1 style="font-size:50px; margin:0;">📄➡️📊 供應商帳單自動化辨識系統</h1>',
+        unsafe_allow_html=True,
+    )
 with reset_col:
     st.write("")  # 讓按鈕跟標題文字的垂直位置對齊，不要黏在最上緣
     st.markdown('<span id="reset-btn-marker"></span>', unsafe_allow_html=True)
@@ -131,11 +137,10 @@ if reset_clicked:
     st.rerun()
 
 # 流程說明改成①②③由上而下各自一行 (並列顯示，不要擠成一段用箭頭串起來的
-# 長文字)，字體再放大 1.5 倍 (原本 19px -> 約 29px)，後來全站字體又統一縮小
-# 成 0.8 倍 (29px -> 23px)。
+# 長文字)，字體指定為固定的 20px。
 st.markdown(
     f"""
-    <div style="font-size:23px; color:#000000; font-weight:500; line-height:1.7; margin-bottom:16px;">
+    <div style="font-size:20px; color:#000000; font-weight:500; line-height:1.7; margin-bottom:16px;">
         <div>① 自動辨識帳單屬於哪家供應商</div>
         <div>② 套用該供應商專屬的擷取規則</div>
         <div>③ 跟正確答案 Excel 逐欄比對算出正確率
@@ -167,7 +172,7 @@ st.markdown(
     div[data-testid="stButton"] > button,
     div[data-testid="stDownloadButton"] > button,
     div[data-testid="stFormSubmitButton"] > button {
-        font-size: 26px !important;
+        font-size: 20px !important;
         font-weight: 800 !important;
         padding: 1.4em 2em !important;
         height: auto !important;
@@ -187,10 +192,10 @@ st.markdown(
         border-color: #0D47A1 !important;
         color: #FFFFFF !important;
     }
-    /* 「重新查詢」按鈕再放大：在全站按鈕的字體大小基礎上再放大一些，
-       整體字體後來又統一縮小成 0.8 倍 (56px*0.8=45px)。 */
+    /* 「重新查詢」按鈕跟其他按鈕統一改成一樣的字體大小 (20px)，不再特別
+       放大，維持較大的內距讓按鈕本身還是比一般按鈕醒目一點。 */
     div:has(> #reset-btn-marker) + div button {
-        font-size: 45px !important;
+        font-size: 20px !important;
         padding: 2.5em 3.5em !important;
     }
     /* 標題那一列 (見上面的 #title-row-marker) 改成「依內容自動縮寬」的
@@ -207,6 +212,16 @@ st.markdown(
         flex: 0 0 auto !important;
         width: auto !important;
         min-width: 0 !important;
+    }
+    /* 「其他標題」(除了最上面主標題以外的區塊標題，例如「📊 轉檔正確率
+       明細」「📋 逐欄比對明細」「✏️ 轉檔結果預覽」，這些都是用
+       st.subheader() 產生、預設是 h3 標籤) 字體指定為固定的 40px。同時列
+       出幾種可能的選擇器 (不同 Streamlit 版本的 DOM 結構/data-testid 可能
+       不同)，確保至少有一組會命中。 */
+    div[data-testid="stHeading"] h3,
+    div[data-testid="stMarkdownContainer"] h3,
+    section.main h3 {
+        font-size: 40px !important;
     }
     </style>
     """,
