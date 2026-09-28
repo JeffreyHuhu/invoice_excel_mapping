@@ -11,8 +11,11 @@ verify_app.py
   2. 系統自動辨識供應商、擷取欄位 (跟 app.py 用同一套 suppliers.py /
      extract_utils.py 核心引擎，共用同一套辨識/擷取規則，兩邊不會有
      擷取邏輯不一致的問題)。
-  3. 人工逐欄核對：每個欄位預設「沒有動作 = 視為忽略 (不計入回饋)」，
-     只有按下「❌ 標記為錯誤」才會展開輸入框，讓使用者填入正確答案。
+  3. 人工逐欄核對：同一張發票的抬頭欄位 (發票日期、發票號碼、供應商名稱...
+     等，整張發票只會有一個值) 只顯示一次；費用名稱/金額這種同一張發票
+     可能有多筆、逐筆不同的欄位，才依品項逐筆列出。每個欄位預設
+     「沒有動作 = 視為忽略 (不計入回饋)」，只有按下「❌ 標記為錯誤」才會
+     展開輸入框，讓使用者填入正確答案。
   4. 核對完成後，把「所有被標記為錯誤的欄位 + 使用者填的正確答案」匯出
      成一份 Excel (回饋記錄)，可以把這份 Excel 拿給開發端 (或直接請
      Claude 執行 add-invoice-supplier 這套流程) 依照回饋記錄修正
@@ -42,23 +45,18 @@ import streamlit as st
 # app 即可)，不要讓 Streamlit 預設的模糊訊息蓋掉真正的錯誤內容。
 # ---------------------------------------------------------------------------
 try:
-    import pandas as pd
     from openpyxl import Workbook
     from openpyxl.styles import Font, PatternFill, Alignment
     from openpyxl.utils import get_column_letter
 
     import suppliers  # noqa: F401 (觸發所有供應商的 register_supplier())
     from extract_utils import (
-        FIELD_CODES,
-        HEADER_FIELD_CODES,
-        DISPLAY_HEADERS,
         NA,
         find_best_extraction,
         detect_supplier,
         extract_text_from_pdf,
         supplier_label,
         list_registered_suppliers,
-        is_multi_page_supplier,
     )
 except ImportError as e:
     st.set_page_config(page_title="供應商帳單擷取核對系統 - 啟動失敗", layout="wide")
@@ -74,9 +72,36 @@ except ImportError as e:
 st.set_page_config(page_title="供應商帳單擷取核對系統", layout="wide")
 
 # ---------------------------------------------------------------------------
+# 顯示欄位設定：只顯示使用者指定的欄位與順序 (不顯示 Order No.)。
+# 抬頭欄位 (整張發票只會有一個值，例如發票日期、供應商名稱) 跟品項欄位
+# (費用名稱／金額，同一張發票可能有多筆費用、逐筆不同) 分開處理：抬頭
+# 欄位同一張發票只列一次，品項欄位才依每一筆費用逐筆列出。
+# ---------------------------------------------------------------------------
+HEADER_DISPLAY_FIELDS = [
+    ("invoice_date", "INVOICE DATE\n發票日期"),
+    ("invoice_no", "發票號碼"),
+    ("supplier", "供應商名稱"),
+    ("consignee", "集團公司名稱"),
+    ("arrive_date", "到達日"),
+    ("onboard_date", "開船日"),
+    ("bl_no", "提單號碼"),
+    ("mbl_no", "主提單號碼"),
+    ("port_of_loading", "啟運港"),
+    ("port_of_discharge", "目的港"),
+    ("volume", "材積"),
+    ("vessel", "船名"),
+    ("container_no", "貨櫃號碼"),
+]
+ITEM_DISPLAY_FIELDS = [
+    ("description", "費用名稱"),
+    ("amount", "金額"),
+]
+
+# ---------------------------------------------------------------------------
 # 全站樣式：字體/按鈕顏色沿用「供應商帳單自動化辨識系統」(app.py) 同一套
 # 視覺規範 (淺藍色按鈕、16px 字體)，讓兩支 App 看起來是同一套系統的兩個
-# 頁面，不會有風格不一致的違和感。
+# 頁面，不會有風格不一致的違和感；標題列的 flex 排版手法也沿用 app.py，
+# 把「重新查核」按鈕推到標題右側 (右上方)。
 # ---------------------------------------------------------------------------
 st.markdown(
     """
@@ -111,15 +136,50 @@ st.markdown(
     section.main h3 {
         font-size: 24px !important;
     }
+    /* 標題列改成「依內容自動縮寬」的 flex 排版，並把「重新查核」按鈕推到
+       最右邊 (space-between 撐開)，讓按鈕落在畫面的右上角，做法跟
+       app.py 的標題列一致。 */
+    div:has(> #title-row-marker) + div[data-testid="stHorizontalBlock"] {
+        display: flex !important;
+        flex-wrap: nowrap !important;
+        align-items: center !important;
+        justify-content: space-between !important;
+    }
+    div:has(> #title-row-marker) + div[data-testid="stHorizontalBlock"] > div[data-testid="column"] {
+        flex: 0 0 auto !important;
+        width: auto !important;
+        min-width: 0 !important;
+    }
     </style>
     """,
     unsafe_allow_html=True,
 )
 
-st.markdown(
-    '<h1 style="font-size:40px; margin:0;">📝 供應商帳單擷取核對系統</h1>',
-    unsafe_allow_html=True,
-)
+if "uploader_version" not in st.session_state:
+    st.session_state["uploader_version"] = 0
+
+st.markdown('<span id="title-row-marker"></span>', unsafe_allow_html=True)
+title_col, reset_col = st.columns([3, 1])
+with title_col:
+    st.markdown(
+        '<h1 style="font-size:40px; margin:0;">📝 供應商帳單擷取核對系統</h1>',
+        unsafe_allow_html=True,
+    )
+with reset_col:
+    st.write("")  # 讓按鈕跟標題文字的垂直位置對齊
+    reset_clicked = st.button(
+        "🔄 重新查核（換一份帳單）",
+        help="清空目前的擷取結果、標記狀態，並清除已上傳的 PDF，方便重新上傳下一份帳單。",
+    )
+if reset_clicked:
+    st.session_state.pop("verify_result", None)
+    st.session_state.pop("verify_signature", None)
+    for k in list(st.session_state.keys()):
+        if k.startswith("err_") or k.startswith("fix_"):
+            del st.session_state[k]
+    st.session_state["uploader_version"] += 1
+    st.rerun()
+
 st.markdown(
     """
     <div style="font-size:16px; color:#000000; font-weight:500; line-height:1.7; margin:12px 0 20px;">
@@ -139,23 +199,6 @@ with st.expander("ℹ️ 目前已支援的供應商清單"):
         "所有欄位都會是 N/A，這種情況也可以照樣核對、標記正確答案，"
         "回饋記錄可以做為之後新增這家供應商規則的素材。"
     )
-
-if "uploader_version" not in st.session_state:
-    st.session_state["uploader_version"] = 0
-
-st.markdown('<span id="reset-btn-marker"></span>', unsafe_allow_html=True)
-reset_clicked = st.button(
-    "🔄 重新查核（換一份帳單）",
-    help="清空目前的擷取結果、標記狀態，並清除已上傳的 PDF，方便重新上傳下一份帳單。",
-)
-if reset_clicked:
-    st.session_state.pop("verify_result", None)
-    st.session_state.pop("verify_signature", None)
-    for k in list(st.session_state.keys()):
-        if k.startswith("err_") or k.startswith("fix_"):
-            del st.session_state[k]
-    st.session_state["uploader_version"] += 1
-    st.rerun()
 
 # ---------------------------------------------------------------------------
 # ① 上傳 PDF
@@ -218,72 +261,92 @@ st.success(
 )
 
 # ---------------------------------------------------------------------------
-# ② 顯示擷取結果總覽
-# ---------------------------------------------------------------------------
-st.subheader("② 擷取結果總覽")
-preview_df = pd.DataFrame(rows)[FIELD_CODES].rename(columns={c: DISPLAY_HEADERS[c] for c in FIELD_CODES})
-st.dataframe(preview_df, use_container_width=True)
-
-# ---------------------------------------------------------------------------
-# ③ 逐欄人工核對
-# ---------------------------------------------------------------------------
-st.subheader("③ 逐欄人工核對（沒有標記 = 視為忽略，不會出現在回饋記錄）")
-
-# 依 invoice_no 分組顯示：一般供應商只有一組 (一張帳單一個 invoice_no)，
+# 依 invoice_no 分組：一般供應商只有一組 (一張帳單一個 invoice_no)，
 # multi_page 供應商 (一份 PDF 可能塞好幾張獨立發票) 會自動依 invoice_no
-# 分成好幾組，方便使用者知道現在核對的是哪一張發票。
-invoice_groups: "list[tuple[str, list[int]]]" = []
-seen_invoice = {}
+# 分成好幾組。同一張發票內，抬頭欄位 (發票日期、供應商名稱...) 只會有一
+# 個值，只有費用名稱／金額會逐筆不同，所以抬頭欄位只顯示、核對一次，
+# 底下才依品項逐筆列出費用名稱／金額。
+# ---------------------------------------------------------------------------
+seen_invoice: "dict[str, list[int]]" = {}
+invoice_order: "list[str]" = []
 for idx, row in enumerate(rows):
     inv_no = row.get("invoice_no") or NA
-    seen_invoice.setdefault(inv_no, []).append(idx)
-for inv_no, idxs in seen_invoice.items():
-    invoice_groups.append((inv_no, idxs))
+    if inv_no not in seen_invoice:
+        seen_invoice[inv_no] = []
+        invoice_order.append(inv_no)
+    seen_invoice[inv_no].append(idx)
+invoice_groups = [(inv_no, seen_invoice[inv_no]) for inv_no in invoice_order]
+
+# ---------------------------------------------------------------------------
+# ② 逐欄人工核對
+# ---------------------------------------------------------------------------
+st.subheader("② 逐欄人工核對（沒有標記 = 視為忽略，不會出現在回饋記錄）")
 
 marked_count = 0
 total_fields = 0
 
+
+def _field_row(label: str, value, err_key: str, fix_key: str) -> None:
+    global marked_count, total_fields
+    total_fields += 1
+    col_label, col_value, col_flag, col_fix = st.columns([2, 3, 2, 3])
+    col_label.markdown(f"**{label}**")
+    col_value.write(value)
+    marked = col_flag.checkbox("❌ 標記為錯誤", key=err_key)
+    if marked:
+        marked_count += 1
+        col_fix.text_input(
+            "✏️ 正確答案（留空代表正確答案應為 N/A）",
+            key=fix_key,
+            label_visibility="visible",
+        )
+    else:
+        col_fix.write("")
+
+
 for inv_no, idxs in invoice_groups:
-    group_label = f"發票號碼：{inv_no}" if len(invoice_groups) > 1 else "帳單內容"
-    st.markdown(f"#### 📄 {group_label}")
-    for row_idx in idxs:
+    st.markdown(f"#### 📄 發票號碼：{inv_no}")
+    header_row = rows[idxs[0]]
+
+    st.markdown("**抬頭欄位（同一張發票僅顯示一次，適用底下所有品項）**")
+    for code, label in HEADER_DISPLAY_FIELDS:
+        _field_row(
+            label,
+            header_row.get(code, NA),
+            f"err_{file_signature}_{inv_no}_{code}",
+            f"fix_{file_signature}_{inv_no}_{code}",
+        )
+
+    st.markdown("**品項明細（費用名稱／金額，同一張發票可能有多筆，逐筆核對）**")
+    for pos, row_idx in enumerate(idxs, start=1):
         row = rows[row_idx]
         desc = row.get("description", NA)
         amount = row.get("amount", NA)
-        with st.expander(f"品項 {row_idx + 1}：{desc}　|　金額：{amount}", expanded=(len(rows) <= 3)):
-            for code in FIELD_CODES:
-                total_fields += 1
-                value = row.get(code, NA)
-                label = DISPLAY_HEADERS[code].split("\n")[0]
-                col_label, col_value, col_flag, col_fix = st.columns([2, 3, 2, 3])
-                col_label.markdown(f"**{label}**")
-                col_value.write(value)
-                err_key = f"err_{file_signature}_{row_idx}_{code}"
-                fix_key = f"fix_{file_signature}_{row_idx}_{code}"
-                marked = col_flag.checkbox("❌ 標記為錯誤", key=err_key)
-                if marked:
-                    marked_count += 1
-                    col_fix.text_input(
-                        "✏️ 正確答案（留空代表正確答案應為 N/A）",
-                        key=fix_key,
-                        label_visibility="visible",
-                    )
-                else:
-                    col_fix.write("")
+        with st.expander(f"品項 {pos}：{desc}　|　金額：{amount}", expanded=(len(idxs) <= 3)):
+            for code, label in ITEM_DISPLAY_FIELDS:
+                _field_row(
+                    label,
+                    row.get(code, NA),
+                    f"err_{file_signature}_{row_idx}_{code}",
+                    f"fix_{file_signature}_{row_idx}_{code}",
+                )
+    st.divider()
 
 st.info(f"目前已標記 **{marked_count}** / {total_fields} 個欄位為錯誤，其餘視為忽略。")
 
 # ---------------------------------------------------------------------------
-# ④ 產生回饋記錄 Excel
+# ③ 產生回饋記錄 Excel
 # ---------------------------------------------------------------------------
-st.subheader("④ 下載回饋記錄")
+st.subheader("③ 下載回饋記錄")
 
 
 def _build_feedback_excel(file_name: str, supplier_lbl: str, supplier_key_: str,
-                           rows_: list, marks: dict) -> bytes:
+                           rows_: list, invoice_groups_: list, marks: dict) -> bytes:
     """把「被標記為錯誤的欄位 + 使用者填的正確答案」整理成一份 Excel，
     欄位：檔案名稱／供應商／發票號碼／品項序號／欄位代碼／欄位名稱／
     系統擷取值／人工輸入的正確答案，方便日後依此修正 suppliers.py。
+    抬頭欄位 (整張發票共用) 的「品項序號」欄填「抬頭欄位」，跟逐筆的費用
+    明細區分開來。
     """
     wb = Workbook()
     ws = wb.active
@@ -301,23 +364,43 @@ def _build_feedback_excel(file_name: str, supplier_lbl: str, supplier_key_: str,
         ws.column_dimensions[get_column_letter(c)].width = 20
 
     r = 2
-    for row_idx, row_ in enumerate(rows_):
-        for code in FIELD_CODES:
-            err_key = f"err_{file_signature}_{row_idx}_{code}"
-            fix_key = f"fix_{file_signature}_{row_idx}_{code}"
+    for inv_no, idxs in invoice_groups_:
+        header_row = rows_[idxs[0]]
+        for code, label in HEADER_DISPLAY_FIELDS:
+            err_key = f"err_{file_signature}_{inv_no}_{code}"
+            fix_key = f"fix_{file_signature}_{inv_no}_{code}"
             if not marks.get(err_key):
                 continue
             correct_value = marks.get(fix_key, "") or "N/A"
             ws.cell(row=r, column=1, value=file_name)
             ws.cell(row=r, column=2, value=supplier_lbl)
             ws.cell(row=r, column=3, value=supplier_key_ or "")
-            ws.cell(row=r, column=4, value=row_.get("invoice_no", NA))
-            ws.cell(row=r, column=5, value=row_idx + 1)
+            ws.cell(row=r, column=4, value=inv_no)
+            ws.cell(row=r, column=5, value="抬頭欄位")
             ws.cell(row=r, column=6, value=code)
-            ws.cell(row=r, column=7, value=DISPLAY_HEADERS[code].split("\n")[0])
-            ws.cell(row=r, column=8, value=row_.get(code, NA))
+            ws.cell(row=r, column=7, value=label.split("\n")[-1])
+            ws.cell(row=r, column=8, value=header_row.get(code, NA))
             ws.cell(row=r, column=9, value=correct_value)
             r += 1
+
+        for pos, row_idx in enumerate(idxs, start=1):
+            row_ = rows_[row_idx]
+            for code, label in ITEM_DISPLAY_FIELDS:
+                err_key = f"err_{file_signature}_{row_idx}_{code}"
+                fix_key = f"fix_{file_signature}_{row_idx}_{code}"
+                if not marks.get(err_key):
+                    continue
+                correct_value = marks.get(fix_key, "") or "N/A"
+                ws.cell(row=r, column=1, value=file_name)
+                ws.cell(row=r, column=2, value=supplier_lbl)
+                ws.cell(row=r, column=3, value=supplier_key_ or "")
+                ws.cell(row=r, column=4, value=inv_no)
+                ws.cell(row=r, column=5, value=pos)
+                ws.cell(row=r, column=6, value=code)
+                ws.cell(row=r, column=7, value=label)
+                ws.cell(row=r, column=8, value=row_.get(code, NA))
+                ws.cell(row=r, column=9, value=correct_value)
+                r += 1
 
     if r == 2:
         ws.cell(row=2, column=1, value="（目前沒有任何欄位被標記為錯誤）")
@@ -331,7 +414,8 @@ if marked_count == 0:
     st.caption("目前沒有任何欄位被標記為錯誤，標記完成後即可在這裡下載回饋記錄 Excel。")
 else:
     feedback_bytes = _build_feedback_excel(
-        uploaded_pdf.name, supplier_label(detected_key), detected_key, rows, st.session_state
+        uploaded_pdf.name, supplier_label(detected_key), detected_key,
+        rows, invoice_groups, st.session_state,
     )
     st.download_button(
         "⬇️ 下載回饋記錄 (Excel)",
