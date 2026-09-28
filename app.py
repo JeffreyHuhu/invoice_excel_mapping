@@ -137,10 +137,10 @@ if reset_clicked:
     st.rerun()
 
 # 流程說明改成①②③由上而下各自一行 (並列顯示，不要擠成一段用箭頭串起來的
-# 長文字)，字體指定為固定的 20px。
+# 長文字)，字體指定為固定的 14px。
 st.markdown(
     f"""
-    <div style="font-size:20px; color:#000000; font-weight:500; line-height:1.7; margin-bottom:16px;">
+    <div style="font-size:14px; color:#000000; font-weight:500; line-height:1.7; margin-bottom:16px;">
         <div>① 自動辨識帳單屬於哪家供應商</div>
         <div>② 套用該供應商專屬的擷取規則</div>
         <div>③ 跟正確答案 Excel 逐欄比對算出正確率
@@ -172,41 +172,41 @@ st.markdown(
     div[data-testid="stButton"] > button,
     div[data-testid="stDownloadButton"] > button,
     div[data-testid="stFormSubmitButton"] > button {
-        font-size: 20px !important;
+        font-size: 14px !important;
         font-weight: 800 !important;
         padding: 1.4em 2em !important;
         height: auto !important;
         border-radius: 14px !important;
+        background-color: #90CAF9 !important;
+        border-color: #90CAF9 !important;
+        color: #0D3B66 !important;
     }
-    /* 「重新查詢」按鈕塗成藍色，跟主要動作的「開始執行比對」區分開來。
-       CSS 沒辦法直接用按鈕文字選取，改用「緊接在一個隱形標記元素後面的
-       按鈕」這個常見手法：在按鈕前面放一個帶 id 的隱形標記，用 :has()
-       選到「包含這個標記的區塊」，再用 + 選到它後面緊接著的區塊裡的按鈕。 */
+    div.stButton > button:hover,
+    div.stDownloadButton > button:hover,
+    div.stFormSubmitButton > button:hover,
+    div[data-testid="stButton"] > button:hover,
+    div[data-testid="stDownloadButton"] > button:hover,
+    div[data-testid="stFormSubmitButton"] > button:hover {
+        background-color: #64B5F6 !important;
+        border-color: #64B5F6 !important;
+        color: #0D3B66 !important;
+    }
+    /* 「重新查詢」按鈕跟其他按鈕統一改成一樣的字體大小 (14px)，不再特別
+       放大，維持較大的內距讓按鈕本身還是比一般按鈕醒目一點。顏色也統一
+       跟其他按鈕一樣是淺藍色 (見上面全站按鈕的規則)，這裡不用再另外塗色。 */
     div:has(> #reset-btn-marker) + div button {
-        background-color: #1565C0 !important;
-        border-color: #1565C0 !important;
-        color: #FFFFFF !important;
-    }
-    div:has(> #reset-btn-marker) + div button:hover {
-        background-color: #0D47A1 !important;
-        border-color: #0D47A1 !important;
-        color: #FFFFFF !important;
-    }
-    /* 「重新查詢」按鈕跟其他按鈕統一改成一樣的字體大小 (20px)，不再特別
-       放大，維持較大的內距讓按鈕本身還是比一般按鈕醒目一點。 */
-    div:has(> #reset-btn-marker) + div button {
-        font-size: 20px !important;
+        font-size: 14px !important;
         padding: 2.5em 3.5em !important;
     }
     /* 標題那一列 (見上面的 #title-row-marker) 改成「依內容自動縮寬」的
-       flex 排版，讓「重新查詢」按鈕緊貼在標題文字右邊，不受螢幕寬度影響
+       flex 排版，並把「重新查詢」按鈕推到最右邊 (空間用 space-between
+       撐開，標題留在左邊)，讓按鈕落在畫面的右上角，不受螢幕寬度影響
        (預設 st.columns 是依比例撐滿整個寬度，兩欄中間永遠會空一大段)。 */
     div:has(> #title-row-marker) + div[data-testid="stHorizontalBlock"] {
         display: flex !important;
         flex-wrap: nowrap !important;
         align-items: center !important;
-        justify-content: flex-start !important;
-        gap: 32px !important;
+        justify-content: space-between !important;
     }
     div:has(> #title-row-marker) + div[data-testid="stHorizontalBlock"] > div[data-testid="column"] {
         flex: 0 0 auto !important;
@@ -508,7 +508,7 @@ st.divider()
 # ---------------------------------------------------------------------------
 
 if has_reference and compare_rows_all:
-    st.subheader("📋 逐欄比對明細（🟢相符 / 🔴不相符 / ⚪正確答案為N/A，不計入正確率）")
+    st.subheader("📋 逐欄比對明細（🟢相符 / 🔴不相符）")
     cmp_df = pd.DataFrame(compare_rows_all)
 
     # -----------------------------------------------------------------------
@@ -598,7 +598,7 @@ _preview_column_order = ["供應商"] + [
     DISPLAY_HEADERS[c].split("\n")[0] for c in _PREVIEW_VISIBLE_FIELD_CODES
 ]
 
-st.subheader("✏️ 轉檔結果預覽（可直接在表格中修正錯誤欄位；抓不到的欄位顯示 N/A）")
+st.subheader("✏️ 轉檔結果預覽")
 st.caption(
     f"為了畫面清楚，這裡只顯示前 10 個欄位；其餘欄位的資料仍然保留，"
     f"下方「⬇️ 下載 Excel」的檔案裡完整包含全部 {len(FIELD_CODES)} 個欄位。"
