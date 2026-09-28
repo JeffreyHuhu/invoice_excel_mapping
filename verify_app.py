@@ -2,9 +2,9 @@
 """
 verify_app.py
 =============
-供應商帳單擷取核對系統 (人工查核 + 回饋收集工具)
+供應商帳單人工檢核系統 (人工查核 + 回饋收集工具)
 
-這是跟「供應商帳單自動化辨識系統」(app.py) 分開的獨立 Streamlit App，
+這是跟「供應商帳單辨識對比系統」(app.py) 分開的獨立 Streamlit App，
 專門給人工「逐欄」核對系統擷取出來的資料是否正確，用於：
 
   1. 上傳一份供應商帳單 PDF (不需要正確答案 Excel)。
@@ -59,7 +59,7 @@ try:
         list_registered_suppliers,
     )
 except ImportError as e:
-    st.set_page_config(page_title="供應商帳單擷取核對系統 - 啟動失敗", layout="wide")
+    st.set_page_config(page_title="供應商帳單人工檢核系統 - 啟動失敗", layout="wide")
     st.error(
         f"❌ 系統啟動失敗，缺少必要的 Python 套件：`{e}`\n\n"
         "這通常代表 Streamlit Cloud 沒有正確安裝 `requirements.txt` 裡列出的套件"
@@ -69,7 +69,7 @@ except ImportError as e:
     )
     st.stop()
 
-st.set_page_config(page_title="供應商帳單擷取核對系統", layout="wide")
+st.set_page_config(page_title="供應商帳單人工檢核系統", layout="wide")
 
 # ---------------------------------------------------------------------------
 # 顯示欄位設定：只顯示使用者指定的欄位與順序 (不顯示 Order No.)。
@@ -99,7 +99,7 @@ ITEM_DISPLAY_FIELDS = [
 ]
 
 # ---------------------------------------------------------------------------
-# 全站樣式：字體/按鈕顏色沿用「供應商帳單自動化辨識系統」(app.py) 同一套
+# 全站樣式：字體/按鈕顏色沿用「供應商帳單辨識對比系統」(app.py) 同一套
 # 視覺規範 (淺藍色按鈕、16px 字體)，讓兩支 App 看起來是同一套系統的兩個
 # 頁面，不會有風格不一致的違和感；標題列的 flex 排版手法也沿用 app.py，
 # 把「重新查核」按鈕推到標題右側 (右上方)。
@@ -201,7 +201,7 @@ st.markdown('<span id="title-row-marker"></span>', unsafe_allow_html=True)
 title_col, reset_col = st.columns([3, 1])
 with title_col:
     st.markdown(
-        '<h1 style="font-size:40px; margin:0;">📝 供應商帳單擷取核對系統</h1>',
+        '<h1 style="font-size:40px; margin:0;">📝 供應商帳單人工檢核系統</h1>',
         unsafe_allow_html=True,
     )
 with reset_col:
@@ -224,7 +224,7 @@ st.markdown(
     <div style="font-size:16px; color:#000000; font-weight:500; line-height:1.5; margin:8px 0 12px;">
         <div>① 上傳一份供應商帳單 PDF，系統自動辨識供應商並擷取欄位</div>
         <div>② 逐欄核對擷取結果：沒問題不用動作，有錯誤才按「❌ 標記為錯誤」並填入正確答案</div>
-        <div>③ 核對完成後下載「回饋記錄 Excel」，可據此修正供應商帳單自動化辨識系統的擷取規則</div>
+        <div>③ 核對完成後下載「回饋記錄 Excel」，可據此修正供應商帳單辨識對比系統的擷取規則</div>
     </div>
     """,
     unsafe_allow_html=True,
@@ -290,13 +290,10 @@ if result is None:
 
 rows = result["rows"]
 detected_key = result["supplier_key"]
-quality = result["score"]
 
 st.success(
     f"辨識供應商：**{supplier_label(detected_key)}** "
-    f"（代碼：`{detected_key or '無法辨識'}`）　"
-    f"資料完整度：**{quality * 100:.1f}%** "
-    f"(欄位有抓到值、不是 N/A 的比例，僅供參考，實際對不對要靠下面人工核對)"
+    f"（代碼：`{detected_key or '無法辨識'}`）"
 )
 
 # ---------------------------------------------------------------------------
@@ -465,7 +462,7 @@ else:
         mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
     )
     st.caption(
-        "把這份 Excel 交給負責維護「供應商帳單自動化辨識系統」的開發端 "
+        "把這份 Excel 交給負責維護「供應商帳單辨識對比系統」的開發端 "
         "(或直接請 Claude 依照 add-invoice-supplier 的流程) 修正對應供應商的擷取規則，"
         "改完後回到這個網頁重新上傳同一份 PDF，確認錯誤欄位已修正。"
     )
