@@ -1791,3 +1791,136 @@ register_supplier(
     "DHL", "PT BIROTIKA SEMESTA / DHL EXPRESS",
     detect_dhl, parse_dhl,
 )
+
+
+# ===========================================================================
+# 供應商 13：PT DSV Transport Indonesia (multi_page，一份 PDF 裡有好幾張
+# 各自獨立的發票，但『一張發票』實際上橫跨兩個實體頁面)
+# ===========================================================================
+#
+# 這份 PDF 版面比較特別：一張發票印出來是 2 頁 ("Page 1 of 2"/"Page 2 of
+# 2")，一份 PDF 又可能塞好幾張這樣的發票 (這次樣本是 3 張發票、共 6 頁)。
+# 好在每張發票需要的欄位 (抬頭 + 費用明細金額) 全部都印在「Page 1 of 2」
+# 那一頁上，「Page 2 of 2」只有 SUBTOTAL/PPN/TOTAL 這種彙總數字跟匯款
+# 資訊，我們的 16 個標準欄位都用不到，所以不用真的把兩頁文字合併，讓
+# detect_dsv() 只認「Page 1 of 2」那一頁 (靠這頁才有的 "CHARGES IN IDR"
+# 表頭關鍵字判斷)，multi_page 架構逐頁辨識時「Page 2 of 2」會被跳過，剛好
+# 就是我們要的效果 (不會多出一筆重複/空白的列)。
+#
+# 費用明細每一項的說明文字會換行 (例如 "THC (Terminal Handling Charge) -
+# Greater of (Min\nRate IDR 73427,00, 8,471 Cubic Meter(s) @ IDR\n
+# 73427,00/M3)")，但只有「第一行」的結尾會是這一項的 PPN 金額 + 正式金額
+# 兩個數字，續行都是說明文字沒有這種「結尾兩個數字」的樣式，所以逐行比對
+# 就能只抓到每一項的第一行，不用特別處理續行合併。正確答案的 Amount 對應
+# 的是 "CHARGES IN IDR" 這一欄 (行尾最後一個數字)，不是前面的
+# "PPN IN IDR" 那一欄。
+def detect_dsv(text: str) -> bool:
+    return "CHARGES IN IDR" in text.upper()
+
+
+_DSV_ITEM_PATTERN = re.compile(
+    r"^(?P<desc>.+?)\s+-\s+.*?\s+(?P<ppn>[\d.]+)\s+(?P<amount>[\d.]+)$",
+    re.MULTILINE,
+)
+_DSV_VESSEL_BL_PATTERN = re.compile(
+    r"^(?P<vessel>.+?)\s*/\s*(?P<voyage>\S+)\s*/\s*\S+\s*/\s*\S+\s+"
+    r"(?P<ocean_bl>\S+)\s+(?P<house_bl>\S+)$",
+    re.MULTILINE,
+)
+
+
+def _dsv_parse_date(text: Optional[str]) -> Optional[str]:
+    """'03-Sep-26' (DD-英文月份縮寫-YY，兩位數年份) -> '03.09.2026'，沿用
+    既有的 _EN_MONTHS_ABBR 對照表，年份補上世紀 (這批帳單都是 20XX 年)。
+    """
+    if not text:
+        return text
+    m = re.match(r"(\d{1,2})-([A-Za-z]{3})-(\d{2})", text.strip())
+    if not m:
+        return text
+    day, month_abbr, year_2digit = m.groups()
+    month = _EN_MONTHS_ABBR.get(month_abbr.lower())
+    if not month:
+        return text
+    return f"{int(day):02d}.{month:02d}.20{year_2digit}"
+
+
+def _dsv_clean_amount(text: Optional[str]) -> Optional[int]:
+    """'3.140.183' (句點千分位、無小數) -> 3140183。"""
+    if not text:
+        return None
+    text = text.strip().replace(".", "")
+    return int(text) if text.isdigit() else None
+
+
+def _dsv_extract_items(text: str) -> List[Dict]:
+    items: List[Dict] = []
+    for m in _DSV_ITEM_PATTERN.finditer(text):
+        items.append({
+            "description": m.group("desc").strip(),
+            "amount": _dsv_clean_amount(m.group("amount")),
+        })
+    return items
+
+
+def parse_dsv(text: str) -> Dict:
+    header: Dict[str, Optional[str]] = {}
+
+    header["supplier"] = "PT DSV Transport Indonesia"
+    header["invoice_no"] = _search(r"INVOICE\s+(\S+)\s+ORIGINAL", text)
+
+    m = re.search(
+        r"^(.+?)\s+INVOICE DATE\s+(\d{1,2}-[A-Za-z]{3}-\d{2})", text, re.MULTILINE
+    )
+    if m:
+        header["consignee"] = m.group(1).strip()
+        header["invoice_date"] = _dsv_parse_date(m.group(2))
+    else:
+        header["consignee"] = None
+        header["invoice_date"] = None
+
+    header["order_no"] = _search(r"OWNER'S REFERENCE\s*\n\s*(\S+)", text)
+
+    m = re.search(
+        r"=\s*([^,]+),.*?(\d{1,2}-[A-Za-z]{3}-\d{2})\s+\S+\s*=\s*([^,]+),.*?"
+        r"(\d{1,2}-[A-Za-z]{3}-\d{2})",
+        text,
+    )
+    if m:
+        header["port_of_loading"] = m.group(1).strip()
+        header["onboard_date"] = _dsv_parse_date(m.group(2))
+        header["port_of_discharge"] = m.group(3).strip()
+        header["arrive_date"] = _dsv_parse_date(m.group(4))
+    else:
+        header["port_of_loading"] = None
+        header["onboard_date"] = None
+        header["port_of_discharge"] = None
+        header["arrive_date"] = None
+
+    m = _DSV_VESSEL_BL_PATTERN.search(text)
+    if m:
+        header["vessel"] = f"{m.group('vessel').strip()} / {m.group('voyage').strip()}"
+        header["bl_no"] = m.group("house_bl").strip()
+        header["mbl_no"] = m.group("ocean_bl").strip()
+    else:
+        header["vessel"] = None
+        header["bl_no"] = None
+        header["mbl_no"] = None
+
+    m = re.search(r"^(\S+)\s*\(", text, re.MULTILINE)
+    header["container_no"] = m.group(1) if m else None
+
+    m = re.search(r"[\d.]+\s*KG\s+([\d.]+)\s*M3", text)
+    header["volume"] = m.group(1) if m else None
+
+    items = _dsv_extract_items(text)
+    if not items:
+        items = [{"description": None, "amount": None}]
+
+    return {"header": header, "items": items}
+
+
+register_supplier(
+    "DSV", "PT DSV Transport Indonesia",
+    detect_dsv, parse_dsv, multi_page=True,
+)
