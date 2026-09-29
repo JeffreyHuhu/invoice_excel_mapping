@@ -1425,7 +1425,7 @@ def parse_express(text: str) -> Dict:
     # 幾次的亂碼 (例如 "PPPPTTTT....EEEEXXXXPPPPRRRREEEE..." 其實是
     # "PT.EXPRESS MAXIMUM")，與其花力氣解碼亂碼字型，不如直接固定這個
     # 值，兩種帳單版面都適用。
-    header["supplier"] = "PT. EXPRESS MAXIMUM"
+    header["supplier"] = "PT.EXPRESS MAXIMUM"
     header["consignee"] = _search(r"COMPANY\s*:\s*(.+?)\s*$", text)
     header["invoice_no"] = _search(r"INVOICE\s+NO\s*:\s*(\S+)", text)
     header["invoice_date"] = _express_parse_long_date(
@@ -1585,7 +1585,7 @@ def parse_pan_ekspres(text: str) -> Dict:
     return {"header": header, "items": items}
 
 
-register_supplier("EXPRESS_MAXIMUM", "PT. EXPRESS MAXIMUM", detect_express, parse_express)
+register_supplier("EXPRESS_MAXIMUM", "PT.EXPRESS MAXIMUM", detect_express, parse_express)
 register_supplier(
     "PAN_EKSPRES", "PT. PAN EKSPRES INTERNATIONAL",
     detect_pan_ekspres, parse_pan_ekspres,
