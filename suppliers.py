@@ -594,6 +594,11 @@ _EN_MONTHS_FULL = {
     "january": 1, "february": 2, "march": 3, "april": 4, "may": 5, "june": 6,
     "july": 7, "august": 8, "september": 9, "october": 10, "november": 11,
     "december": 12,
+    # 印尼文月份全名 (EXPRESS_MAXIMUM 帳單簽名處的日期用印尼文，例如
+    # "2 Januari 2026")，拼法跟英文不同的月份才需要額外列出，一樣的
+    # (September) 共用英文那組即可。
+    "januari": 1, "februari": 2, "maret": 3, "mei": 5, "juni": 6, "juli": 7,
+    "agustus": 8, "oktober": 10, "desember": 12,
 }
 
 
@@ -1294,7 +1299,8 @@ def parse_femaria(text: str) -> Dict:
 # (即使這次的樣本兩筆費用剛好同一個 AWB/日期，未來遇到同一張發票裡有多個
 # 不同貨運批次時也不會出錯)。
 _EXPRESS_ITEM_PATTERN = re.compile(
-    r"^\d{1,2}/[A-Za-z]{3}/\d{2}\s+\S+\s+(?P<awb>\S+)\s+(?P<desc>[A-Z]+)\s+\S+\s+"
+    r"^\d{1,2}/[A-Za-z]{3}/\d{2}\s+(?P<shipper>.+?)\s+(?P<awb>[A-Z]{2,10}\d{4,})\s+"
+    r"(?P<desc>[A-Z]+)\s+\S+\s+"
     r"[\d.]+\s+[\d.]+\s+[\d.,]+\s+(?P<amount>[\d,]+)\s+[\d,]+$"
 )
 _EXPRESS_DATE_PATTERN = re.compile(r"^(\d{1,2})/([A-Za-z]{3})/(\d{2})")
