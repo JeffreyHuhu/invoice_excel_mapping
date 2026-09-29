@@ -16,11 +16,11 @@ verify_app.py
      可能有多筆、逐筆不同的欄位，才依品項逐筆列出。每個欄位預設
      「沒有動作 = 視為忽略 (不計入回饋)」，只有按下「❌ 標記為錯誤」才會
      展開輸入框，讓使用者填入正確答案。
-  4. 核對完成後，把「所有被標記為錯誤的欄位 + 使用者填的正確答案」匯出
-     成一份 Excel (回饋記錄)，可以把這份 Excel 拿給開發端 (或直接請
-     Claude 執行 add-invoice-supplier 這套流程) 依照回饋記錄修正
-     suppliers.py 裡對應供應商的 parse() 規則，改完之後回到這個網頁、
-     重新上傳同一份 PDF 再核對一次，確認錯誤欄位已經修正。
+  4. 核對完成後，對有標記錯誤欄位的發票按「🚩 回報錯誤」，會把「所有被
+     標記為錯誤的欄位 + 使用者填的正確答案」記錄下來；把這份回報記錄拿
+     給開發端 (或直接請 Claude 執行 add-invoice-supplier 這套流程) 依照
+     回報內容修正 suppliers.py 裡對應供應商的 parse() 規則，改完之後回到
+     這個網頁、重新上傳同一份 PDF 再核對一次，確認錯誤欄位已經修正。
 
 跟 app.py 的差異：
   - app.py 是「有正確答案 Excel 時的自動化比對」，回答「正確率幾%」。
@@ -147,6 +147,82 @@ def _record_correct_invoice(supplier_key_: str, supplier_lbl: str, inv_no: str, 
             "發票號碼": inv_no,
             "檔案名稱": file_name,
         })
+
+# ---------------------------------------------------------------------------
+# 「🚩 回報錯誤」記錄：把使用者標記為錯誤的欄位 + 填的正確答案存成一筆一筆
+# 的紀錄 (取代原本要使用者自己下載「回饋記錄 Excel」再傳給開發端的做法)，
+# 之後可以直接下載這份累計記錄，依內容修正 suppliers.py 對應供應商的
+# parse() 規則。跟「確認無誤」的正確帳單記錄一樣，這份記錄也只存在 App
+# 執行環境的暫存檔案裡，Reboot/重新部署後會被清空，要長期留存請定期下載。
+# ---------------------------------------------------------------------------
+_ERROR_LOG_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), "reported_errors_log.csv")
+_ERROR_LOG_HEADERS = ["回報時間", "檔案名稱", "供應商代碼", "供應商名稱", "發票號碼",
+                       "品項序號", "欄位代碼", "欄位名稱", "系統擷取值", "人工輸入正確答案"]
+
+
+def _load_error_log() -> "list[dict]":
+    if not os.path.exists(_ERROR_LOG_PATH):
+        return []
+    with open(_ERROR_LOG_PATH, "r", encoding="utf-8-sig", newline="") as f:
+        return list(csv.DictReader(f))
+
+
+def _append_error_report(file_name: str, supplier_lbl: str, supplier_key_: str,
+                          inv_no: str, idxs: "list[int]", rows_: list, marks: dict) -> int:
+    """把這張發票「目前」所有被標記為錯誤的欄位 + 使用者填的正確答案，各自
+    附加一筆進錯誤回報記錄檔。回傳這次新增了幾筆紀錄 (0 代表這張發票目前
+    沒有任何欄位被標記為錯誤，不用寫入)。
+    """
+    new_rows = []
+    header_row = rows_[idxs[0]]
+    for code, label in HEADER_DISPLAY_FIELDS:
+        err_key = f"err_{file_signature}_{inv_no}_{code}"
+        if not marks.get(err_key):
+            continue
+        fix_key = f"fix_{file_signature}_{inv_no}_{code}"
+        new_rows.append({
+            "回報時間": datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+            "檔案名稱": file_name,
+            "供應商代碼": supplier_key_ or "",
+            "供應商名稱": supplier_lbl,
+            "發票號碼": inv_no,
+            "品項序號": "抬頭欄位",
+            "欄位代碼": code,
+            "欄位名稱": label.split("\n")[-1],
+            "系統擷取值": header_row.get(code, NA),
+            "人工輸入正確答案": marks.get(fix_key, "") or "N/A",
+        })
+
+    for pos, row_idx in enumerate(idxs, start=1):
+        row_ = rows_[row_idx]
+        for code, label in ITEM_DISPLAY_FIELDS:
+            err_key = f"err_{file_signature}_{row_idx}_{code}"
+            if not marks.get(err_key):
+                continue
+            fix_key = f"fix_{file_signature}_{row_idx}_{code}"
+            new_rows.append({
+                "回報時間": datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+                "檔案名稱": file_name,
+                "供應商代碼": supplier_key_ or "",
+                "供應商名稱": supplier_lbl,
+                "發票號碼": inv_no,
+                "品項序號": pos,
+                "欄位代碼": code,
+                "欄位名稱": label,
+                "系統擷取值": row_.get(code, NA),
+                "人工輸入正確答案": marks.get(fix_key, "") or "N/A",
+            })
+
+    if not new_rows:
+        return 0
+
+    is_new_file = not os.path.exists(_ERROR_LOG_PATH)
+    with open(_ERROR_LOG_PATH, "a", encoding="utf-8-sig", newline="") as f:
+        writer = csv.DictWriter(f, fieldnames=_ERROR_LOG_HEADERS)
+        if is_new_file:
+            writer.writeheader()
+        writer.writerows(new_rows)
+    return len(new_rows)
 
 # ---------------------------------------------------------------------------
 # 全站樣式：字體/按鈕顏色沿用「供應商帳單辨識對比系統」(app.py) 同一套
@@ -286,7 +362,7 @@ st.markdown(
     <div style="font-size:16px; color:#000000; font-weight:500; line-height:1.5; margin:8px 0 12px;">
         <div>① 上傳一份供應商帳單 PDF，系統自動辨識供應商並擷取欄位</div>
         <div>② 逐欄核對擷取結果：沒問題不用動作，有錯誤才按「❌ 標記為錯誤」並填入正確答案</div>
-        <div>③ 核對完成後下載「回饋記錄 Excel」，可據此修正供應商帳單辨識對比系統的擷取規則</div>
+        <div>③ 核對完成後按「🚩 回報錯誤」，回報記錄可據此修正供應商帳單辨識對比系統的擷取規則</div>
     </div>
     """,
     unsafe_allow_html=True,
@@ -298,7 +374,7 @@ with st.expander("ℹ️ 目前已支援的供應商清單"):
     st.caption(
         "沒有列在上面的供應商，系統會顯示「未知供應商 (無法辨識)」，"
         "所有欄位都會是 N/A，這種情況也可以照樣核對、標記正確答案，"
-        "回饋記錄可以做為之後新增這家供應商規則的素材。"
+        "錯誤回報記錄可以做為之後新增這家供應商規則的素材。"
     )
 
 # ---------------------------------------------------------------------------
@@ -327,6 +403,36 @@ with st.expander("📊 累計正確帳單統計（本次部署期間）", expand
     st.caption(
         "⚠️ 這份統計存在 App 執行環境的暫存檔案裡，App 重新部署/Reboot 後會被清空，"
         "不是永久保存的紀錄，請定期下載保存。"
+    )
+
+# ---------------------------------------------------------------------------
+# 已回報的錯誤記錄：每次在下面核對時對某張發票按「🚩 回報錯誤」，就會把
+# 那張發票被標記錯誤的欄位 + 正確答案計入這裡，之後下載這份累計記錄即可
+# 依內容修正供應商帳單辨識對比系統的擷取規則。
+# ---------------------------------------------------------------------------
+with st.expander("🚩 已回報的錯誤記錄（本次部署期間）", expanded=False):
+    error_log = _load_error_log()
+    if not error_log:
+        st.caption("目前還沒有任何欄位被回報為錯誤。")
+    else:
+        counts = Counter(row.get("供應商名稱") or row.get("供應商代碼") or "未知供應商" for row in error_log)
+        for supplier_name, cnt in sorted(counts.items(), key=lambda x: -x[1]):
+            st.write(f"- **{supplier_name}**：{cnt} 筆錯誤回報")
+        st.caption(f"目前累計共 {len(error_log)} 筆錯誤回報。")
+        csv_buf = io.StringIO()
+        writer = csv.DictWriter(csv_buf, fieldnames=_ERROR_LOG_HEADERS)
+        writer.writeheader()
+        writer.writerows(error_log)
+        st.download_button(
+            "⬇️ 下載錯誤回報記錄 (CSV)",
+            data=csv_buf.getvalue().encode("utf-8-sig"),
+            file_name="錯誤回報記錄.csv",
+            mime="text/csv",
+        )
+    st.caption(
+        "⚠️ 這份記錄存在 App 執行環境的暫存檔案裡，App 重新部署/Reboot 後會被清空，"
+        "不是永久保存的紀錄，請定期下載保存並提供給開發端 (或直接請 Claude 依照 "
+        "add-invoice-supplier 的流程) 修正對應供應商的擷取規則。"
     )
 
 # ---------------------------------------------------------------------------
@@ -406,7 +512,7 @@ invoice_groups = [(inv_no, seen_invoice[inv_no]) for inv_no in invoice_order]
 # ---------------------------------------------------------------------------
 # ② 逐欄人工核對
 # ---------------------------------------------------------------------------
-st.subheader("② 逐欄人工核對（沒有標記 = 視為忽略，不會出現在回饋記錄）")
+st.subheader("② 逐欄人工核對（沒有標記 = 視為忽略，不會出現在錯誤回報記錄）")
 
 marked_count = 0
 total_fields = 0
@@ -481,8 +587,8 @@ for inv_no, idxs in invoice_groups:
     # 這張發票所有欄位 (抬頭 + 每一筆費用) 都沒有被標記錯誤，才讓使用者
     # 「確認無誤」；一經確認，就依supplier + 發票號碼記一筆進「累計正確
     # 帳單統計」，供應商帳單辨識對比系統之後就知道哪些發票已經驗證過
-    # 100% 正確。已經標記過錯誤的發票，不計入這個統計 (錯誤內容會出現在
-    # 下面的回饋記錄裡)。
+    # 100% 正確。有標記錯誤的發票，改成讓使用者按「🚩 回報錯誤」，把標記
+    # 的欄位 + 正確答案記一筆進「已回報的錯誤記錄」，供之後修正擷取規則。
     invoice_field_keys = [f"err_{file_signature}_{inv_no}_{code}" for code, _ in HEADER_DISPLAY_FIELDS]
     invoice_field_keys += [
         f"err_{file_signature}_{row_idx}_{code}"
@@ -490,6 +596,7 @@ for inv_no, idxs in invoice_groups:
     ]
     invoice_marked = sum(1 for k in invoice_field_keys if st.session_state.get(k))
     invoice_confirm_key = f"confirmed_invoice_{file_signature}_{inv_no}"
+    invoice_report_key = f"reported_invoice_{file_signature}_{inv_no}"
     if invoice_marked == 0:
         if st.session_state.get(invoice_confirm_key):
             st.caption(f"✅ 發票 {inv_no} 已確認全部正確，已計入累計正確帳單統計。")
@@ -498,16 +605,18 @@ for inv_no, idxs in invoice_groups:
             st.session_state[invoice_confirm_key] = True
             st.rerun()
     else:
-        st.caption(f"發票 {inv_no} 有標記錯誤欄位，不計入「正確帳單」統計，錯誤內容會列在下面的回饋記錄。")
+        if st.session_state.get(invoice_report_key):
+            st.caption(f"🚩 發票 {inv_no} 的錯誤已回報，已計入「已回報的錯誤記錄」。")
+        elif st.button(f"🚩 回報錯誤（發票 {inv_no}）", key=f"btn_{invoice_report_key}"):
+            _append_error_report(
+                uploaded_pdf.name, supplier_label(detected_key), detected_key,
+                inv_no, idxs, rows, st.session_state,
+            )
+            st.session_state[invoice_report_key] = True
+            st.rerun()
     st.divider()
 
 st.info(f"目前已標記 **{marked_count}** / {total_fields} 個欄位為錯誤，其餘視為忽略。")
-
-# ---------------------------------------------------------------------------
-# ③ 匯出 EXCEL 檔案
-# ---------------------------------------------------------------------------
-st.subheader("③ 匯出 EXCEL 檔案（按鈕已移到最上方標題列右側）")
-
 
 def _resolve_final_value(code: str, row_idx: int, inv_no: str, row: dict, marks: dict):
     """算出這個欄位「最終」該輸出的值：如果被標記為錯誤，改用人工填的正確
@@ -576,100 +685,4 @@ with export_col:
         file_name=f"執行結果_{uploaded_pdf.name.rsplit('.', 1)[0]}.xlsx",
         mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
         use_container_width=True,
-    )
-st.caption(
-    "匯出的 EXCEL 檔案是「目前」核對後的最終資料 (標記錯誤的欄位已換成您填的正確答案，"
-    "其餘沿用系統擷取值)，欄位順序跟範本一致，可直接拿來當作這家供應商之後的正確答案 Excel。"
-)
-
-st.subheader("④ 下載回饋記錄")
-
-
-def _build_feedback_excel(file_name: str, supplier_lbl: str, supplier_key_: str,
-                           rows_: list, invoice_groups_: list, marks: dict) -> bytes:
-    """把「被標記為錯誤的欄位 + 使用者填的正確答案」整理成一份 Excel，
-    欄位：檔案名稱／供應商／發票號碼／品項序號／欄位代碼／欄位名稱／
-    系統擷取值／人工輸入的正確答案，方便日後依此修正 suppliers.py。
-    抬頭欄位 (整張發票共用) 的「品項序號」欄填「抬頭欄位」，跟逐筆的費用
-    明細區分開來。
-    """
-    wb = Workbook()
-    ws = wb.active
-    ws.title = "回饋記錄"
-
-    headers = ["檔案名稱", "供應商", "供應商代碼", "發票號碼", "品項序號",
-               "欄位代碼", "欄位名稱", "系統擷取值", "人工輸入正確答案"]
-    bold = Font(bold=True)
-    fill = PatternFill("solid", fgColor="DDEBF7")
-    for c, h in enumerate(headers, start=1):
-        cell = ws.cell(row=1, column=c, value=h)
-        cell.font = bold
-        cell.fill = fill
-        cell.alignment = Alignment(wrap_text=True, vertical="center", horizontal="center")
-        ws.column_dimensions[get_column_letter(c)].width = 20
-
-    r = 2
-    for inv_no, idxs in invoice_groups_:
-        header_row = rows_[idxs[0]]
-        for code, label in HEADER_DISPLAY_FIELDS:
-            err_key = f"err_{file_signature}_{inv_no}_{code}"
-            fix_key = f"fix_{file_signature}_{inv_no}_{code}"
-            if not marks.get(err_key):
-                continue
-            correct_value = marks.get(fix_key, "") or "N/A"
-            ws.cell(row=r, column=1, value=file_name)
-            ws.cell(row=r, column=2, value=supplier_lbl)
-            ws.cell(row=r, column=3, value=supplier_key_ or "")
-            ws.cell(row=r, column=4, value=inv_no)
-            ws.cell(row=r, column=5, value="抬頭欄位")
-            ws.cell(row=r, column=6, value=code)
-            ws.cell(row=r, column=7, value=label.split("\n")[-1])
-            ws.cell(row=r, column=8, value=header_row.get(code, NA))
-            ws.cell(row=r, column=9, value=correct_value)
-            r += 1
-
-        for pos, row_idx in enumerate(idxs, start=1):
-            row_ = rows_[row_idx]
-            for code, label in ITEM_DISPLAY_FIELDS:
-                err_key = f"err_{file_signature}_{row_idx}_{code}"
-                fix_key = f"fix_{file_signature}_{row_idx}_{code}"
-                if not marks.get(err_key):
-                    continue
-                correct_value = marks.get(fix_key, "") or "N/A"
-                ws.cell(row=r, column=1, value=file_name)
-                ws.cell(row=r, column=2, value=supplier_lbl)
-                ws.cell(row=r, column=3, value=supplier_key_ or "")
-                ws.cell(row=r, column=4, value=inv_no)
-                ws.cell(row=r, column=5, value=pos)
-                ws.cell(row=r, column=6, value=code)
-                ws.cell(row=r, column=7, value=label)
-                ws.cell(row=r, column=8, value=row_.get(code, NA))
-                ws.cell(row=r, column=9, value=correct_value)
-                r += 1
-
-    if r == 2:
-        ws.cell(row=2, column=1, value="（目前沒有任何欄位被標記為錯誤）")
-
-    buf = io.BytesIO()
-    wb.save(buf)
-    return buf.getvalue()
-
-
-if marked_count == 0:
-    st.caption("目前沒有任何欄位被標記為錯誤，標記完成後即可在這裡下載回饋記錄 Excel。")
-else:
-    feedback_bytes = _build_feedback_excel(
-        uploaded_pdf.name, supplier_label(detected_key), detected_key,
-        rows, invoice_groups, st.session_state,
-    )
-    st.download_button(
-        "⬇️ 下載回饋記錄 (Excel)",
-        data=feedback_bytes,
-        file_name=f"回饋記錄_{uploaded_pdf.name.rsplit('.', 1)[0]}.xlsx",
-        mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-    )
-    st.caption(
-        "把這份 Excel 交給負責維護「供應商帳單辨識對比系統」的開發端 "
-        "(或直接請 Claude 依照 add-invoice-supplier 的流程) 修正對應供應商的擷取規則，"
-        "改完後回到這個網頁重新上傳同一份 PDF，確認錯誤欄位已修正。"
     )
