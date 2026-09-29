@@ -187,19 +187,23 @@ st.markdown(
     section.main h3 {
         font-size: 24px !important;
     }
-    /* 標題列改成「依內容自動縮寬」的 flex 排版，並把「重新查核」按鈕推到
-       最右邊 (space-between 撐開)，讓按鈕落在畫面的右上角，做法跟
+    /* 標題列改成「依內容自動縮寬」的 flex 排版，標題欄位吃掉剩餘空間，
+       「匯出 EXCEL 檔案」跟「重新查核」兩個按鈕擠在最右邊，做法跟
        app.py 的標題列一致。 */
     div:has(> #title-row-marker) + div[data-testid="stHorizontalBlock"] {
         display: flex !important;
         flex-wrap: nowrap !important;
         align-items: center !important;
-        justify-content: space-between !important;
+        justify-content: flex-start !important;
+        gap: 12px !important;
     }
     div:has(> #title-row-marker) + div[data-testid="stHorizontalBlock"] > div[data-testid="column"] {
         flex: 0 0 auto !important;
         width: auto !important;
         min-width: 0 !important;
+    }
+    div:has(> #title-row-marker) + div[data-testid="stHorizontalBlock"] > div[data-testid="column"]:first-child {
+        flex: 1 1 auto !important;
     }
     /* 整體版面再簡潔一點：縮小 Streamlit 預設區塊之間的垂直間距、頁面
        上下留白、分隔線的留白，畫面才不會顯得鬆散。 */
@@ -248,16 +252,21 @@ if "uploader_version" not in st.session_state:
     st.session_state["uploader_version"] = 0
 
 st.markdown('<span id="title-row-marker"></span>', unsafe_allow_html=True)
-title_col, reset_col = st.columns([3, 1])
+title_col, export_col, reset_col = st.columns([3, 1, 1])
 with title_col:
     st.markdown(
         '<h1 style="font-size:40px; margin:0;">📝 供應商帳單人工檢核系統</h1>',
         unsafe_allow_html=True,
     )
+with export_col:
+    st.write("")  # 讓按鈕跟標題文字的垂直位置對齊
+    # 這裡先保留一個空位，實際的「📥 匯出 EXCEL 檔案」按鈕要等擷取結果
+    # 準備好之後才會畫出來 (見下面 _build_result_excel 那一段，用同一個
+    # export_col 物件把按鈕插進這個位置，讓它視覺上顯示在最上方標題列)。
 with reset_col:
     st.write("")  # 讓按鈕跟標題文字的垂直位置對齊
     reset_clicked = st.button(
-        "🔄 重新查核（換一份帳單）",
+        "🔄 重新查核",
         help="清空目前的擷取結果、標記狀態，並清除已上傳的 PDF，方便重新上傳下一份帳單。",
     )
 if reset_clicked:
@@ -494,7 +503,7 @@ st.info(f"目前已標記 **{marked_count}** / {total_fields} 個欄位為錯誤
 # ---------------------------------------------------------------------------
 # ③ 匯出 EXCEL 檔案
 # ---------------------------------------------------------------------------
-st.subheader("③ 匯出 EXCEL 檔案")
+st.subheader("③ 匯出 EXCEL 檔案（按鈕已移到最上方標題列右側）")
 
 
 def _resolve_final_value(code: str, row_idx: int, inv_no: str, row: dict, marks: dict):
@@ -555,12 +564,15 @@ def _build_result_excel(rows_: list, invoice_groups_: list, marks: dict, supplie
 # 累計正確帳單統計)，這裡的匯出不需要等確認，任何時候都可以直接匯出
 # 「目前」核對後的結果。
 result_bytes = _build_result_excel(rows, invoice_groups, st.session_state, detected_key)
-st.download_button(
-    "📥 匯出 EXCEL 檔案",
-    data=result_bytes,
-    file_name=f"執行結果_{uploaded_pdf.name.rsplit('.', 1)[0]}.xlsx",
-    mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-)
+# 按鈕實際插進最上方標題列的 export_col 那個欄位物件裡，視覺上會顯示在
+# 右上方、跟「重新查核」按鈕並排，而不是顯示在程式碼所在的這個位置。
+with export_col:
+    st.download_button(
+        "📥 匯出 EXCEL 檔案",
+        data=result_bytes,
+        file_name=f"執行結果_{uploaded_pdf.name.rsplit('.', 1)[0]}.xlsx",
+        mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+    )
 st.caption(
     "匯出的 EXCEL 檔案是「目前」核對後的最終資料 (標記錯誤的欄位已換成您填的正確答案，"
     "其餘沿用系統擷取值)，欄位順序跟範本一致，可直接拿來當作這家供應商之後的正確答案 Excel。"

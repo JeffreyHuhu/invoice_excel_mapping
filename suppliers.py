@@ -1706,14 +1706,50 @@ def _dhl_clean_amount(text: Optional[str]) -> Optional[int]:
     return int(text) if text.isdigit() else None
 
 
+_DHL_SUMMARY_LINE_PATTERN = re.compile(
+    r"^([A-Z][A-Z /&]+[A-Z])\s+\d+\s+[\d.]+\s+\d+\s+([\d,]+)\s+[\d,]+\s+[\d,]+\s+[\d,]+$"
+)
+
+
 def _dhl_extract_items(text: str) -> List[Dict]:
-    """從第 1 頁「Analysis of Extra Charges」區塊逐行擷取費用名稱/金額，
-    這個區塊 OCR 品質最好、沒有跟其他欄位擠在同一行，比第 2 頁明細表
-    可靠。
+    """擷取每一筆費用項目：
+
+    1. 第 1 頁最上面「Type of Service」彙總表的服務類型列 (例如
+       "EXPRESS WORLDWIDE NONDOC 6 23.00 8 6,292,646 3,083,135 112,509
+       9,488,290")，欄位依序是服務名稱/件數/總重量/項目數/Standard
+       Shipping Charge/Extra Charges/VAT/Total(含稅)，我們要的金額是
+       「Standard Shipping Charge」欄，不是最後含稅總額；如果這欄是 0
+       (代表這張帳單沒有基本運費，只有額外費用，例如關稅類帳單) 就不算
+       一個項目。
+    2. 「Analysis of Extra Charges」區塊逐行擷取費用名稱/金額，這個區塊
+       OCR 品質最好、沒有跟其他欄位擠在同一行，比第 2 頁明細表可靠。只
+       在「Analysis of Extra Charges」到「Total Extra Charges」這個範圍
+       內找，避免誤吃到後面付款資訊裡剛好也符合「大寫字+空白+數字」格式
+       的行 (例如匯款帳號 "ACCOUNT NO 956907730")。
     """
     items: List[Dict] = []
-    for line in text.split("\n"):
-        m = _DHL_ITEM_PATTERN.match(line.strip())
+    lines = text.split("\n")
+
+    for line in lines:
+        m = _DHL_SUMMARY_LINE_PATTERN.match(line.strip())
+        if not m:
+            continue
+        amount = _dhl_clean_amount(m.group(2))
+        if amount:  # 0 或抓不到就不算一筆項目
+            items.append({"description": m.group(1).strip(), "amount": amount})
+        break  # 一張帳單只有一種服務類型的彙總列
+
+    in_extra_section = False
+    for line in lines:
+        stripped = line.strip()
+        if stripped.upper().startswith("ANALYSIS OF EXTRA CHARGES"):
+            in_extra_section = True
+            continue
+        if not in_extra_section:
+            continue
+        if stripped.upper().startswith("TOTAL EXTRA CHARGES"):
+            break
+        m = _DHL_ITEM_PATTERN.match(stripped)
         if not m:
             continue
         desc = m.group(1).strip()
@@ -1729,11 +1765,16 @@ def _dhl_extract_items(text: str) -> List[Dict]:
 def parse_dhl(text: str) -> Dict:
     header: Dict[str, Optional[str]] = {}
 
-    # 收件公司名稱是整份 OCR 文字的第一行 (信封抬頭最上面一行)，比用通用
-    # 正則表達式亂猜「以 PT 結尾的行」更準，避免誤吃到後面其他也以 PT
-    # 結尾的行 (例如銀行匯款資訊那一段)。
+    # 收件公司名稱位置有兩種版面：
+    # (a) OCR 掃描版：信封抬頭最上面一行就是公司名稱，跟其他欄位標籤各佔
+    #     一整行，直接抓整份文字的第一行即可。
+    # (b) 有內嵌文字層的版面：公司名稱跟 "Invoice Number:" 標籤同一行
+    #     (例如 "POU YUEN INDONESIA PT Invoice Number: BDOIR00043036")，
+    #     這時第一行其實是 "DHL Express" 這種文件抬頭，不是公司名稱，要
+    #     改抓 "Invoice Number:" 前面那一段文字。
     first_line = text.split("\n", 1)[0].strip()
-    header["consignee"] = first_line or None
+    m = re.search(r"^([^\n]+?)[ \t]+Invoice[ \t]+Number[ \t]*:", text, re.MULTILINE)
+    header["consignee"] = m.group(1).strip() if m else (first_line or None)
     header["supplier"] = _search(r"(PT\s+BIROTIKA\s+SEMESTA)\s*/\s*DHL\s+EXPRESS", text)
     if header["supplier"]:
         header["supplier"] = f"{header['supplier']} / DHL EXPRESS"
