@@ -320,6 +320,13 @@ def parse_kuehne_nagel(text: str) -> Dict:
 # 這家帳單沒有「開船日」欄位，但 FLIGHT 欄位尾碼其實藏著日期 (例如
 # 'CX 777/01092026' 代表 01.09.2026)，所以 onboard_date 是從已經抓到的
 # FLIGHT(vessel) 值反推出來的，不是直接抓某個「欄位:」的值。
+#
+# ⚠️ multi_page：這家供應商常把「同一個月份好幾張獨立發票」合併成一份
+# PDF、一頁一張各自獨立的發票 (不同 invoice number)，所以跟 HYPER_MEGA/
+# YJE_TATA/PANCARAN 一樣註冊成 multi_page=True，detect_indoprostime()/
+# parse_indoprostime() 會被逐頁呼叫 (extract_utils.py 的
+# _parse_multi_page_pdf())，text 參數是『一頁』的文字，不是整份 PDF
+# 合併後的文字。
 
 def detect_indoprostime(text: str) -> bool:
     return "PROSTIME" in text.upper()
@@ -1478,7 +1485,10 @@ def parse_express(text: str) -> Dict:
 
 register_supplier("DWIHARTA", "PT. DWIHARTA LOGISTINDO", detect_dwiharta, parse_dwiharta)
 register_supplier("KUEHNE_NAGEL", "KUEHNE NAGEL INDONESIA", detect_kuehne_nagel, parse_kuehne_nagel)
-register_supplier("INDOPROSTIME", "PT. INDO PROSTIME EXPRESS", detect_indoprostime, parse_indoprostime)
+register_supplier(
+    "INDOPROSTIME", "PT. INDO PROSTIME EXPRESS", detect_indoprostime, parse_indoprostime,
+    multi_page=True,
+)
 register_supplier("MAERSK", "PT MAERSK LOGISTICS INDONESIA", detect_maersk, parse_maersk)
 register_supplier(
     "HYPER_MEGA", "PT. HYPER MEGA SHIPPING", detect_hyper_mega, parse_hyper_mega,
