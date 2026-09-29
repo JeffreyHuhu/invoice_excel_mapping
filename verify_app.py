@@ -252,23 +252,26 @@ if "uploader_version" not in st.session_state:
     st.session_state["uploader_version"] = 0
 
 st.markdown('<span id="title-row-marker"></span>', unsafe_allow_html=True)
-title_col, export_col, reset_col = st.columns([3, 1, 1])
+title_col, reset_col, export_col = st.columns([3, 1, 1])
 with title_col:
     st.markdown(
         '<h1 style="font-size:40px; margin:0;">📝 供應商帳單人工檢核系統</h1>',
         unsafe_allow_html=True,
     )
-with export_col:
-    st.write("")  # 讓按鈕跟標題文字的垂直位置對齊
-    # 這裡先保留一個空位，實際的「📥 匯出 EXCEL 檔案」按鈕要等擷取結果
-    # 準備好之後才會畫出來 (見下面 _build_result_excel 那一段，用同一個
-    # export_col 物件把按鈕插進這個位置，讓它視覺上顯示在最上方標題列)。
 with reset_col:
     st.write("")  # 讓按鈕跟標題文字的垂直位置對齊
     reset_clicked = st.button(
         "🔄 重新查核",
         help="清空目前的擷取結果、標記狀態，並清除已上傳的 PDF，方便重新上傳下一份帳單。",
+        use_container_width=True,
     )
+with export_col:
+    st.write("")  # 讓按鈕跟標題文字的垂直位置對齊
+    # 這裡先保留一個空位，實際的「📥 匯出 EXCEL 檔案」按鈕要等擷取結果
+    # 準備好之後才會畫出來 (見下面 _build_result_excel 那一段，用同一個
+    # export_col 物件把按鈕插進這個位置，讓它視覺上顯示在最上方標題列，
+    # 位置在「重新查核」按鈕右方)。兩個按鈕都用 use_container_width，
+    # 搭配相同寬度的欄位，讓兩顆按鈕大小一致。
 if reset_clicked:
     st.session_state.pop("verify_result", None)
     st.session_state.pop("verify_signature", None)
@@ -572,6 +575,7 @@ with export_col:
         data=result_bytes,
         file_name=f"執行結果_{uploaded_pdf.name.rsplit('.', 1)[0]}.xlsx",
         mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+        use_container_width=True,
     )
 st.caption(
     "匯出的 EXCEL 檔案是「目前」核對後的最終資料 (標記錯誤的欄位已換成您填的正確答案，"
