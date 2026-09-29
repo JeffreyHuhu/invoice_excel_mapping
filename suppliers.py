@@ -1310,13 +1310,6 @@ def detect_express(text: str) -> bool:
     return "EXPRESS MAXIMUM" in text.upper()
 
 
-def _express_add_space_after_pt(value: Optional[str]) -> Optional[str]:
-    """'PT.EXPRESS MAXIMUM' -> 'PT. EXPRESS MAXIMUM'。"""
-    if not value:
-        return value
-    return re.sub(r"^(PT\.)(\S)", r"\1 \2", value.strip())
-
-
 def _express_parse_long_date(text: Optional[str]) -> Optional[str]:
     """'1 September 2026' -> '01.09.2026' (跟 HYPER_MEGA 共用的英文月份
     全名對照表 _EN_MONTHS_FULL)。
@@ -1361,7 +1354,9 @@ def _express_extract_items(text: str) -> List[Dict]:
     """逐行掃描費用明細表格區塊，只認完整的 9 欄費用行 (換行的續行文字對
     不上樣式，直接被跳過)。每筆費用各自帶自己的 arrive_date/onboard_date/
     bl_no/mbl_no (都來自同一行的 DATE/AWB_NO)，交給 expand_to_rows() 做
-    逐筆覆蓋。
+    逐筆覆蓋。這是「海運/多筆 AWB」那種版面才有的表格，走空運「DETAILS OF
+    PAYMENT」版面 (見 _express_extract_payment_items()) 的帳單這裡會抓不到
+    任何一行，回傳空列表。
     """
     items: List[Dict] = []
     for line in text.split("\n"):
@@ -1383,12 +1378,54 @@ def _express_extract_items(text: str) -> List[Dict]:
     return items
 
 
+# 空運「DETAILS OF PAYMENT」版面的費用行，例如：
+#   "Air Freight Charge $ 3.700 $ 166.500 Rp 2,794,869"
+#   "Costoms Clearance Fee Rp 250,000"
+# 費用名稱後面可能有 0～多組 "$ 數字" (美金單價/小計)，最後一定是
+# "Rp 金額" (印尼盾金額，才是正確答案要的 AMOUNT)。"Total"/"Sub. Total"/
+# "Tax (...)"/"Deposit" 這些彙總列雖然格式很像，但不是真正的費用項目，
+# 要另外排除。
+_EXPRESS_PAYMENT_ITEM_PATTERN = re.compile(
+    r"^(?P<desc>[A-Za-z][A-Za-z .]*?)\s+(?:\$\s*[\d,]+\.?\d*\s+)*Rp\.?\s*(?P<amount>[\d,]+)$"
+)
+_EXPRESS_PAYMENT_ITEM_SKIP_PATTERN = re.compile(
+    r"^(total|sub\.?\s*total|grand\s*total|tax|deposit)\b", re.IGNORECASE
+)
+
+
+def _express_extract_payment_items(text: str) -> List[Dict]:
+    """空運帳單「DETAILS OF PAYMENT」表格版面 (跟 _express_extract_items()
+    的海運多筆 AWB 表格是兩種完全不同的版面，同一家供應商依貨運方式各自
+    印出不同格式的帳單)。逐行掃描，只認「費用名稱 + (可選)美金單價 +
+    Rp 印尼盾金額」這種格式，Total/Sub. Total/Grand Total (含 "GRAND TOTAL
+    in IDR" 這種後面還帶文字的變化)/Tax(...)/Deposit 這些彙總列要排除，
+    不是真正的費用明細。
+    """
+    items: List[Dict] = []
+    for line in text.split("\n"):
+        stripped = line.strip()
+        m = _EXPRESS_PAYMENT_ITEM_PATTERN.match(stripped)
+        if not m:
+            continue
+        desc = m.group("desc").strip()
+        if _EXPRESS_PAYMENT_ITEM_SKIP_PATTERN.match(desc):
+            continue
+        items.append({
+            "description": desc,
+            "amount": _express_clean_amount(m.group("amount")),
+        })
+    return items
+
+
 def parse_express(text: str) -> Dict:
     header: Dict[str, Optional[str]] = {}
 
-    header["supplier"] = _express_add_space_after_pt(
-        _search(r"^(PT\.\s*EXPRESS\s*MAXIMUM)", text)
-    )
+    # 公司名稱固定就是這家供應商，不用每次都從 PDF 抓：有些帳單的抬頭
+    # logo 用特殊字型印刷，pdfplumber 抽出來的文字會變成每個字母重複好
+    # 幾次的亂碼 (例如 "PPPPTTTT....EEEEXXXXPPPPRRRREEEE..." 其實是
+    # "PT.EXPRESS MAXIMUM")，與其花力氣解碼亂碼字型，不如直接固定這個
+    # 值，兩種帳單版面都適用。
+    header["supplier"] = "PT. EXPRESS MAXIMUM"
     header["consignee"] = _search(r"COMPANY\s*:\s*(.+?)\s*$", text)
     header["invoice_no"] = _search(r"INVOICE\s+NO\s*:\s*(\S+)", text)
     header["invoice_date"] = _express_parse_long_date(
@@ -1396,14 +1433,34 @@ def parse_express(text: str) -> Dict:
     )
 
     # 這種帳單沒有 Order No./啟運港/目的港/材積/船名/貨櫃號碼，留空給
-    # expand_to_rows() 補 N/A。到達日/開船日/提單號碼/主提單號碼改成逐筆
-    # 費用各自帶自己的值 (見下面 _express_extract_items())。
+    # expand_to_rows() 補 N/A。
     for code in ("order_no", "port_of_loading", "port_of_discharge",
-                 "volume", "vessel", "container_no",
-                 "arrive_date", "onboard_date", "bl_no", "mbl_no"):
+                 "volume", "vessel", "container_no"):
         header[code] = None
 
     items = _express_extract_items(text)
+    if items:
+        # 海運/多筆 AWB 版面：到達日/開船日/提單號碼/主提單號碼改成逐筆
+        # 費用各自帶自己的值 (見 _express_extract_items())，這裡不用整張
+        # 發票共用一個值。
+        for code in ("arrive_date", "onboard_date", "bl_no", "mbl_no"):
+            header[code] = None
+    else:
+        # 空運「DETAILS OF PAYMENT」版面：整張發票只有一組 DATE/HAWB/MAWB，
+        # 所有費用項目共用同一個值 (不像海運版面每筆費用各自的 AWB 可能不
+        # 同)。HAWB (House AWB，供應商自己的貨運單號) 對應 B/L NO.，
+        # MAWB (Master AWB，航空公司的主提單號，格式含空白例如
+        # "180 4357 0774") 對應 MBL NO.，跟 DHL/其他供應商「提單/主提單」
+        # 欄位的用法一致。這種版面沒有 Arrive Date 的概念 (空運當天直飛，
+        # 帳單只印一個 DATE)，留空給 expand_to_rows() 補 N/A。
+        header["arrive_date"] = None
+        header["onboard_date"] = _express_parse_long_date(
+            _search(r"^DATE\s*:\s*(\d{1,2}\s+[A-Za-z]+\s+\d{4})", text)
+        )
+        header["bl_no"] = _search(r"^HAWB\s*:\s*(\S+)", text)
+        header["mbl_no"] = _search(r"^MAWB\s*:\s*(.+?)\s*$", text)
+        items = _express_extract_payment_items(text)
+
     if not items:
         items = [{"description": None, "amount": None}]
 
