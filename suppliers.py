@@ -68,21 +68,30 @@ _DWIHARTA_LABEL_WORDS = [
 ]
 _DWIHARTA_NEXT = "(?:" + "|".join(_DWIHARTA_LABEL_WORDS) + ")"
 _DWIHARTA_STOP = rf"(?=\s{{2,}}|\n|$|\s*{_DWIHARTA_NEXT}\b)"
+# 冒號後面只能跳過「同一行」的空白 (空格/tab)，不能用 \s* (那樣連換行都會
+# 跳過)：像 "Container No. :" 或 "Volume :" 這種欄位常常沒有值、緊接著就
+# 換行進到下一個標籤，如果冒號後面的空白字元允許吃掉換行，(.+?) 就會被
+# 硬牽去抓下一行「下一個欄位」的文字 (例如 "Container No. :\nConsignee :
+# PT. POU YUEN INDONESIA" 會被誤抓成 "Consignee : PT. POU YUEN INDONESIA"
+# 當作 container_no 的值)。改成只吃同一行空白後，遇到欄位是空的，
+# (.+?) 在换行前找不到任何字元可比對，整個 pattern 就不會比對成功，
+# _search() 正確回傳 None，之後由 expand_to_rows() 補成 "N/A"。
+_DWIHARTA_COLON = r"\s*:[ \t]*"
 
 _DWIHARTA_HEADER_PATTERNS: Dict[str, str] = {
-    "invoice_no":         rf"Invoice\s*No\.?\s*:\s*(.+?){_DWIHARTA_STOP}",
-    "invoice_date":       rf"Invoice\s*Date\s*:\s*(.+?){_DWIHARTA_STOP}",
-    "order_no":           rf"Order\s*No\.?\s*:\s*(.+?){_DWIHARTA_STOP}",
-    "arrive_date":        rf"Arrive\s*Date\s*:\s*(.+?){_DWIHARTA_STOP}",
-    "onboard_date":       rf"On\s*[Bb]oard\s*Date\s*:\s*(.+?){_DWIHARTA_STOP}",
-    "bl_no":              rf"\bB/L\s*No\.?\s*:\s*(.+?){_DWIHARTA_STOP}",
-    "mbl_no":             rf"\bMBL\s*No\.?\s*:\s*(.+?){_DWIHARTA_STOP}",
-    "port_of_loading":    rf"Port\s*Of\s*Loading\s*:\s*(.+?){_DWIHARTA_STOP}",
-    "port_of_discharge":  rf"Port\s*Of\s*Discharge\s*:\s*(.+?){_DWIHARTA_STOP}",
-    "volume":             rf"Volume\s*:\s*(.+?){_DWIHARTA_STOP}",
-    "vessel":             rf"Vessel\s*:\s*(.+?){_DWIHARTA_STOP}",
-    "container_no":       rf"Container\s*No\.?\s*:\s*(.+?){_DWIHARTA_STOP}",
-    "consignee":          rf"\bTO\s*:\s*(.+?){_DWIHARTA_STOP}",
+    "invoice_no":         rf"Invoice\s*No\.?{_DWIHARTA_COLON}(.+?){_DWIHARTA_STOP}",
+    "invoice_date":       rf"Invoice\s*Date{_DWIHARTA_COLON}(.+?){_DWIHARTA_STOP}",
+    "order_no":           rf"Order\s*No\.?{_DWIHARTA_COLON}(.+?){_DWIHARTA_STOP}",
+    "arrive_date":        rf"Arrive\s*Date{_DWIHARTA_COLON}(.+?){_DWIHARTA_STOP}",
+    "onboard_date":       rf"On\s*[Bb]oard\s*Date{_DWIHARTA_COLON}(.+?){_DWIHARTA_STOP}",
+    "bl_no":              rf"\bB/L\s*No\.?{_DWIHARTA_COLON}(.+?){_DWIHARTA_STOP}",
+    "mbl_no":             rf"\bMBL\s*No\.?{_DWIHARTA_COLON}(.+?){_DWIHARTA_STOP}",
+    "port_of_loading":    rf"Port\s*Of\s*Loading{_DWIHARTA_COLON}(.+?){_DWIHARTA_STOP}",
+    "port_of_discharge":  rf"Port\s*Of\s*Discharge{_DWIHARTA_COLON}(.+?){_DWIHARTA_STOP}",
+    "volume":             rf"Volume{_DWIHARTA_COLON}(.+?){_DWIHARTA_STOP}",
+    "vessel":             rf"Vessel{_DWIHARTA_COLON}(.+?){_DWIHARTA_STOP}",
+    "container_no":       rf"Container\s*No\.?{_DWIHARTA_COLON}(.+?){_DWIHARTA_STOP}",
+    "consignee":          rf"\bTO{_DWIHARTA_COLON}(.+?){_DWIHARTA_STOP}",
 }
 
 _DWIHARTA_LINE_ITEM_PATTERN = re.compile(
