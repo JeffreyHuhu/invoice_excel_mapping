@@ -33,9 +33,13 @@ verify_app.py
     兩邊會同時生效，不用分別維護兩份擷取邏輯。
 """
 
+import csv
+import datetime
 import hashlib
 import io
+import os
 import tempfile
+from collections import Counter
 
 import streamlit as st
 
@@ -99,6 +103,50 @@ ITEM_DISPLAY_FIELDS = [
     ("description", "費用名稱"),
     ("amount", "金額"),
 ]
+
+# ---------------------------------------------------------------------------
+# 「確認無誤」的發票要紀錄下來，依供應商＋發票號碼累計「目前正確帳單的
+# 筆數」，作為供應商帳單辨識對比系統日後改善的依據 (哪家供應商已經驗證
+# 過夠多張都正確、哪家還沒)。
+#
+# 注意：Streamlit Cloud 的檔案系統是「暫存」的，只要這個 App 被
+# Reboot/重新部署 (例如程式碼更新後)，這個記錄檔就會被清空，所以這裡
+# 累計的是「這次部署期間」的正確帳單數，不是永久保存的歷史紀錄。要長期
+# 留存，請定期用畫面上的「下載正確帳單清單」把目前的累計結果匯出保存。
+# ---------------------------------------------------------------------------
+_CORRECT_LOG_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), "confirmed_correct_log.csv")
+_CORRECT_LOG_HEADERS = ["確認時間", "供應商代碼", "供應商名稱", "發票號碼", "檔案名稱"]
+
+
+def _load_correct_log() -> "list[dict]":
+    if not os.path.exists(_CORRECT_LOG_PATH):
+        return []
+    with open(_CORRECT_LOG_PATH, "r", encoding="utf-8-sig", newline="") as f:
+        return list(csv.DictReader(f))
+
+
+def _record_correct_invoice(supplier_key_: str, supplier_lbl: str, inv_no: str, file_name: str) -> None:
+    """把「使用者確認這張發票全部正確」記一筆進本機的 CSV 記錄檔。同一家
+    供應商、同一個發票號碼只計一次 (用供應商代碼＋發票號碼去重複)，避免
+    重複點擊「確認無誤」或重複上傳同一份帳單時把筆數灌水。
+    """
+    existing = _load_correct_log()
+    dedup_key = (supplier_key_ or "", inv_no or "")
+    for row in existing:
+        if (row.get("供應商代碼", ""), row.get("發票號碼", "")) == dedup_key:
+            return
+    is_new_file = not os.path.exists(_CORRECT_LOG_PATH)
+    with open(_CORRECT_LOG_PATH, "a", encoding="utf-8-sig", newline="") as f:
+        writer = csv.DictWriter(f, fieldnames=_CORRECT_LOG_HEADERS)
+        if is_new_file:
+            writer.writeheader()
+        writer.writerow({
+            "確認時間": datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+            "供應商代碼": supplier_key_ or "",
+            "供應商名稱": supplier_lbl,
+            "發票號碼": inv_no,
+            "檔案名稱": file_name,
+        })
 
 # ---------------------------------------------------------------------------
 # 全站樣式：字體/按鈕顏色沿用「供應商帳單辨識對比系統」(app.py) 同一套
@@ -242,6 +290,34 @@ with st.expander("ℹ️ 目前已支援的供應商清單"):
     )
 
 # ---------------------------------------------------------------------------
+# 累計正確帳單統計：每次在下面核對時按「✅ 確認無誤」確認某張發票全部
+# 正確，就會計入這裡，依供應商分組顯示目前累計的正確帳單張數。
+# ---------------------------------------------------------------------------
+with st.expander("📊 累計正確帳單統計（本次部署期間）", expanded=False):
+    correct_log = _load_correct_log()
+    if not correct_log:
+        st.caption("目前還沒有任何發票被確認為「全部正確」。")
+    else:
+        counts = Counter(row.get("供應商名稱") or row.get("供應商代碼") or "未知供應商" for row in correct_log)
+        for supplier_name, cnt in sorted(counts.items(), key=lambda x: -x[1]):
+            st.write(f"- **{supplier_name}**：{cnt} 張發票")
+        st.caption(f"目前累計共 {len(correct_log)} 張發票已確認全部正確（依供應商＋發票號碼去重複計算）。")
+        csv_buf = io.StringIO()
+        writer = csv.DictWriter(csv_buf, fieldnames=_CORRECT_LOG_HEADERS)
+        writer.writeheader()
+        writer.writerows(correct_log)
+        st.download_button(
+            "⬇️ 下載正確帳單清單 (CSV)",
+            data=csv_buf.getvalue().encode("utf-8-sig"),
+            file_name="正確帳單清單.csv",
+            mime="text/csv",
+        )
+    st.caption(
+        "⚠️ 這份統計存在 App 執行環境的暫存檔案裡，App 重新部署/Reboot 後會被清空，"
+        "不是永久保存的紀錄，請定期下載保存。"
+    )
+
+# ---------------------------------------------------------------------------
 # ① 上傳 PDF
 # ---------------------------------------------------------------------------
 st.subheader("① 上傳供應商帳單 PDF")
@@ -370,14 +446,36 @@ for inv_no, idxs in invoice_groups:
                 f"err_{file_signature}_{row_idx}_{code}",
                 f"fix_{file_signature}_{row_idx}_{code}",
             )
+
+    # 這張發票所有欄位 (抬頭 + 每一筆費用) 都沒有被標記錯誤，才讓使用者
+    # 「確認無誤」；一經確認，就依supplier + 發票號碼記一筆進「累計正確
+    # 帳單統計」，供應商帳單辨識對比系統之後就知道哪些發票已經驗證過
+    # 100% 正確。已經標記過錯誤的發票，不計入這個統計 (錯誤內容會出現在
+    # 下面的回饋記錄裡)。
+    invoice_field_keys = [f"err_{file_signature}_{inv_no}_{code}" for code, _ in HEADER_DISPLAY_FIELDS]
+    invoice_field_keys += [
+        f"err_{file_signature}_{row_idx}_{code}"
+        for row_idx in idxs for code, _ in ITEM_DISPLAY_FIELDS
+    ]
+    invoice_marked = sum(1 for k in invoice_field_keys if st.session_state.get(k))
+    invoice_confirm_key = f"confirmed_invoice_{file_signature}_{inv_no}"
+    if invoice_marked == 0:
+        if st.session_state.get(invoice_confirm_key):
+            st.caption(f"✅ 發票 {inv_no} 已確認全部正確，已計入累計正確帳單統計。")
+        elif st.button(f"✅ 確認無誤（發票 {inv_no}）", key=f"btn_{invoice_confirm_key}"):
+            _record_correct_invoice(detected_key, supplier_label(detected_key), inv_no, uploaded_pdf.name)
+            st.session_state[invoice_confirm_key] = True
+            st.rerun()
+    else:
+        st.caption(f"發票 {inv_no} 有標記錯誤欄位，不計入「正確帳單」統計，錯誤內容會列在下面的回饋記錄。")
     st.divider()
 
 st.info(f"目前已標記 **{marked_count}** / {total_fields} 個欄位為錯誤，其餘視為忽略。")
 
 # ---------------------------------------------------------------------------
-# ③ 確認核對結果並匯出 Excel
+# ③ 匯出 EXCEL 檔案
 # ---------------------------------------------------------------------------
-st.subheader("③ 確認核對結果並匯出 Excel")
+st.subheader("③ 匯出 EXCEL 檔案")
 
 
 def _resolve_final_value(code: str, row_idx: int, inv_no: str, row: dict, marks: dict):
@@ -429,27 +527,16 @@ def _build_result_excel(rows_: list, invoice_groups_: list, marks: dict, supplie
     return buf.getvalue()
 
 
-# 「確認無誤」按鈕跟「匯出 EXCEL 檔案」按鈕並排放在一起：確認按鈕只是讓
-# 使用者明確表態「這份帳單全部正確」(全部都沒標記錯誤時才會出現)，跟
-# 匯出 Excel 是兩件獨立的事，不需要等按過確認才能匯出，任何時候都可以
-# 直接匯出目前的核對結果。
-confirm_key = f"confirmed_{file_signature}"
-confirm_col, export_col = st.columns(2)
-with confirm_col:
-    if marked_count == 0:
-        if st.button("✅ 確認無誤（此帳單所有欄位都正確）"):
-            st.session_state[confirm_key] = True
-            st.rerun()
-        if st.session_state.get(confirm_key):
-            st.caption("已確認此帳單全部正確。")
-with export_col:
-    result_bytes = _build_result_excel(rows, invoice_groups, st.session_state, detected_key)
-    st.download_button(
-        "📥 匯出 EXCEL 檔案",
-        data=result_bytes,
-        file_name=f"執行結果_{uploaded_pdf.name.rsplit('.', 1)[0]}.xlsx",
-        mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-    )
+# 「確認無誤」已經改成在上面每張發票各自確認 (依供應商＋發票號碼記入
+# 累計正確帳單統計)，這裡的匯出不需要等確認，任何時候都可以直接匯出
+# 「目前」核對後的結果。
+result_bytes = _build_result_excel(rows, invoice_groups, st.session_state, detected_key)
+st.download_button(
+    "📥 匯出 EXCEL 檔案",
+    data=result_bytes,
+    file_name=f"執行結果_{uploaded_pdf.name.rsplit('.', 1)[0]}.xlsx",
+    mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+)
 st.caption(
     "匯出的 EXCEL 檔案是「目前」核對後的最終資料 (標記錯誤的欄位已換成您填的正確答案，"
     "其餘沿用系統擷取值)，欄位順序跟範本一致，可直接拿來當作這家供應商之後的正確答案 Excel。"
