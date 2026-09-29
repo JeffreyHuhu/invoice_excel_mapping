@@ -39,6 +39,7 @@ import hashlib
 import io
 import os
 import tempfile
+import zipfile
 from collections import Counter
 
 import streamlit as st
@@ -167,12 +168,13 @@ def _load_error_log() -> "list[dict]":
         return list(csv.DictReader(f))
 
 
-def _append_error_report(file_name: str, supplier_lbl: str, supplier_key_: str,
-                          inv_no: str, idxs: "list[int]", rows_: list, marks: dict) -> int:
-    """把這張發票「目前」所有被標記為錯誤的欄位 + 使用者填的正確答案，各自
-    附加一筆進錯誤回報記錄檔。回傳這次新增了幾筆紀錄 (0 代表這張發票目前
-    沒有任何欄位被標記為錯誤，不用寫入)。
+def _collect_error_rows(file_name: str, supplier_lbl: str, supplier_key_: str,
+                         inv_no: str, idxs: "list[int]", rows_: list, marks: dict) -> "list[dict]":
+    """整理出這張發票「目前」所有被標記為錯誤的欄位 + 使用者填的正確答案，
+    每個欄位一筆，回傳 list（不寫檔），供 _append_error_report() 寫進累計
+    記錄檔、或 _build_error_report_bundle() 打包進下載的 ZIP 共用。
     """
+    now = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
     new_rows = []
     header_row = rows_[idxs[0]]
     for code, label in HEADER_DISPLAY_FIELDS:
@@ -181,7 +183,7 @@ def _append_error_report(file_name: str, supplier_lbl: str, supplier_key_: str,
             continue
         fix_key = f"fix_{file_signature}_{inv_no}_{code}"
         new_rows.append({
-            "回報時間": datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+            "回報時間": now,
             "檔案名稱": file_name,
             "供應商代碼": supplier_key_ or "",
             "供應商名稱": supplier_lbl,
@@ -201,7 +203,7 @@ def _append_error_report(file_name: str, supplier_lbl: str, supplier_key_: str,
                 continue
             fix_key = f"fix_{file_signature}_{row_idx}_{code}"
             new_rows.append({
-                "回報時間": datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+                "回報時間": now,
                 "檔案名稱": file_name,
                 "供應商代碼": supplier_key_ or "",
                 "供應商名稱": supplier_lbl,
@@ -212,7 +214,16 @@ def _append_error_report(file_name: str, supplier_lbl: str, supplier_key_: str,
                 "系統擷取值": row_.get(code, NA),
                 "人工輸入正確答案": marks.get(fix_key, "") or "N/A",
             })
+    return new_rows
 
+
+def _append_error_report(file_name: str, supplier_lbl: str, supplier_key_: str,
+                          inv_no: str, idxs: "list[int]", rows_: list, marks: dict) -> int:
+    """把 _collect_error_rows() 整理出來的錯誤欄位附加進累計的錯誤回報記錄
+    檔 (供「🚩 已回報的錯誤記錄」統計面板使用)。回傳這次新增了幾筆紀錄
+    (0 代表這張發票目前沒有任何欄位被標記為錯誤，不用寫入)。
+    """
+    new_rows = _collect_error_rows(file_name, supplier_lbl, supplier_key_, inv_no, idxs, rows_, marks)
     if not new_rows:
         return 0
 
@@ -223,6 +234,23 @@ def _append_error_report(file_name: str, supplier_lbl: str, supplier_key_: str,
             writer.writeheader()
         writer.writerows(new_rows)
     return len(new_rows)
+
+
+def _build_error_report_bundle(pdf_bytes: bytes, pdf_name: str, error_rows: "list[dict]") -> bytes:
+    """把「原始 PDF」+「這張發票的錯誤回報記錄 CSV」打包成一個 ZIP，讓
+    使用者回報問題時只需要下載、附上這一個檔案給開發端 (或直接貼給
+    Claude)，不用再分別附上 PDF 跟回報記錄兩個檔案。
+    """
+    csv_buf = io.StringIO()
+    writer = csv.DictWriter(csv_buf, fieldnames=_ERROR_LOG_HEADERS)
+    writer.writeheader()
+    writer.writerows(error_rows)
+
+    zip_buf = io.BytesIO()
+    with zipfile.ZipFile(zip_buf, "w", zipfile.ZIP_DEFLATED) as zf:
+        zf.writestr(pdf_name, pdf_bytes)
+        zf.writestr("錯誤回報記錄.csv", csv_buf.getvalue().encode("utf-8-sig"))
+    return zip_buf.getvalue()
 
 # ---------------------------------------------------------------------------
 # 全站樣式：字體/按鈕顏色沿用「供應商帳單辨識對比系統」(app.py) 同一套
@@ -605,15 +633,39 @@ for inv_no, idxs in invoice_groups:
             st.session_state[invoice_confirm_key] = True
             st.rerun()
     else:
-        if st.session_state.get(invoice_report_key):
-            st.caption(f"🚩 發票 {inv_no} 的錯誤已回報，已計入「已回報的錯誤記錄」。")
-        elif st.button(f"🚩 回報錯誤（發票 {inv_no}）", key=f"btn_{invoice_report_key}"):
-            _append_error_report(
+        report_col, bundle_col = st.columns(2)
+        with report_col:
+            if st.session_state.get(invoice_report_key):
+                st.caption(f"🚩 發票 {inv_no} 的錯誤已回報，已計入「已回報的錯誤記錄」。")
+            elif st.button(f"🚩 回報錯誤（發票 {inv_no}）", key=f"btn_{invoice_report_key}"):
+                _append_error_report(
+                    uploaded_pdf.name, supplier_label(detected_key), detected_key,
+                    inv_no, idxs, rows, st.session_state,
+                )
+                st.session_state[invoice_report_key] = True
+                st.rerun()
+        with bundle_col:
+            # 把「原始 PDF + 這張發票的錯誤回報記錄」打包成一個 ZIP，讓
+            # 使用者要提供給開發端 (或直接貼給 Claude) 修正辨識規則時，
+            # 只需要下載、附上這一個檔案，不用再分別附上 PDF 跟回報記錄
+            # 兩個檔案。內容永遠反映「目前」畫面上標記的狀態，不用先按
+            # 「回報錯誤」才能下載。
+            bundle_rows = _collect_error_rows(
                 uploaded_pdf.name, supplier_label(detected_key), detected_key,
                 inv_no, idxs, rows, st.session_state,
             )
-            st.session_state[invoice_report_key] = True
-            st.rerun()
+            bundle_bytes = _build_error_report_bundle(uploaded_pdf.getvalue(), uploaded_pdf.name, bundle_rows)
+            st.download_button(
+                f"📦 下載錯誤回報包（發票 {inv_no}）",
+                data=bundle_bytes,
+                file_name=f"錯誤回報包_{inv_no}.zip",
+                mime="application/zip",
+                key=f"bundle_{file_signature}_{inv_no}",
+            )
+        st.caption(
+            "想請開發端 (或 Claude) 依這次回報修正辨識規則，下載左邊的 ZIP 即可"
+            "（已包含原始 PDF + 這張發票的錯誤回報記錄，不用再另外附上 PDF 檔案）。"
+        )
     st.divider()
 
 st.info(f"目前已標記 **{marked_count}** / {total_fields} 個欄位為錯誤，其餘視為忽略。")
