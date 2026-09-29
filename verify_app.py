@@ -400,6 +400,22 @@ marked_count = 0
 total_fields = 0
 
 
+def _format_amount(value):
+    """金額加上千分位逗號，方便閱讀 (例如 3140183 顯示成 3,140,183)；
+    抓不到值 (N/A) 或不是數字的值維持原樣顯示，不強行格式化。只影響畫面
+    顯示，標記錯誤/正確答案/匯出 Excel 用的還是原始數值，不受影響。
+    """
+    if value in (None, NA, ""):
+        return value
+    try:
+        num = float(str(value).replace(",", ""))
+    except (TypeError, ValueError):
+        return value
+    if num == int(num):
+        return f"{int(num):,}"
+    return f"{num:,.2f}"
+
+
 def _field_row(label: str, value, err_key: str, fix_key: str) -> None:
     global marked_count, total_fields
     total_fields += 1
@@ -440,9 +456,12 @@ for inv_no, idxs in invoice_groups:
     for pos, row_idx in enumerate(idxs, start=1):
         row = rows[row_idx]
         for code, label in ITEM_DISPLAY_FIELDS:
+            display_value = row.get(code, NA)
+            if code == "amount":
+                display_value = _format_amount(display_value)
             _field_row(
                 label,
-                row.get(code, NA),
+                display_value,
                 f"err_{file_signature}_{row_idx}_{code}",
                 f"fix_{file_signature}_{row_idx}_{code}",
             )
@@ -519,7 +538,12 @@ def _build_result_excel(rows_: list, invoice_groups_: list, marks: dict, supplie
         for row_idx in idxs:
             row_ = rows_[row_idx]
             for idx, code in enumerate(FIELD_CODES, start=1):
-                ws.cell(row=r, column=idx, value=_resolve_final_value(code, row_idx, inv_no, row_, marks))
+                value = _resolve_final_value(code, row_idx, inv_no, row_, marks)
+                cell = ws.cell(row=r, column=idx, value=value)
+                # 金額欄位加上千分位逗號的顯示格式 (只影響格式，數值本身
+                # 不變，還是可以在 Excel 裡直接拿來做加總等計算)。
+                if code == "amount" and isinstance(value, (int, float)):
+                    cell.number_format = "#,##0"
             r += 1
 
     buf = io.BytesIO()
