@@ -264,9 +264,25 @@ SUPPLIER_REGISTRY: Dict[str, Dict] = {}
 def register_supplier(key: str, label: str,
                        detect_fn: Callable[[str], bool],
                        parse_fn: Callable[[str], Dict],
-                       multi_page: bool = False) -> None:
+                       multi_page: bool = False,
+                       extract_total: Optional[Callable[[str], Optional[float]]] = None,
+                       audit_exclude: Tuple[str, ...] = ()) -> None:
+    """註冊一家供應商。
+
+    extract_total (可選)：從『一張發票』的原始文字裡抓出帳單本身寫的
+    『未稅總額』(Total (Excl. VAT) / Sub Total / SUBTOTAL / Net value…，
+    依供應商命名不同)，用來跟系統擷取到的費用明細加總互相稽核 (見
+    audit_invoice_totals())。沒有實作 (預設 None) 的供應商就不做這項稽核，
+    不會被當成「不一致」。
+
+    audit_exclude (可選)：這家供應商的 items 裡，有哪些 description 是
+    『不是真正費用、不該算進未稅總額加總』的合成列 (例如 YJE_TATA 的
+    "DPP" 是額外附加的未稅金額備註列，不是一筆實際費用)，稽核加總時要
+    跳過這些列，避免誤判成不一致。
+    """
     SUPPLIER_REGISTRY[key] = {
         "label": label, "detect": detect_fn, "parse": parse_fn, "multi_page": multi_page,
+        "extract_total": extract_total, "audit_exclude": audit_exclude,
     }
 
 
@@ -460,31 +476,37 @@ def compare_rows(rows: List[Dict], reference_rows: pd.DataFrame) -> List[Dict]:
             "結果": status,
         })
 
-    # 大部分供應商每張帳單只有「一個」Order No. (整張帳單共用，已經在上面
-    # 抬頭欄位比對過一次)。但少數供應商 (例如 PT. TRANS DAYA PRIMA 一張
-    # 帳單裡有好幾筆費用時) 是「每一筆費用明細各自有自己的 Order No.」，
-    # 光比對第一列的抬頭值沒辦法驗證到第二、第三筆費用的單號對不對。這裡
-    # 動態偵測：只要擷取結果或正確答案裡，同一張帳單的 Order No. 出現超過
-    # 一種不同的值，就自動改成「連 Order No. 一起」三個一組去比對每一筆
-    # 費用明細；否則沿用原本「只比 Description/Amount」兩個一組的做法，
-    # 對其餘 Order No. 整張帳單只有一個值的供應商完全不影響既有的比對結果
-    # 跟顯示格式。
-    ext_order_nos = {normalize_value(r.get("order_no")) for r in rows}
-    ref_order_nos = (
-        {normalize_value(v) for v in reference_rows["order_no"]}
-        if "order_no" in reference_rows.columns else set()
-    )
-    per_item_order_no = len(ext_order_nos) > 1 or len(ref_order_nos) > 1
+    # 大部分供應商每張帳單的抬頭欄位 (發票號碼、Order No.、船名…等) 整張
+    # 帳單只有一個值，已經在上面「只用第一列」比對過一次。但少數供應商
+    # (例如 PT. TRANS DAYA PRIMA / YJE_TATA 的 Order No.，或 DHL 一張發票
+    # 裡有好幾個提單/航次時的 B/L NO.、開船日、啟運港、目的港) 是「每一筆
+    # 費用明細各自有自己的抬頭值」，光比對第一列沒辦法驗證到第二、第三筆
+    # 費用明細的單號/日期/港口對不對。這裡動態偵測：只要擷取結果或正確
+    # 答案裡，同一張帳單的某個抬頭欄位出現超過一種不同的值，就自動把該
+    # 欄位也一起納入「逐筆費用明細」的比對 key (不限於 order_no，未來任何
+    # 供應商只要有「每筆費用各自不同」的抬頭欄位都會自動被抓進來)；否則
+    # 沿用原本「只比 Description/Amount」的做法，對其餘欄位整張帳單只有
+    # 一個值的供應商完全不影響既有的比對結果跟顯示格式。
+    varying_codes = []
+    for code in HEADER_FIELD_CODES:
+        ext_vals = {normalize_value(r.get(code)) for r in rows}
+        ref_vals = (
+            {normalize_value(v) for v in reference_rows[code]}
+            if code in reference_rows.columns else set()
+        )
+        if len(ext_vals) > 1 or len(ref_vals) > 1:
+            varying_codes.append(code)
 
-    if per_item_order_no:
-        item_label = "Description/Amount/Order No."
+    if varying_codes:
+        extra_labels = [DISPLAY_HEADERS[c].split("\n")[0] for c in varying_codes]
+        item_label = "Description/Amount/" + "/".join(extra_labels)
 
         def _item_key(r):
-            return (normalize_value(r.get("description")), normalize_value(r.get("amount")),
-                    normalize_value(r.get("order_no")))
+            return (normalize_value(r.get("description")), normalize_value(r.get("amount"))) + \
+                tuple(normalize_value(r.get(c)) for c in varying_codes)
 
         def _item_fmt(t):
-            return f"{t[0]} / {t[1]} / {t[2]}"
+            return " / ".join(str(x) for x in t)
     else:
         item_label = "Description/Amount"
 
@@ -587,6 +609,114 @@ def quality_score(rows: List[Dict]) -> float:
             if v and v != NA:
                 ok += 1
     return ok / total if total else 0.0
+
+
+def audit_invoice_totals(
+    supplier_key: Optional[str],
+    pdf_path: str,
+    rows: List[Dict],
+    **pdfplumber_kwargs,
+) -> List[Dict]:
+    """稽核『系統擷取出來的費用總額』是否跟帳單本身寫的『未稅總額』
+    (Total (Excl. VAT) / Sub Total…，依供應商命名不同) 一致。
+
+    只對「有實作 extract_total 規則」的供應商稽核 (見 register_supplier())；
+    沒有實作的供應商回傳空列表，代表『這家供應商還沒辦法自動稽核』，不是
+    「一致」也不是「不一致」，呼叫端不應顯示警示。
+
+    回傳一份清單，每張發票 (multi_page 供應商一份 PDF 可能有好幾張) 各一筆：
+      invoice_no      發票號碼 (抓不到時是 N/A)
+      extracted_sum   系統擷取到的費用明細加總 (跳過 audit_exclude 指定的
+                       合成列，例如 YJE_TATA 的 "DPP")
+      invoice_total   帳單原文抓到的未稅總額
+      diff            extracted_sum - invoice_total
+      match           兩者是否一致 (容許 ±1 的四捨五入誤差)
+
+    呼叫端 (app.py / verify_app.py) 只需要對 match=False 的項目顯示警示。
+    """
+    entry = SUPPLIER_REGISTRY.get(supplier_key) if supplier_key else None
+    if not entry or not entry.get("extract_total"):
+        return []
+
+    extract_total_fn = entry["extract_total"]
+    exclude_descs = {normalize_value(d) for d in entry.get("audit_exclude", ())}
+
+    def _sum_rows(group_rows: List[Dict]) -> float:
+        total = 0.0
+        for r in group_rows:
+            if normalize_value(r.get("description")) in exclude_descs:
+                continue
+            amt = r.get("amount")
+            if isinstance(amt, (int, float)) and not isinstance(amt, bool):
+                total += amt
+        return total
+
+    results: List[Dict] = []
+
+    if entry.get("multi_page"):
+        pages = extract_pages_from_pdf(pdf_path, **pdfplumber_kwargs)
+        groups = _group_rows_by_invoice(rows)
+        # key(正規化發票號碼) -> 原始發票號碼字串，用來在「不是發票抬頭頁」
+        # 的頁面裡，用文字比對的方式判斷這一頁屬於哪一張發票 (見下方)。
+        raw_invoice_no = {
+            normalize_value(gr[0].get("invoice_no")): gr[0].get("invoice_no")
+            for gr in groups.values() if gr
+        }
+
+        totals_found: Dict[str, float] = {}
+        for page_text in pages:
+            # 大部分供應商的『未稅總額』就印在發票抬頭頁本身 (detect_fn 認得
+            # 的那一頁)；但少數供應商 (例如 DSV) 是「一張發票的資料跨好幾頁」
+            # ，未稅總額印在後面的附屬頁 (例如 Page 2 of 2 的條款/簽收頁)，
+            # 那一頁不會被 detect_fn 認出來，所以這裡不限定只看 detect_fn
+            # 認得的頁面，而是每一頁都試著抓抓看未稅總額；抓到之後，再用
+            # 『這一頁的文字裡有沒有出現某張發票的發票號碼』來判斷這個未稅
+            # 總額屬於哪一張發票 (發票抬頭頁跟附屬頁通常都會重複印一次發票
+            # 號碼，例如 DSV 附屬頁開頭就是 "INVOICE ID610413182")。
+            try:
+                invoice_total = extract_total_fn(page_text)
+            except Exception:
+                invoice_total = None
+            if invoice_total is None:
+                continue
+            page_upper = page_text.upper()
+            for inv_key, inv_raw in raw_invoice_no.items():
+                if inv_key in totals_found or not inv_raw:
+                    continue
+                if str(inv_raw).upper() in page_upper:
+                    totals_found[inv_key] = invoice_total
+                    break
+
+        for inv_key, invoice_total in totals_found.items():
+            group_rows = groups.get(inv_key) or []
+            if not group_rows:
+                continue
+            extracted_sum = _sum_rows(group_rows)
+            results.append({
+                "invoice_no": group_rows[0].get("invoice_no", NA),
+                "extracted_sum": extracted_sum,
+                "invoice_total": invoice_total,
+                "diff": extracted_sum - invoice_total,
+                "match": abs(extracted_sum - invoice_total) <= 1,
+            })
+    else:
+        text = extract_text_from_pdf(pdf_path, **pdfplumber_kwargs)
+        try:
+            invoice_total = extract_total_fn(text)
+        except Exception:
+            invoice_total = None
+        if invoice_total is not None and rows:
+            extracted_sum = _sum_rows(rows)
+            inv_no = rows[0].get("invoice_no", NA)
+            results.append({
+                "invoice_no": inv_no,
+                "extracted_sum": extracted_sum,
+                "invoice_total": invoice_total,
+                "diff": extracted_sum - invoice_total,
+                "match": abs(extracted_sum - invoice_total) <= 1,
+            })
+
+    return results
 
 
 # ---------------------------------------------------------------------------

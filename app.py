@@ -74,6 +74,7 @@ try:
         supplier_label,
         list_registered_suppliers,
         is_multi_page_supplier,
+        audit_invoice_totals,
     )
 except ImportError as e:
     st.set_page_config(page_title="供應商帳單對比系統 - 啟動失敗", layout="wide")
@@ -334,6 +335,7 @@ if run_clicked:
     score_label = "正確率" if has_reference else "資料完整度"
 
     all_export_rows, score_rows, compare_rows_all, attempts_log, unknown_files = [], [], [], [], []
+    audit_rows = []
 
     with st.spinner(
         f"解析中 (每份 PDF 先辨識供應商，正確率未滿 100% 時最多重試 "
@@ -404,6 +406,28 @@ if run_clicked:
                     for r in result["results"]:
                         compare_rows_all.append({"來源檔案": f.name, "供應商": label, **r})
 
+                # 金額稽核：系統擷取出來的費用明細加總，要跟帳單原文自己寫的
+                # 「未稅總額」(Total (Excl. VAT) / Sub Total…) 一樣，不一致
+                # 就記錄下來，等一下在畫面上跳出警示 (見下方顯示區塊)。只有
+                # 「有實作稽核規則」的供應商才會有結果，其餘供應商回傳空列表
+                # (代表『這家供應商還沒辦法自動稽核』，不算異常)。
+                try:
+                    audit_results = audit_invoice_totals(
+                        result["supplier_key"], tmp_path, result["rows"]
+                    )
+                except Exception:
+                    audit_results = []
+                for ar in audit_results:
+                    audit_rows.append({
+                        "來源檔案": f.name,
+                        "供應商": label,
+                        "Invoice No": ar["invoice_no"],
+                        "系統擷取加總": ar["extracted_sum"],
+                        "帳單未稅總額": ar["invoice_total"],
+                        "差額": ar["diff"],
+                        "是否一致": "✅ 一致" if ar["match"] else "❌ 不一致",
+                    })
+
             except Exception as e:  # noqa: BLE001
                 st.error(f"❌ {f.name}：解析失敗 ({e})")
             finally:
@@ -417,6 +441,7 @@ if run_clicked:
         "compare_rows_all": compare_rows_all,
         "attempts_log": attempts_log,
         "unknown_files": unknown_files,
+        "audit_rows": audit_rows,
     }
     st.session_state["last_signature"] = current_signature
 
@@ -439,6 +464,7 @@ score_rows = bundle["score_rows"]
 compare_rows_all = bundle["compare_rows_all"]
 attempts_log = bundle["attempts_log"]
 unknown_files = bundle["unknown_files"]
+audit_rows = bundle.get("audit_rows", [])
 
 if unknown_files:
     st.warning(
@@ -484,6 +510,24 @@ if not has_reference:
     )
 
 st.dataframe(score_df, use_container_width=True)
+
+# ---------------------------------------------------------------------------
+# 金額稽核：系統擷取出來的費用明細加總，要跟帳單原文自己寫的「未稅總額」
+# (Total (Excl. VAT) / Sub Total…，依供應商命名不同) 一樣，不一致就跳出
+# 警示。只有「已經實作稽核規則」的供應商才會有稽核結果，其餘供應商目前
+# 還沒辦法自動稽核 (不代表有問題，只是還沒支援)。
+# ---------------------------------------------------------------------------
+if audit_rows:
+    audit_df = pd.DataFrame(audit_rows)
+    mismatches = audit_df[audit_df["是否一致"] == "❌ 不一致"]
+    if not mismatches.empty:
+        st.error(
+            f"🚨 金額稽核：有 {len(mismatches)} 張發票的系統擷取加總，"
+            "跟帳單本身寫的未稅總額對不起來，請人工複查："
+        )
+        st.dataframe(mismatches, use_container_width=True)
+    with st.expander(f"🔍 金額稽核明細 (共 {len(audit_df)} 張發票有做這項稽核)"):
+        st.dataframe(audit_df, use_container_width=True)
 
 if has_reference and all_reached_100:
     st.success(f"🎉 全部 {len(score_rows)} 份帳單都在重試次數內達到 100% 正確率！")
