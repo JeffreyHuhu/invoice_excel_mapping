@@ -2047,3 +2047,134 @@ register_supplier(
     "DSV", "PT DSV Transport Indonesia",
     detect_dsv, parse_dsv, multi_page=True,
 )
+
+
+# ===========================================================================
+# 供應商 14：P.T. EVERGREEN LOGISTICS INDONESIA (海運帳單)
+# ===========================================================================
+#
+# 版面特徵：跟 INDOPROSTIME/MAERSK 同款「左右並排欄位、只隔一個空白」排版，
+# 例如：
+#   "HBL : RWRD501600002926 CONTAINER NO : KMTU9431774"
+#   "MBL : KMTCPUSK052666 CONSIGNEE : PT. POU YUEN INDONESIA"
+#   "DESTINATION : JAKARTA ETD/ETA : 20260701"
+# 一樣用「遇到下一個已知欄位關鍵字就停止」處理。
+#
+# 日期是 8 位數字的 YYYYMMDD (例如 'Invoice Date : 20260814'，
+# 'ETD/ETA : 20260701')，沒有分隔符號，用 _evergreen_parse_yyyymmdd()
+# 轉成 'DD.MM.YYYY'。這家帳單只有一個 ETD/ETA 日期同時代表到離岸，正確
+# 答案只對應到 arrive_date，onboard_date 這張帳單沒有，留 None 補 N/A。
+#
+# 費用明細行是 "全大寫描述 + IDR + 金額" (例如 'OCEAN FREIGHT IDR
+# 11,562,850')；VAT 那一行 (稅金) 正確答案沒有列成單獨一筆費用明細 (直接
+# 併入總額，不算費用明細)，所以擷取時要排除 "VAT" 這一行，避免多算一筆。
+
+def detect_evergreen(text: str) -> bool:
+    return "EVERGREEN LOGISTICS" in text.upper()
+
+
+_EVERGREEN_LABEL_WORDS = [
+    r"To", r"Invoice\s*No\.?", r"Invoice\s*Date", r"HBL", r"MBL",
+    r"CONTAINER\s*NO", r"CONSIGNEE", r"DESTINATION", r"ETD\s*/\s*ETA",
+    r"VSL\s*/\s*VOY",
+]
+_EVERGREEN_NEXT = "(?:" + "|".join(_EVERGREEN_LABEL_WORDS) + ")"
+_EVERGREEN_STOP = rf"(?=\s+{_EVERGREEN_NEXT}\b|\n|$)"
+
+
+def _evergreen_parse_yyyymmdd(text: Optional[str]) -> Optional[str]:
+    """'20260814' (YYYYMMDD，無分隔符號) -> '14.08.2026'。"""
+    if not text:
+        return None
+    m = re.match(r"(\d{4})(\d{2})(\d{2})\s*$", text.strip())
+    if not m:
+        return None
+    year, month, day = m.groups()
+    return f"{day}.{month}.{year}"
+
+
+def _evergreen_parse_yyyymmdd_slash(text: Optional[str]) -> Optional[str]:
+    """'20260701' (YYYYMMDD) -> '2026/07/01'。
+
+    這家供應商正確答案 Excel 裡 arrive_date (ETD/ETA) 這一格是「純文字」
+    'YYYY/MM/DD'，不是像同一列 invoice_date 那樣的 Excel 日期型態儲存格
+    (normalize_value() 只會把「日期型態」的儲存格轉成 'DD.MM.YYYY' 再比對，
+    純文字儲存格不會被重新解析格式，所以要直接輸出跟正確答案一模一樣的
+    'YYYY/MM/DD' 文字寫法，才比對得起來)。"""
+    if not text:
+        return None
+    m = re.match(r"(\d{4})(\d{2})(\d{2})\s*$", text.strip())
+    if not m:
+        return None
+    year, month, day = m.groups()
+    return f"{year}/{month}/{day}"
+
+
+def _evergreen_clean_amount(text: Optional[str]) -> Optional[int]:
+    """英式數字 '11,562,850' (逗號千分位) -> 11562850。"""
+    if not text:
+        return None
+    text = text.strip().replace(",", "")
+    return int(text) if text.isdigit() else None
+
+
+# 費用明細行，例如 "OCEAN FREIGHT IDR 11,562,850"。VAT 這一行 (稅金) 不算
+# 進費用明細 (正確答案 Excel 沒有列這一筆)，用負向前瞻排除。
+_EVERGREEN_ITEM_PATTERN = re.compile(
+    r"^(?!VAT\b)(?P<desc>[A-Z][A-Z /]+?)\s+IDR\s+(?P<amount>[\d,]+)\s*$",
+    re.MULTILINE,
+)
+
+
+def _evergreen_extract_items(text: str) -> List[Dict]:
+    items = []
+    for m in _EVERGREEN_ITEM_PATTERN.finditer(text):
+        items.append({
+            "description": m.group("desc").strip(),
+            "amount": _evergreen_clean_amount(m.group("amount")),
+        })
+    return items
+
+
+def parse_evergreen(text: str) -> Dict:
+    header: Dict[str, Optional[str]] = {}
+
+    header["invoice_no"] = _search(r"Invoice\s*No\.?\s*:\s*(\S+)", text)
+    header["invoice_date"] = _evergreen_parse_yyyymmdd(
+        _search(r"Invoice\s*Date\s*:\s*(\d{8})", text)
+    )
+    header["supplier"] = _search(
+        r"^(P\.T\.\s*EVERGREEN\s+LOGISTICS\s+INDONESIA)\s*$", text
+    )
+    header["consignee"] = _search(rf"\bCONSIGNEE\s*:\s*(.+?){_EVERGREEN_STOP}", text)
+    header["bl_no"] = _search(rf"\bHBL\s*:\s*(.+?){_EVERGREEN_STOP}", text)
+    header["mbl_no"] = _search(rf"\bMBL\s*:\s*(.+?){_EVERGREEN_STOP}", text)
+    header["port_of_discharge"] = _search(
+        rf"\bDESTINATION\s*:\s*(.+?){_EVERGREEN_STOP}", text
+    )
+    header["arrive_date"] = _evergreen_parse_yyyymmdd_slash(
+        _search(rf"\bETD\s*/\s*ETA\s*:\s*(.+?){_EVERGREEN_STOP}", text)
+    )
+    header["vessel"] = _search(rf"\bVSL\s*/\s*VOY\s*:\s*(.+?){_EVERGREEN_STOP}", text)
+    header["container_no"] = _search(
+        rf"\bCONTAINER\s*NO\s*:\s*(.+?){_EVERGREEN_STOP}", text
+    )
+
+    # 這張帳單沒有訂單編號/開船日/裝貨港/材積資訊，留空給 expand_to_rows()
+    # 補 N/A。
+    header["order_no"] = None
+    header["onboard_date"] = None
+    header["port_of_loading"] = None
+    header["volume"] = None
+
+    items = _evergreen_extract_items(text)
+    if not items:
+        items = [{"description": None, "amount": None}]
+
+    return {"header": header, "items": items}
+
+
+register_supplier(
+    "EVERGREEN_LOGISTICS", "P.T. EVERGREEN LOGISTICS INDONESIA",
+    detect_evergreen, parse_evergreen,
+)
