@@ -76,7 +76,7 @@ try:
         is_multi_page_supplier,
     )
 except ImportError as e:
-    st.set_page_config(page_title="供應商帳單辨識對比系統 - 啟動失敗", layout="wide")
+    st.set_page_config(page_title="供應商帳單對比系統 - 啟動失敗", layout="wide")
     st.error(
         f"❌ 系統啟動失敗，缺少必要的 Python 套件：`{e}`\n\n"
         "這通常代表 Streamlit Cloud 沒有正確安裝 `requirements.txt` 裡列出的套件"
@@ -91,7 +91,7 @@ except ImportError as e:
     )
     st.stop()
 
-st.set_page_config(page_title="供應商帳單辨識對比系統", layout="wide")
+st.set_page_config(page_title="供應商帳單對比系統", layout="wide")
 
 # 「重新查詢」按鈕：把檔案上傳元件的 key 綁定一個版本號，版本號加 1 之後
 # Streamlit 會把它們視為全新的元件重新渲染，藉此讓已上傳的檔案一併被清掉
@@ -119,7 +119,7 @@ with title_col:
     # Streamlit 內建的 h1 樣式)，改用 st.markdown 自己畫一個 <h1>，才能
     # 精準控制成使用者要的 50px，不受 Streamlit 版本內建樣式影響。
     st.markdown(
-        '<h1 style="font-size:50px; margin:0;">📄➡️📊 供應商帳單辨識對比系統</h1>',
+        '<h1 style="font-size:50px; margin:0;">📄➡️📊 供應商帳單對比系統</h1>',
         unsafe_allow_html=True,
     )
 with reset_col:

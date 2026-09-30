@@ -2,9 +2,9 @@
 """
 verify_app.py
 =============
-供應商帳單人工檢核系統 (人工查核 + 回饋收集工具)
+供應商帳單辨識擷取系統 (人工查核 + 回饋收集工具)
 
-這是跟「供應商帳單辨識對比系統」(app.py) 分開的獨立 Streamlit App，
+這是跟「供應商帳單對比系統」(app.py) 分開的獨立 Streamlit App，
 專門給人工「逐欄」核對系統擷取出來的資料是否正確，用於：
 
   1. 上傳一份供應商帳單 PDF (不需要正確答案 Excel)。
@@ -66,7 +66,7 @@ try:
         list_registered_suppliers,
     )
 except ImportError as e:
-    st.set_page_config(page_title="供應商帳單人工檢核系統 - 啟動失敗", layout="wide")
+    st.set_page_config(page_title="供應商帳單辨識擷取系統 - 啟動失敗", layout="wide")
     st.error(
         f"❌ 系統啟動失敗，缺少必要的 Python 套件：`{e}`\n\n"
         "這通常代表 Streamlit Cloud 沒有正確安裝 `requirements.txt` 裡列出的套件"
@@ -76,7 +76,7 @@ except ImportError as e:
     )
     st.stop()
 
-st.set_page_config(page_title="供應商帳單人工檢核系統", layout="wide")
+st.set_page_config(page_title="供應商帳單辨識擷取系統", layout="wide")
 
 # ---------------------------------------------------------------------------
 # 顯示欄位設定：只顯示使用者指定的欄位與順序 (不顯示 Order No.)。
@@ -107,7 +107,7 @@ ITEM_DISPLAY_FIELDS = [
 
 # ---------------------------------------------------------------------------
 # 「確認無誤」的發票要紀錄下來，依供應商＋發票號碼累計「目前正確帳單的
-# 筆數」，作為供應商帳單辨識對比系統日後改善的依據 (哪家供應商已經驗證
+# 筆數」，作為供應商帳單對比系統日後改善的依據 (哪家供應商已經驗證
 # 過夠多張都正確、哪家還沒)。
 #
 # 注意：Streamlit Cloud 的檔案系統是「暫存」的，只要這個 App 被
@@ -253,7 +253,7 @@ def _build_error_report_bundle(pdf_bytes: bytes, pdf_name: str, error_rows: "lis
     return zip_buf.getvalue()
 
 # ---------------------------------------------------------------------------
-# 全站樣式：字體/按鈕顏色沿用「供應商帳單辨識對比系統」(app.py) 同一套
+# 全站樣式：字體/按鈕顏色沿用「供應商帳單對比系統」(app.py) 同一套
 # 視覺規範 (淺藍色按鈕、16px 字體)，讓兩支 App 看起來是同一套系統的兩個
 # 頁面，不會有風格不一致的違和感；標題列的 flex 排版手法也沿用 app.py，
 # 把「重新查核」按鈕推到標題右側 (右上方)。
@@ -359,7 +359,7 @@ st.markdown('<span id="title-row-marker"></span>', unsafe_allow_html=True)
 title_col, reset_col, export_col = st.columns([3, 1, 1])
 with title_col:
     st.markdown(
-        '<h1 style="font-size:40px; margin:0;">📝 供應商帳單人工檢核系統</h1>',
+        '<h1 style="font-size:40px; margin:0;">📝 供應商帳單辨識擷取系統</h1>',
         unsafe_allow_html=True,
     )
 with reset_col:
@@ -390,7 +390,7 @@ st.markdown(
     <div style="font-size:16px; color:#000000; font-weight:500; line-height:1.5; margin:8px 0 12px;">
         <div>① 上傳一份供應商帳單 PDF，系統自動辨識供應商並擷取欄位</div>
         <div>② 逐欄核對擷取結果：沒問題不用動作，有錯誤才按「❌ 標記為錯誤」並填入正確答案</div>
-        <div>③ 核對完成後按「🚩 回報錯誤」，回報記錄可據此修正供應商帳單辨識對比系統的擷取規則</div>
+        <div>③ 核對完成後按「🚩 回報錯誤」，回報記錄可據此修正供應商帳單對比系統的擷取規則</div>
     </div>
     """,
     unsafe_allow_html=True,
@@ -436,7 +436,7 @@ with st.expander("📊 累計正確帳單統計（本次部署期間）", expand
 # ---------------------------------------------------------------------------
 # 已回報的錯誤記錄：每次在下面核對時對某張發票按「🚩 回報錯誤」，就會把
 # 那張發票被標記錯誤的欄位 + 正確答案計入這裡，之後下載這份累計記錄即可
-# 依內容修正供應商帳單辨識對比系統的擷取規則。
+# 依內容修正供應商帳單對比系統的擷取規則。
 # ---------------------------------------------------------------------------
 with st.expander("🚩 已回報的錯誤記錄（本次部署期間）", expanded=False):
     error_log = _load_error_log()
@@ -614,7 +614,7 @@ for inv_no, idxs in invoice_groups:
 
     # 這張發票所有欄位 (抬頭 + 每一筆費用) 都沒有被標記錯誤，才讓使用者
     # 「確認無誤」；一經確認，就依supplier + 發票號碼記一筆進「累計正確
-    # 帳單統計」，供應商帳單辨識對比系統之後就知道哪些發票已經驗證過
+    # 帳單統計」，供應商帳單對比系統之後就知道哪些發票已經驗證過
     # 100% 正確。有標記錯誤的發票，改成讓使用者按「🚩 回報錯誤」，把標記
     # 的欄位 + 正確答案記一筆進「已回報的錯誤記錄」，供之後修正擷取規則。
     invoice_field_keys = [f"err_{file_signature}_{inv_no}_{code}" for code, _ in HEADER_DISPLAY_FIELDS]
