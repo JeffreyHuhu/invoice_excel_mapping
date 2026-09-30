@@ -1358,18 +1358,35 @@ def parse_trans(text: str) -> Dict:
 # 金額都是最後一欄 (Amount IDR)，因為 Amout USD / Kurs 兩欄是空的，
 # pdfplumber 抽取出來的文字只剩一個數字。
 #
-# 已知問題：原始 PDF 裡有些費用名稱底層文字本身就沒有空格 (不是
-# pdfplumber 抽取參數的問題，用任何 x_tolerance 測試結果都一樣)，例如
-# "THC-TERMINALHANDLINGCHARGE" 應該是 "THC-TERMINAL HANDLING CHARGE"。
-# 這種已知的沾黏文字用 _FEMARIA_DESC_FIXUPS 對照表修正，之後如果遇到其他
-# 沾黏的費用名稱，比照這個表補上新的一筆即可，不用改其他程式碼。
+# ⚠️ 2026-09 修正 (使用者明確確認)：「描述」欄位要保留完整原文，包含開頭的
+# "(代碼)-" 前綴跟後面真正的參考/追蹤號碼 (例如 "(601)-LIFTON BSA/K1-1223501"
+# 整段都要留)；只有當中間那個位置本身就只是「PPh 23」或單一個「-」這種純
+# 佔位符號 (代表這筆費用沒有參考號碼) 時才把它拿掉，其餘一律照抄 PDF 原文。
+# 舊版程式曾經無條件拿掉 "(代碼)-" 前綴跟參考號碼，跟這次使用者提供的正確
+# 答案不符，已經修正、並回頭把 test_samples/FEMARIA/sample1_ref.xlsx 也
+# 訂正成同一套規則 (詳見下面 _femaria_extract_items() 的說明)。
+#
+# 費用明細表格還有一個排版陷阱：有些費用 (目前看到的是 "(401)-STORAGE/
+# WAREHOUSE" 這筆倉租費) 描述文字太長，會被拆成三行：
+#   "(401)-STORAGE/WAREHOUSE"                  <- 這筆費用的『前段』標籤，
+#                                                  單獨一行、沒有編號也沒有金額
+#   "3. NPCT1/NPCT/20260829/00102... 2.208.624,00"  <- 編號 + 參考號碼 + 金額
+#   "BANKADM/ STAMP"                           <- 這筆費用的『後段』標籤，
+#                                                  單獨一行、緊接在編號行後面
+# 正確答案要把這三行重組成
+# "(401)-STORAGE/WAREHOUSEBANKADM/ STAMP NPCT1/NPCT/20260829/00102..."
+# (前段跟後段直接黏在一起、中間不留空白，然後空一格接編號行自己的參考
+# 號碼)。判斷「下一行是不是這筆費用的後段續行」的依據是：只有在這筆費用
+# 前面已經有一行『前段』還沒被用掉時，才去看下一行是不是續行；單行費用
+# (前面沒有累積任何前段) 後面即使緊接著別的東西，也不會被誤吞。
 _FEMARIA_DESC_FIXUPS = {
     "THC-TERMINALHANDLINGCHARGE": "THC-TERMINAL HANDLING CHARGE",
 }
 
-_FEMARIA_ITEM_PATTERN = re.compile(
-    r"^\d+\.\s*(?P<desc>.+?)\s+(?P<ref>-|PPh\s*23|\S+)\s+(?P<amount>[\d.,]+)$"
+_FEMARIA_NUMBERED_LINE = re.compile(
+    r"^(?P<num>\d+)\.\s*(?P<rest>.+?)\s+(?P<amount>[\d.]+,\d{2})\s*$"
 )
+_FEMARIA_STOP_MARKER = re.compile(r"jumlah\s*transaksi", re.IGNORECASE)
 
 
 def detect_femaria(text: str) -> bool:
@@ -1398,11 +1415,24 @@ def _femaria_clean_amount(text: Optional[str]) -> Optional[int]:
 
 
 def _femaria_clean_desc(text: Optional[str]) -> Optional[str]:
-    """去掉開頭 '(代碼)-' 的費用代碼前綴，並修正已知的沾黏文字。"""
+    """不拿掉 '(代碼)-' 前綴 (使用者要求保留完整原文)，只修正已知的沾黏
+    文字 (用子字串取代，不要求整段字串完全相符，因為這段文字現在可能夾在
+    前綴/參考號碼中間)。"""
     if not text:
         return text
-    text = re.sub(r"^\(\d+\)-", "", text.strip()).strip()
-    return _FEMARIA_DESC_FIXUPS.get(text, text)
+    text = text.strip()
+    for bad, good in _FEMARIA_DESC_FIXUPS.items():
+        text = text.replace(bad, good)
+    return text
+
+
+def _femaria_strip_ref_placeholder(text: str) -> str:
+    """去掉句尾純佔位符號的「參考號碼」："... PPh 23" 或 "... -"，這兩種
+    代表「這筆費用沒有參考/追蹤號碼」，不是真正的內容；其餘真正的參考
+    號碼 (例如 "BSA/K1-1223501") 一律保留，不在這裡處理。"""
+    text = re.sub(r"\s+-\s*$", "", text)
+    text = re.sub(r"\s+PPh\s*23\s*$", "", text, flags=re.IGNORECASE)
+    return text.strip()
 
 
 def _femaria_add_space_after_comma(value: Optional[str]) -> Optional[str]:
@@ -1413,15 +1443,42 @@ def _femaria_add_space_after_comma(value: Optional[str]) -> Optional[str]:
 
 
 def _femaria_extract_items(text: str) -> List[Dict]:
+    """逐行處理，見上面區塊註解說明的「三行拆分費用」重組規則。"""
     items: List[Dict] = []
-    for line in text.split("\n"):
-        m = _FEMARIA_ITEM_PATTERN.match(line.strip())
-        if not m:
+    pending: List[str] = []
+    started = False
+    lines = text.split("\n")
+    i = 0
+    while i < len(lines):
+        line = lines[i].strip()
+        if not line:
+            i += 1
             continue
-        items.append({
-            "description": _femaria_clean_desc(m.group("desc")),
-            "amount": _femaria_clean_amount(m.group("amount")),
-        })
+        if _FEMARIA_STOP_MARKER.search(line):
+            break
+
+        m = _FEMARIA_NUMBERED_LINE.match(line)
+        if m:
+            started = True
+            rest = _femaria_strip_ref_placeholder(m.group("rest"))
+            prefix = "".join(pending)
+            pending = []
+            # 只有「這筆費用前面已經有未使用的前段文字」時，才去看下一行
+            # 是不是這筆費用的後段續行，避免把下一筆費用的前段誤吞進來。
+            if prefix and i + 1 < len(lines):
+                nxt = lines[i + 1].strip()
+                if nxt and not re.match(r"^\d+\.", nxt) and not _FEMARIA_STOP_MARKER.search(nxt):
+                    prefix = f"{prefix}{nxt}"
+                    i += 1
+            desc = f"{prefix} {rest}".strip() if prefix else rest
+            items.append({
+                "description": _femaria_clean_desc(desc),
+                "amount": _femaria_clean_amount(m.group("amount")),
+            })
+        elif started:
+            pending.append(line)
+        # 還沒出現過第一筆編號費用之前的雜訊列 (表頭文字等) 一律忽略。
+        i += 1
     return items
 
 
