@@ -858,8 +858,12 @@ def parse_yje(text: str) -> Dict:
 #   - SUPPLIER 固定是發票最下方 "Nama :" 那一行 ("PT. TATA HARMONI
 #     SARANATAMA")。
 
-def detect_tata(text: str) -> bool:
-    return "TAMAN DUTAMAS" in text.upper()
+def detect_tata_classic(text: str) -> bool:
+    """TATA 帳單的第一種格式："INVOICE" 標題 + "NO :"/"INV Date :" 這種
+    英文排版 (見下面 parse_tata_classic())。用 "NOMOR INVOICE" 沒出現
+    (那是第二種格式的專屬字樣) 來跟第二種格式互相排除。
+    """
+    return "TAMAN DUTAMAS" in text.upper() and "NOMOR INVOICE" not in text.upper()
 
 
 _TATA_LABEL_WORDS = [
@@ -916,7 +920,7 @@ def _tata_extract_items(text: str) -> List[Dict]:
     return items
 
 
-def parse_tata(text: str) -> Dict:
+def parse_tata_classic(text: str) -> Dict:
     """注意：這是 multi_page 供應商，text 是『一頁』的文字。"""
     header: Dict[str, Optional[str]] = {}
 
@@ -953,6 +957,157 @@ def parse_tata(text: str) -> Dict:
         items = [{"description": None, "amount": None}]
 
     return {"header": header, "items": items}
+
+
+# ---------------------------------------------------------------------------
+# TATA 的第二種格式：印尼文稅務收據 (⚠️ "NOMOR INVOICE #" 排版)
+# ---------------------------------------------------------------------------
+#
+# 這是同一家 TATA 供應商的「另一種帳單樣式」，抬頭是公司自己的印尼文格式
+# 收據 (不是英文 "INVOICE" 那種)，版面、欄位名稱都跟 parse_tata_classic()
+# 那份完全不同：
+#   "NOMOR INVOICE # : TH20250064"、"TANGGAL : 03-01-2025"、
+#   "JATUH TEMPO : 02-02-2025"、"PELANGGAN"/"DETAIL PEMBAYARAN" 左右並排、
+#   "NO KETERANGAN PAJAK JUMLAH (Rp.)" 費用明細表格。
+#
+# 費用明細表格的排版有個陷阱：大多數費用是「項次 描述 X 金額」單行
+# (例如 "2 NON REIMBURSEMENT AE - AGENCY FEE (PER AWB) X 750.000")，但
+# 第一筆費用因為描述文字太長、換行排版，pdfplumber 抽出來的順序會變成
+# 「描述(第一行)」→「項次 金額」(沒有 X 標記，descriptions 跟金額被拆到
+# 不同行) →「描述續行(括號補充)」三行分開，例如：
+#   'REIMBURSEMENT - INVOICE STORAGE PT GAPURA ANGKASA'
+#   '1 1.061.202'
+#   '(70125000125)'
+# 所以擷取邏輯改成逐行的簡易狀態機 (_tata_receipt_extract_items())：遇到
+# 「項次 描述 X 金額」單行就直接算一筆；遇到「項次 金額」(沒有 X、數字前面
+# 不是描述文字) 就用「前面还没歸戶的描述行」當作這一筆的描述，並且再往後看
+# 一行，如果那一行不是新項次開頭 (不是「數字 開頭」)，就當作描述的續行一併
+# 併入。金額是印尼式千分位、無小數 ('1.061.202' -> 1061202，用句點而不是
+# 逗號)，跟 parse_tata_classic() 的英式千分位 (逗號) 剛好相反，不要共用同
+# 一個金額清理函式。
+#
+# 這張帳單沒有 Order No./到達日/開船日/裝卸貨港/材積/貨櫃資訊，正確答案
+# 全部是 N/A，留 None 給 expand_to_rows() 補齊即可。
+#
+# SUPPLIER 名稱這裡直接寫死成 "PT TATA HARMONI SARANATAMA"：這份收據的
+# 公司抬頭因為排版關係被拆成 "PT TATA HARMONI" / "SARANATAMA" 兩行 (中間
+# 還夾著一個 logo 圖示對應的亂碼字元)，直接組字串比逐行拼接可靠。
+
+def detect_tata_receipt(text: str) -> bool:
+    return "NOMOR INVOICE" in text.upper()
+
+
+def _tata_receipt_parse_date(text: Optional[str]) -> Optional[str]:
+    """'03-01-2025' (DD-MM-YYYY) -> '03.01.2025'。"""
+    if not text:
+        return None
+    m = re.match(r"(\d{1,2})-(\d{1,2})-(\d{4})\s*$", text.strip())
+    if not m:
+        return None
+    day, month, year = m.groups()
+    return f"{int(day):02d}.{int(month):02d}.{year}"
+
+
+def _tata_receipt_clean_amount(text: Optional[str]) -> Optional[int]:
+    """印尼式千分位 '1.061.202' (句點千分位，無小數) -> 1061202。"""
+    if not text:
+        return None
+    text = text.strip().replace(".", "")
+    return int(text) if text.isdigit() else None
+
+
+_TATA_RECEIPT_FULL_ITEM_LINE = re.compile(
+    r"^\d+\s+(?P<desc>[A-Za-z][A-Za-z0-9 /\-.,()=@]*?)\s+X\s+(?P<amount>[\d.]+)\s*$"
+)
+_TATA_RECEIPT_NUM_AMOUNT_ONLY_LINE = re.compile(r"^(?P<num>\d+)\s+(?P<amount>[\d.]+)\s*$")
+
+
+def _tata_receipt_extract_items(text: str) -> List[Dict]:
+    """逐行狀態機擷取費用明細，見上面區塊註解說明「第一筆換行排版」的
+    特殊處理方式。只在 "KETERANGAN...JUMLAH" 表頭跟 "PESAN"/"Subtotal"
+    之間的區塊裡找，避免抓到表格外其他也剛好符合格式的雜訊行。
+    """
+    block_m = re.search(
+        r"KETERANGAN\s+PAJAK\s+JUMLAH.*?\n(.*?)\n\s*(?:PESAN|Subtotal)",
+        text, re.DOTALL | re.IGNORECASE,
+    )
+    block = block_m.group(1) if block_m else text
+
+    lines = block.split("\n")
+    items: List[Dict] = []
+    pending: List[str] = []
+    i = 0
+    while i < len(lines):
+        line = lines[i].strip()
+        if not line:
+            i += 1
+            continue
+        m_full = _TATA_RECEIPT_FULL_ITEM_LINE.match(line)
+        m_num_only = _TATA_RECEIPT_NUM_AMOUNT_ONLY_LINE.match(line)
+        if m_full:
+            items.append({
+                "description": m_full.group("desc").strip(),
+                "amount": _tata_receipt_clean_amount(m_full.group("amount")),
+            })
+            pending = []
+        elif m_num_only:
+            desc = " ".join(pending).strip()
+            pending = []
+            if i + 1 < len(lines):
+                nxt = lines[i + 1].strip()
+                if nxt and not re.match(r"^\d+\s", nxt):
+                    desc = f"{desc} {nxt}".strip()
+                    i += 1
+            items.append({
+                "description": desc,
+                "amount": _tata_receipt_clean_amount(m_num_only.group("amount")),
+            })
+        else:
+            pending.append(line)
+        i += 1
+    return items
+
+
+def parse_tata_receipt(text: str) -> Dict:
+    """注意：這是 multi_page 供應商，text 是『一頁』的文字。"""
+    header: Dict[str, Optional[str]] = {}
+
+    header["invoice_no"] = _search(r"NOMOR\s*INVOICE\s*#\s*:\s*(\S+)", text)
+    header["invoice_date"] = _tata_receipt_parse_date(
+        _search(r"TANGGAL\s*:\s*(\d{1,2}-\d{1,2}-\d{4})", text)
+    )
+    header["supplier"] = "PT TATA HARMONI SARANATAMA"
+    header["consignee"] = _search(r"PELANGGAN\s*\n(.+?)\s+DETAIL\s*PEMBAYARAN", text)
+    header["bl_no"] = _search(r"\bHAWB\s*:\s*(\S+)", text)
+    header["mbl_no"] = _search(r"\bMAWB\s*:\s*(\S+)", text)
+    header["vessel"] = _search(r"FLT\s*/\s*DT\s*:\s*([^/\n]+)/", text)
+
+    # 這種帳單沒有 Order No./到達日/開船日/裝卸貨港/材積/貨櫃資訊，留空給
+    # expand_to_rows() 補 N/A
+    header["order_no"] = None
+    header["arrive_date"] = None
+    header["onboard_date"] = None
+    header["port_of_loading"] = None
+    header["port_of_discharge"] = None
+    header["volume"] = None
+    header["container_no"] = None
+
+    items = _tata_receipt_extract_items(text)
+    if not items:
+        items = [{"description": None, "amount": None}]
+
+    return {"header": header, "items": items}
+
+
+def detect_tata(text: str) -> bool:
+    return detect_tata_classic(text) or detect_tata_receipt(text)
+
+
+def parse_tata(text: str) -> Dict:
+    """依內容判斷屬於哪一種 TATA 帳單格式，分派給對應的 parse 函式。"""
+    if detect_tata_receipt(text):
+        return parse_tata_receipt(text)
+    return parse_tata_classic(text)
 
 
 # ---------------------------------------------------------------------------
