@@ -460,31 +460,37 @@ def compare_rows(rows: List[Dict], reference_rows: pd.DataFrame) -> List[Dict]:
             "結果": status,
         })
 
-    # 大部分供應商每張帳單只有「一個」Order No. (整張帳單共用，已經在上面
-    # 抬頭欄位比對過一次)。但少數供應商 (例如 PT. TRANS DAYA PRIMA 一張
-    # 帳單裡有好幾筆費用時) 是「每一筆費用明細各自有自己的 Order No.」，
-    # 光比對第一列的抬頭值沒辦法驗證到第二、第三筆費用的單號對不對。這裡
-    # 動態偵測：只要擷取結果或正確答案裡，同一張帳單的 Order No. 出現超過
-    # 一種不同的值，就自動改成「連 Order No. 一起」三個一組去比對每一筆
-    # 費用明細；否則沿用原本「只比 Description/Amount」兩個一組的做法，
-    # 對其餘 Order No. 整張帳單只有一個值的供應商完全不影響既有的比對結果
-    # 跟顯示格式。
-    ext_order_nos = {normalize_value(r.get("order_no")) for r in rows}
-    ref_order_nos = (
-        {normalize_value(v) for v in reference_rows["order_no"]}
-        if "order_no" in reference_rows.columns else set()
-    )
-    per_item_order_no = len(ext_order_nos) > 1 or len(ref_order_nos) > 1
+    # 大部分供應商每張帳單的抬頭欄位 (發票號碼、Order No.、船名…等) 整張
+    # 帳單只有一個值，已經在上面「只用第一列」比對過一次。但少數供應商
+    # (例如 PT. TRANS DAYA PRIMA / YJE_TATA 的 Order No.，或 DHL 一張發票
+    # 裡有好幾個提單/航次時的 B/L NO.、開船日、啟運港、目的港) 是「每一筆
+    # 費用明細各自有自己的抬頭值」，光比對第一列沒辦法驗證到第二、第三筆
+    # 費用明細的單號/日期/港口對不對。這裡動態偵測：只要擷取結果或正確
+    # 答案裡，同一張帳單的某個抬頭欄位出現超過一種不同的值，就自動把該
+    # 欄位也一起納入「逐筆費用明細」的比對 key (不限於 order_no，未來任何
+    # 供應商只要有「每筆費用各自不同」的抬頭欄位都會自動被抓進來)；否則
+    # 沿用原本「只比 Description/Amount」的做法，對其餘欄位整張帳單只有
+    # 一個值的供應商完全不影響既有的比對結果跟顯示格式。
+    varying_codes = []
+    for code in HEADER_FIELD_CODES:
+        ext_vals = {normalize_value(r.get(code)) for r in rows}
+        ref_vals = (
+            {normalize_value(v) for v in reference_rows[code]}
+            if code in reference_rows.columns else set()
+        )
+        if len(ext_vals) > 1 or len(ref_vals) > 1:
+            varying_codes.append(code)
 
-    if per_item_order_no:
-        item_label = "Description/Amount/Order No."
+    if varying_codes:
+        extra_labels = [DISPLAY_HEADERS[c].split("\n")[0] for c in varying_codes]
+        item_label = "Description/Amount/" + "/".join(extra_labels)
 
         def _item_key(r):
-            return (normalize_value(r.get("description")), normalize_value(r.get("amount")),
-                    normalize_value(r.get("order_no")))
+            return (normalize_value(r.get("description")), normalize_value(r.get("amount"))) + \
+                tuple(normalize_value(r.get(c)) for c in varying_codes)
 
         def _item_fmt(t):
-            return f"{t[0]} / {t[1]} / {t[2]}"
+            return " / ".join(str(x) for x in t)
     else:
         item_label = "Description/Amount"
 

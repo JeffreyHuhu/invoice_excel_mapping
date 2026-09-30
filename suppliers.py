@@ -1946,37 +1946,55 @@ register_supplier(
 
 
 # ===========================================================================
-# 供應商 12：PT BIROTIKA SEMESTA / DHL EXPRESS (掃描檔 PDF，需要 OCR)
+# 供應商 12：PT BIROTIKA SEMESTA / DHL EXPRESS
 # ===========================================================================
 #
-# 這是本系統第一家「掃描檔」供應商：PDF 本身沒有文字層 (extract_text()
-# 一律回傳空字串)，全部文字都要靠 extract_utils.py 的 OCR 備援機制
-# (_ocr_page_text()) 辨識出來，這支 parse 函式只要跟其他供應商一樣處理
-# 「已經是文字」的內容就好，不用自己碰 OCR。
+# ⚠️ 2026-09 重新設計：DHL 帳單第 1 頁是「彙總表」(依服務類型/費用類型列出
+# 全發票的合計金額)，第 2 頁以後才是「各票 (Air Waybill) 各自的費用明細」
+# (每一個 Air Waybill Number 是一票獨立的貨物，各自有自己的起訖地、日期、
+# 基本運費、額外費用明細)。舊版程式只抓第 1 頁彙總表 (等於把全發票所有票
+# 的同類費用加總成一筆)，沒有拆到「每一票」的層級，也沒有 bl_no/起訖港/
+# 日期這些明細欄位；使用者要求整套重寫，改成從第 2 頁以後逐票拆解，
+# bl_no/onboard_date/port_of_loading/port_of_discharge 都是「每一票各自
+# 的值」(用 item 覆寫抬頭欄位的機制處理，見 parse_dhl_regular())。
 #
-# 這份帳單一張發票橫跨兩頁掃描圖檔：第 1 頁是「服務類型/金額」總覽表
-# (品項/金額都在這一頁，OCR 品質也最好)；第 2 頁是「Air Waybill/Shippers
-# Reference/Shipment Origin Date」明細表，且第 2 頁整頁被掃描成轉了 90 度
-# (OCR 備援機制裡的方向偵測會自動轉正，這裡不用處理)，轉正後 OCR 出來的
-# 文字順序仍然會把同一列的欄位「擠成一行」(不像原始表格那樣分欄)，但因為
-# 一張發票只有一列資料，用「這一行前三個數字依序是 Air Waybill/Shippers
-# Reference/Shipment Origin Date」的位置規則就能可靠取出。
+# 本供應商同時有兩種實際見過的帳單子格式，用 _dhl_is_regular(text) 判斷
+# 走哪一條路：
 #
-# 已知的 OCR 誤判：Invoice Number 裡的數字 '0' 常被辨識成英文字母 'O'
-# (例如 'JKTIR00818492' 被讀成 'JKTIROO818492' 或 'JKTIRO0818492')，這個
-# 發票編號的格式固定是「英文字母開頭 + 純數字」，前面的英文字母部分剛好
-# 不含字母 O，所以直接把整個擷取到的編號裡的 'O' 全部換成 '0' 是安全的
-# 修正方式；之後如果遇到其他 OCR 常誤判的字元，比照這個做法在擷取後加一
-# 個修正函式即可。
+# (A) 「一般」格式 (_parse_dhl_regular)：PDF 有內嵌文字層 (或 OCR 品質
+#     夠好)，第 2 頁以後的表頭有 "Air Waybill Number" / "Shippers
+#     Reference" 字樣，每一票的主要那一行長相固定：
+#       "<AWB> [Shippers Reference...] <日期> <起運地代碼>, <起運地地區>
+#        <目的地代碼>, <目的地地區> EXPRESS <重量><重量代碼?> <件數>
+#        <基本運費> <VAT金額> <稅別代碼> <含稅小計>"
+#     後面接著的幾行 (跟寄件人/收件人地址擠在同一行) 才是這一票的「額外
+#     費用」明細，每一行格式是 "<費用名稱> <金額> <VAT金額> <稅別代碼>
+#     <含稅小計>"。因為費用名稱前面常常黏著寄件人/收件人名稱、地址這些
+#     雜訊文字 (版面把好幾欄硬擠成一行)，沒辦法單純用「這一行開頭的大寫
+#     單字」來判斷費用名稱，改成先從第 1 頁「Analysis of Extra Charges」
+#     區塊 (這裡沒有跟其他欄位擠在一起，乾淨可靠) 動態收集「這張發票實際
+#     出現過的額外費用名稱」當作白名單，再拿這份白名單去比對第 2 頁以後
+#     雜訊行裡「費用名稱 金額 VAT 代碼 小計」這個固定樣式，就能準確從
+#     雜訊中挑出正確的費用名稱，不會被前面的地址/人名文字誤導。基本運費
+#     (每一票主要那一行) 的服務名稱固定使用第 1 頁彙總表的「Type of
+#     Service」欄位值 (例如 "EXPRESS WORLDWIDE NONDOC")，因為同一張發票
+#     裡每一票用的都是同一種服務。
+#
+# (B) 「掃描檔關務/完稅費用」格式 (_parse_dhl_scanned_customs)：本系統
+#     第一家掃描檔供應商，PDF 沒有文字層，全部文字要靠 OCR 備援機制辨識，
+#     常見於「DUTIES & TAXES」這種基本運費是 0、只有進口稅捐相關費用的
+#     帳單。OCR 出來的第 2 頁明細表格式比 (A) 更不規則 (欄位常常對不齊、
+#     稅別/VAT 欄位可能整個缺漏)，(A) 的固定樣式規則套不上去，維持原本
+#     專門處理這種格式的邏輯 (第 1 頁彙總表 + Analysis of Extra Charges
+#     區塊逐行擷取，比對第 2 頁明細只抓 Air Waybill Number/日期，其餘
+#     欄位這種格式本來就沒有更細的資訊可拆)。
+#
+# parse_dhl() 先嘗試 (A)，抓不到任何一票 (代表不是這種乾淨格式) 才 fall
+# back 到 (B)，不用額外去判斷「是不是掃描檔」。
+
 def detect_dhl(text: str) -> bool:
     upper = text.upper()
     return "BIROTIKA SEMESTA" in upper or "DHL EXPRESS" in upper
-
-
-_DHL_ITEM_PATTERN = re.compile(r"^([A-Z][A-Z /]+[A-Z])\s+([\d,]+)$")
-_DHL_AWB_ROW_PATTERN = re.compile(
-    r"(\d{6,12})\s+(\d{6,12})\s+(\d{1,2}-\d{1,2}-\d{4})\s+JKT"
-)
 
 
 def _dhl_fix_ocr_zero(value: Optional[str]) -> Optional[str]:
@@ -2005,83 +2023,21 @@ def _dhl_clean_amount(text: Optional[str]) -> Optional[int]:
     return int(text) if text.isdigit() else None
 
 
-_DHL_SUMMARY_LINE_PATTERN = re.compile(
-    r"^([A-Z][A-Z /&]+[A-Z])\s+\d+\s+[\d.]+\s+\d+\s+([\d,]+)\s+[\d,]+\s+[\d,]+\s+[\d,]+$"
-)
-
-
-def _dhl_extract_items(text: str) -> List[Dict]:
-    """擷取每一筆費用項目：
-
-    1. 第 1 頁最上面「Type of Service」彙總表的服務類型列 (例如
-       "EXPRESS WORLDWIDE NONDOC 6 23.00 8 6,292,646 3,083,135 112,509
-       9,488,290")，欄位依序是服務名稱/件數/總重量/項目數/Standard
-       Shipping Charge/Extra Charges/VAT/Total(含稅)，我們要的金額是
-       「Standard Shipping Charge」欄，不是最後含稅總額；如果這欄是 0
-       (代表這張帳單沒有基本運費，只有額外費用，例如關稅類帳單) 就不算
-       一個項目。
-    2. 「Analysis of Extra Charges」區塊逐行擷取費用名稱/金額，這個區塊
-       OCR 品質最好、沒有跟其他欄位擠在同一行，比第 2 頁明細表可靠。只
-       在「Analysis of Extra Charges」到「Total Extra Charges」這個範圍
-       內找，避免誤吃到後面付款資訊裡剛好也符合「大寫字+空白+數字」格式
-       的行 (例如匯款帳號 "ACCOUNT NO 956907730")。
-    """
-    items: List[Dict] = []
-    lines = text.split("\n")
-
-    for line in lines:
-        m = _DHL_SUMMARY_LINE_PATTERN.match(line.strip())
-        if not m:
-            continue
-        amount = _dhl_clean_amount(m.group(2))
-        if amount:  # 0 或抓不到就不算一筆項目
-            items.append({"description": m.group(1).strip(), "amount": amount})
-        break  # 一張帳單只有一種服務類型的彙總列
-
-    in_extra_section = False
-    for line in lines:
-        stripped = line.strip()
-        if stripped.upper().startswith("ANALYSIS OF EXTRA CHARGES"):
-            in_extra_section = True
-            continue
-        if not in_extra_section:
-            continue
-        if stripped.upper().startswith("TOTAL EXTRA CHARGES"):
-            break
-        m = _DHL_ITEM_PATTERN.match(stripped)
-        if not m:
-            continue
-        desc = m.group(1).strip()
-        if desc in ("TOTAL EXTRA CHARGES", "TOTAL DISCOUNTS", "TOTAL VAT"):
-            continue
-        items.append({
-            "description": desc,
-            "amount": _dhl_clean_amount(m.group(2)),
-        })
-    return items
-
-
-def parse_dhl(text: str) -> Dict:
+def _dhl_common_header(text: str) -> Dict[str, Optional[str]]:
+    """兩種子格式共用的抬頭欄位 (收件人/供應商名稱/發票號碼/發票日期)。"""
     header: Dict[str, Optional[str]] = {}
-
-    # 收件公司名稱位置有兩種版面：
-    # (a) OCR 掃描版：信封抬頭最上面一行就是公司名稱，跟其他欄位標籤各佔
-    #     一整行，直接抓整份文字的第一行即可。
-    # (b) 有內嵌文字層的版面：公司名稱跟 "Invoice Number:" 標籤同一行
-    #     (例如 "POU YUEN INDONESIA PT Invoice Number: BDOIR00043036")，
-    #     這時第一行其實是 "DHL Express" 這種文件抬頭，不是公司名稱，要
-    #     改抓 "Invoice Number:" 前面那一段文字。
     first_line = text.split("\n", 1)[0].strip()
     m = re.search(r"^([^\n]+?)[ \t]+Invoice[ \t]+Number[ \t]*:", text, re.MULTILINE)
     header["consignee"] = m.group(1).strip() if m else (first_line or None)
     header["supplier"] = _search(r"(PT\s+BIROTIKA\s+SEMESTA)\s*/\s*DHL\s+EXPRESS", text)
     if header["supplier"]:
         header["supplier"] = f"{header['supplier']} / DHL EXPRESS"
-    # OCR 把這四個標籤跟四個值分別掃描成「標籤欄一整排、值欄一整排」
-    # (先四行標籤：Invoice Number:/Account Number:/Tax ID:/Invoice Date:，
-    # 空一行，再四行對應的值)，不是每個標籤緊接著自己的值，所以不能直接
-    # 用「Invoice Number: 後面第一個字」抓 (那樣會抓到下一個標籤
-    # "Account")，要整塊比對位置對應。
+
+    # OCR 掃描版常把「標籤欄一整排、值欄一整排」分開掃描 (先四行標籤：
+    # Invoice Number:/Account Number:/Tax ID:/Invoice Date:，空一行，再
+    # 四行對應的值)，不是每個標籤緊接著自己的值；有文字層的版面則是
+    # "Invoice Number: BDOIR00043036" 緊接在同一行。兩種都試，抓到哪個
+    # 算哪個。
     m = re.search(
         r"Invoice\s+Number\s*:\s*\n"
         r"Account\s+Number\s*:\s*\n"
@@ -2094,17 +2050,210 @@ def parse_dhl(text: str) -> Dict:
         header["invoice_no"] = _dhl_fix_ocr_zero(m.group(1))
         header["invoice_date"] = _dhl_parse_date(m.group(4))
     else:
-        # 備援：萬一標籤/值的行數對不上 (OCR 結果不穩定)，改用發票號碼
-        # 固定格式 (JKTxxx開頭) 直接在全文找，日期則從 "Invoice Date:"
-        # 後面找最近的一個日期。
         header["invoice_no"] = _dhl_fix_ocr_zero(
-            _search(r"\b([A-Z]{2,6}[O0-9]{6,})\b", text)
+            _search(r"Invoice\s+Number\s*:\s*(\S+)", text)
+            or _search(r"\b([A-Z]{2,6}[O0-9]{6,})\b", text)
         )
         header["invoice_date"] = _dhl_parse_date(
             _search(r"Invoice\s+Date\s*:\s*\n?\s*(\d{1,2}-\d{1,2}-\d{4})", text)
         )
+    return header
 
-    m = _DHL_AWB_ROW_PATTERN.search(text)
+
+# ---------------------------------------------------------------------------
+# (A) 一般格式：逐票 (Air Waybill) 拆解
+# ---------------------------------------------------------------------------
+
+_DHL_SERVICE_NAME_PATTERN = re.compile(
+    r"Type of Service.*?\n(?:.*\n)*?"
+    r"(?P<svc>[A-Z][A-Z /&]+[A-Z])\s+\d+\s+[\d.]+\s+\d+\s+"
+    r"[\d,]+\s+[\d,]+\s+[\d,]+\s+[\d,]+"
+)
+_DHL_EXTRA_CHARGE_NAMES_PATTERN = re.compile(
+    r"Analysis of Extra Charges.*?\n(?P<block>.*?)Total Extra Charges", re.DOTALL
+)
+_DHL_EXTRA_CHARGE_NAME_LINE = re.compile(r"^([A-Z][A-Z /&]+[A-Z])\s+[\d,]+\s*$", re.MULTILINE)
+
+# 每一票主要那一行 (基本運費)，例如：
+#   "7387602585 26-12-2024 XMN, FUJIAN PROVINCE BDO, BANDUNG EXPRESS 14.50
+#    B 2 1,693,221 20,319 A 1,713,540"
+#   "6278270375 1738854338 TL 1DN 27-12-2024 HKG, HONG KONG BDO, BANDUNG
+#    EXPRESS 1.00W 1 467,761 5,613 A 473,374"  (AWB 後面多一段 Shippers
+#    Reference，用 "(?:\s+\S.*?)?" 這種寬鬆寫法吃掉，不用管它實際內容)
+# 起運/目的地各自是「代碼 (2-4 個大寫字母) + 逗號 + 地區名稱」，兩個地名
+# 中間只隔一個空白 (跟 INDOPROSTIME/MAERSK 同款並排欄位排版問題)，靠
+# 「目的地代碼一定是大寫字母」這個特徵切開，不用連續空白判斷。
+_DHL_MAIN_LINE_PATTERN = re.compile(
+    r"^(?P<awb>\d{6,12})(?:\s+\S.*?)?\s+(?P<date>\d{1,2}-\d{1,2}-\d{4})\s+"
+    r"(?P<ocode>[A-Z]{2,4}),\s*(?P<oregion>[A-Za-z ]+?)\s+"
+    r"(?P<dcode>[A-Z]{2,4}),\s*(?P<dregion>[A-Za-z ]+?)\s+EXPRESS\s+"
+    r"(?P<weight>[\d.]+)\s*[A-Z]?\s+(?P<items>\d+)\s+"
+    r"(?P<charge>[\d,]+)\s+(?P<vat>[\d,]+)\s+[A-Z]\s+(?P<total>[\d,]+)\s*$",
+    re.MULTILINE,
+)
+
+
+def _dhl_extract_charge_name_whitelist(text: str) -> List[str]:
+    """從第 1 頁「Analysis of Extra Charges」區塊收集這張發票實際出現過
+    的額外費用名稱，當作白名單去比對第 2 頁以後跟雜訊擠在同一行的費用
+    明細，避免把地址/人名文字誤判成費用名稱 (見上面區塊註解)。"""
+    m = _DHL_EXTRA_CHARGE_NAMES_PATTERN.search(text)
+    if not m:
+        return []
+    names = _DHL_EXTRA_CHARGE_NAME_LINE.findall(m.group("block"))
+    # 名稱長的排前面，避免比對時被同樣開頭的較短名稱截斷 (目前沒有這種
+    # 案例，但先寫成通用寫法)。
+    return sorted(set(n.strip() for n in names), key=len, reverse=True)
+
+
+def _dhl_is_regular(text: str) -> bool:
+    upper = text.upper()
+    return "AIR WAYBILL" in upper and "SHIPPERS" in upper
+
+
+def _parse_dhl_regular(text: str) -> Optional[Dict]:
+    main_matches = list(_DHL_MAIN_LINE_PATTERN.finditer(text))
+    if not main_matches:
+        return None  # 不是這種乾淨格式，讓 parse_dhl() fall back 到 (B)
+
+    svc_m = _DHL_SERVICE_NAME_PATTERN.search(text)
+    service_name = svc_m.group("svc").strip() if svc_m else None
+
+    whitelist = _dhl_extract_charge_name_whitelist(text)
+    extra_pattern = None
+    if whitelist:
+        alt = "|".join(re.escape(n) for n in whitelist)
+        extra_pattern = re.compile(
+            rf"(?:{alt})\s+(?P<amount>[\d,]+)\s+(?P<vat>[\d,]+)\s+[A-Z]\s+(?P<total>[\d,]+)"
+        )
+        # 費用名稱本身也要抓出來 (上面的 pattern 沒有把名稱包進 group，
+        # 因為 re.escape() 過的多個名稱長度不一，用另一個對照 pattern
+        # 重新加上具名 group 更清楚)。
+        extra_pattern = re.compile(
+            rf"(?P<desc>{alt})\s+(?P<amount>[\d,]+)\s+(?P<vat>[\d,]+)\s+[A-Z]\s+(?P<total>[\d,]+)"
+        )
+
+    boundaries = [m.start() for m in main_matches] + [len(text)]
+    items: List[Dict] = []
+    for idx, m in enumerate(main_matches):
+        block = text[m.start():boundaries[idx + 1]]
+        bl_no = m.group("awb")
+        onboard_date = _dhl_parse_date(m.group("date"))
+        port_of_loading = f"{m.group('ocode')}, {m.group('oregion')}".strip()
+        port_of_discharge = f"{m.group('dcode')}, {m.group('dregion')}".strip()
+        overrides = {
+            "bl_no": bl_no,
+            "onboard_date": onboard_date,
+            "port_of_loading": port_of_loading,
+            "port_of_discharge": port_of_discharge,
+        }
+
+        items.append({
+            "description": service_name,
+            "amount": _dhl_clean_amount(m.group("charge")),
+            **overrides,
+        })
+        if extra_pattern:
+            for em in extra_pattern.finditer(block):
+                items.append({
+                    "description": em.group("desc").strip(),
+                    "amount": _dhl_clean_amount(em.group("amount")),
+                    **overrides,
+                })
+
+    header = _dhl_common_header(text)
+    # 這種帳單抬頭本身沒有共通的到達日/主提單號碼/材積/船名/貨櫃號碼/
+    # Order No.；bl_no/onboard_date/port_of_loading/port_of_discharge 這
+    # 四個欄位改成逐票用上面 items 各自的 overrides 覆寫 (expand_to_rows()
+    # 會自動處理)，這裡的抬頭預設值留 None 就好。
+    for code in ("order_no", "arrive_date", "mbl_no", "bl_no", "onboard_date",
+                 "port_of_loading", "port_of_discharge", "volume", "vessel",
+                 "container_no"):
+        header[code] = None
+
+    return {"header": header, "items": items}
+
+
+# ---------------------------------------------------------------------------
+# (B) 掃描檔關務/完稅費用格式 (OCR)
+# ---------------------------------------------------------------------------
+#
+# 這份帳單一張發票橫跨兩頁掃描圖檔：第 1 頁是「服務類型/金額」總覽表
+# (品項/金額都在這一頁，OCR 品質也最好)；第 2 頁是「Air Waybill/Shippers
+# Reference/Shipment Origin Date」明細表，且第 2 頁整頁被掃描成轉了 90 度
+# (OCR 備援機制裡的方向偵測會自動轉正，這裡不用處理)，轉正後 OCR 出來的
+# 文字順序仍然會把同一列的欄位「擠成一行」(不像原始表格那樣分欄)，但因為
+# 一張發票只有一票資料，用「這一行前三個數字依序是 Air Waybill/Shippers
+# Reference/Shipment Origin Date」的位置規則就能可靠取出；基本運費是 0
+# (這種帳單沒有基本運費，只有關稅相關費用)，也沒有 VAT/稅別代碼可拆，
+# 套不上 (A) 的固定樣式規則，維持原本專門處理這種格式的簡單邏輯。
+#
+# 已知的 OCR 誤判：Invoice Number 裡的數字 '0' 常被辨識成英文字母 'O'
+# (例如 'JKTIR00818492' 被讀成 'JKTIROO818492' 或 'JKTIRO0818492')，這個
+# 發票編號的格式固定是「英文字母開頭 + 純數字」，前面的英文字母部分剛好
+# 不含字母 O，所以直接把整個擷取到的編號裡的 'O' 全部換成 '0' 是安全的
+# 修正方式；之後如果遇到其他 OCR 常誤判的字元，比照這個做法在擷取後加一
+# 個修正函式即可。
+_DHL_CUSTOMS_ITEM_PATTERN = re.compile(r"^([A-Z][A-Z /]+[A-Z])\s+([\d,]+)$")
+_DHL_CUSTOMS_AWB_ROW_PATTERN = re.compile(
+    r"(\d{6,12})\s+(\d{6,12})\s+(\d{1,2}-\d{1,2}-\d{4})\s+JKT"
+)
+_DHL_CUSTOMS_SUMMARY_LINE_PATTERN = re.compile(
+    r"^([A-Z][A-Z /&]+[A-Z])\s+\d+\s+[\d.]+\s+\d+\s+([\d,]+)\s+[\d,]+\s+[\d,]+\s+[\d,]+$"
+)
+
+
+def _dhl_customs_extract_items(text: str) -> List[Dict]:
+    """擷取每一筆費用項目：
+
+    1. 第 1 頁最上面「Type of Service」彙總表的服務類型列，我們要的金額
+       是「Standard Shipping Charge」欄；如果這欄是 0 (代表這張帳單沒有
+       基本運費，只有額外費用) 就不算一個項目。
+    2. 「Analysis of Extra Charges」區塊逐行擷取費用名稱/金額，這個區塊
+       OCR 品質最好、沒有跟其他欄位擠在同一行，比第 2 頁明細表可靠。只
+       在「Analysis of Extra Charges」到「Total Extra Charges」這個範圍
+       內找，避免誤吃到後面付款資訊裡剛好也符合「大寫字+空白+數字」格式
+       的行 (例如匯款帳號 "ACCOUNT NO 956907730")。
+    """
+    items: List[Dict] = []
+    lines = text.split("\n")
+
+    for line in lines:
+        m = _DHL_CUSTOMS_SUMMARY_LINE_PATTERN.match(line.strip())
+        if not m:
+            continue
+        amount = _dhl_clean_amount(m.group(2))
+        if amount:
+            items.append({"description": m.group(1).strip(), "amount": amount})
+        break
+
+    in_extra_section = False
+    for line in lines:
+        stripped = line.strip()
+        if stripped.upper().startswith("ANALYSIS OF EXTRA CHARGES"):
+            in_extra_section = True
+            continue
+        if not in_extra_section:
+            continue
+        if stripped.upper().startswith("TOTAL EXTRA CHARGES"):
+            break
+        m = _DHL_CUSTOMS_ITEM_PATTERN.match(stripped)
+        if not m:
+            continue
+        desc = m.group(1).strip()
+        if desc in ("TOTAL EXTRA CHARGES", "TOTAL DISCOUNTS", "TOTAL VAT"):
+            continue
+        items.append({
+            "description": desc,
+            "amount": _dhl_clean_amount(m.group(2)),
+        })
+    return items
+
+
+def _parse_dhl_scanned_customs(text: str) -> Dict:
+    header = _dhl_common_header(text)
+
+    m = _DHL_CUSTOMS_AWB_ROW_PATTERN.search(text)
     if m:
         header["bl_no"] = m.group(1)
         header["order_no"] = m.group(2)
@@ -2114,17 +2263,23 @@ def parse_dhl(text: str) -> Dict:
         header["order_no"] = None
         header["onboard_date"] = None
 
-    # 這種帳單沒有到達日/主提單號碼/啟運港/目的港/材積/船名/貨櫃號碼，
-    # 留空給 expand_to_rows() 補 N/A。
     for code in ("arrive_date", "mbl_no", "port_of_loading",
                  "port_of_discharge", "volume", "vessel", "container_no"):
         header[code] = None
 
-    items = _dhl_extract_items(text)
+    items = _dhl_customs_extract_items(text)
     if not items:
         items = [{"description": None, "amount": None}]
 
     return {"header": header, "items": items}
+
+
+def parse_dhl(text: str) -> Dict:
+    if _dhl_is_regular(text):
+        result = _parse_dhl_regular(text)
+        if result is not None:
+            return result
+    return _parse_dhl_scanned_customs(text)
 
 
 register_supplier(
