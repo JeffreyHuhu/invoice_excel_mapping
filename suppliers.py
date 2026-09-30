@@ -1700,26 +1700,144 @@ def parse_express(text: str) -> Dict:
     return {"header": header, "items": items}
 
 
-register_supplier("DWIHARTA", "PT. DWIHARTA LOGISTINDO", detect_dwiharta, parse_dwiharta)
-register_supplier("KUEHNE_NAGEL", "KUEHNE NAGEL INDONESIA", detect_kuehne_nagel, parse_kuehne_nagel)
+# ===========================================================================
+# 帳單金額稽核：從各供應商帳單原文抓出「未稅總額」(Total (Excl. VAT) /
+# Sub Total / SUBTOTAL / Net value…，各供應商命名不同)，讓
+# extract_utils.audit_invoice_totals() 拿去跟系統擷取到的費用明細加總互相
+# 核對，一致就不用管，不一致就跳出警示 (見 app.py / verify_app.py)。
+#
+# 這裡只是「抓數字」，直接沿用各供應商自己既有的金額格式清理函式
+# (千分位符號、小數點慣例每家都不一樣)，抓不到就回傳 None，代表這張帳單
+# 這次沒辦法稽核 (不算「不一致」，呼叫端不會顯示警示)。
+# ===========================================================================
+
+def _dwiharta_extract_total(text: str) -> Optional[int]:
+    m = _search(r"Sub\s*Total\s+([\d,]+)", text)
+    if not m:
+        return None
+    m = m.replace(",", "")
+    return int(m) if m.isdigit() else None
+
+
+def _kn_extract_total(text: str) -> Optional[int]:
+    # "SUBTOTAL IDR 1,521,098 167,321" 是 Sales Invoice 費用明細行上的英式
+    # 數字 (逗號千分位、無小數)，要用 _kn_clean_amount_comma_thousands()，
+    # 不是給 Faktur Pajak 印尼式數字用的 _kn_clean_amount()。
+    return _kn_clean_amount_comma_thousands(_search(r"SUBTOTAL\s+IDR\s+([\d,]+)", text))
+
+
+def _indo_extract_total(text: str) -> Optional[int]:
+    """注意：INDOPROSTIME 是 multi_page 供應商，text 是『一頁』的文字。"""
+    return _indo_clean_amount(_search(r"^Total\s+([\d,]+)\s*$", text))
+
+
+def _maersk_extract_total(text: str) -> Optional[int]:
+    # "Net value 1,381,801" 是 Invoice 頁面「Total Amount Due」小表格裡的
+    # 英式數字 (逗號千分位、無小數)，跟 Faktur Pajak 頁面費用明細行的印尼式
+    # 數字 (_maersk_clean_amount_id，句點千分位、逗號小數) 是不同格式。
+    m = _search(r"Net\s+value\s+([\d,]+)", text)
+    if not m:
+        return None
+    m = m.replace(",", "")
+    return int(m) if m.isdigit() else None
+
+
+def _hyper_extract_total(text: str) -> Optional[int]:
+    """注意：HYPER_MEGA 是 multi_page 供應商，text 是『一頁』的文字。"""
+    return _hyper_clean_amount_id(_search(r"Sub\s*Total\s+([\d,.]+)", text))
+
+
+def _yje_tata_extract_total(text: str) -> Optional[int]:
+    """YJE_TATA 是合併群組，同一份 PDF 可能混著 3 種版面 (YJE 英文費率表、
+    TATA 印尼文 INVOICE 收據、TATA 稅務收據)，各自的未稅小計標示方式跟
+    金額格式都不同，依序嘗試；都抓不到就回傳 None (這一頁不稽核，不是
+    「不一致」——例如 YJE 英文費率表目前還沒有對應的規則)。
+    """
+    m = _search(r"SUB-TOTAL\s+Rp\s+([\d,]+)", text)
+    if m:
+        return _tata_clean_amount(m)
+    m = _search(r"Subtotal\s+([\d.,]+)", text)
+    if m:
+        return _tata_receipt_clean_amount(m)
+    return None
+
+
+def _femaria_extract_total(text: str) -> Optional[int]:
+    # "Jumlah Transaksi : 7 Total : 7.499.546,00" 跟 "Total\nJumlah
+    # Transaksi : 10 86.999.502,00" 兩種排版都有出現過 ("Total" 字樣位置
+    # 因為 pdfplumber 斷行方式不同而前後不定)，統一只抓「Jumlah Transaksi
+    # : 數字」後面緊接著的那個金額，不管前面有沒有多一個 "Total :"。
+    return _femaria_clean_amount(
+        _search(r"Jumlah\s*Transaksi\s*:\s*\d+\s*(?:Total\s*:\s*)?([\d.,]+)", text)
+    )
+
+
+def _express_extract_total(text: str) -> Optional[int]:
+    return _express_clean_amount(_search(r"TOTAL\s+\$\s*[\d.]+\s+([\d,]+)\s+[\d,]+", text))
+
+
+def _pan_extract_total(text: str) -> Optional[int]:
+    return _pan_clean_amount(_search(r"Sub\s*Total\s+([\d,.]+)", text))
+
+
+def _pancaran_extract_total(text: str) -> Optional[int]:
+    return _pancaran_clean_amount(_search(r"Sub\s*Total\s+([\d,]+)", text))
+
+
+def _dhl_extract_total(text: str) -> Optional[int]:
+    return _dhl_clean_amount(_search(r"Total\s+Amount\s*\(IDR\)\s+([\d,]+)", text))
+
+
+def _dsv_extract_total(text: str) -> Optional[int]:
+    """注意：DSV 是 multi_page 供應商，text 是『一頁』的文字。"""
+    return _dsv_clean_amount(_search(r"SUBTOTAL\s+([\d.]+)", text))
+
+
+def _evergreen_extract_total(text: str) -> Optional[int]:
+    """EVERGREEN_LOGISTICS 帳單原文沒有直接寫『未稅總額』，只有『含稅總額』
+    (獨立一行、只有 "IDR 數字") 跟 "VAT IDR 數字" 兩個數字，未稅總額 =
+    含稅總額 - VAT。
+    """
+    grand_total = _evergreen_clean_amount(_search(r"^IDR\s+([\d,]+)\s*$", text))
+    vat = _evergreen_clean_amount(_search(r"VAT\s+IDR\s+([\d,]+)", text))
+    if grand_total is None or vat is None:
+        return None
+    return grand_total - vat
+
+
+register_supplier(
+    "DWIHARTA", "PT. DWIHARTA LOGISTINDO", detect_dwiharta, parse_dwiharta,
+    extract_total=_dwiharta_extract_total,
+)
+register_supplier(
+    "KUEHNE_NAGEL", "KUEHNE NAGEL INDONESIA", detect_kuehne_nagel, parse_kuehne_nagel,
+    extract_total=_kn_extract_total,
+)
 register_supplier(
     "INDOPROSTIME", "PT. INDO PROSTIME EXPRESS", detect_indoprostime, parse_indoprostime,
-    multi_page=True,
+    multi_page=True, extract_total=_indo_extract_total,
 )
-register_supplier("MAERSK", "PT MAERSK LOGISTICS INDONESIA", detect_maersk, parse_maersk)
+register_supplier(
+    "MAERSK", "PT MAERSK LOGISTICS INDONESIA", detect_maersk, parse_maersk,
+    extract_total=_maersk_extract_total,
+)
 register_supplier(
     "HYPER_MEGA", "PT. HYPER MEGA SHIPPING", detect_hyper_mega, parse_hyper_mega,
-    multi_page=True,
+    multi_page=True, extract_total=_hyper_extract_total,
 )
 register_supplier(
     "YJE_TATA", "YJE (ShenZhen) International Logistics / PT TATA HARMONI SARANATAMA",
     detect_yje_or_tata, parse_yje_or_tata, multi_page=True,
+    extract_total=_yje_tata_extract_total, audit_exclude=("DPP",),
 )
 register_supplier(
     "TRANS_DAYA_PRIMA", "PT. TRANS DAYA PRIMA", detect_trans, parse_trans,
     multi_page=True,
 )
-register_supplier("FEMARIA", "PT. FEMARIA BUANA CARGO", detect_femaria, parse_femaria)
+register_supplier(
+    "FEMARIA", "PT. FEMARIA BUANA CARGO", detect_femaria, parse_femaria,
+    extract_total=_femaria_extract_total,
+)
 # ===========================================================================
 # 供應商 10：PT. PAN EKSPRES INTERNATIONAL (單頁、單張發票，費用明細表格)
 # ===========================================================================
@@ -1821,10 +1939,14 @@ def parse_pan_ekspres(text: str) -> Dict:
     return {"header": header, "items": items}
 
 
-register_supplier("EXPRESS_MAXIMUM", "PT.EXPRESS MAXIMUM", detect_express, parse_express)
+register_supplier(
+    "EXPRESS_MAXIMUM", "PT.EXPRESS MAXIMUM", detect_express, parse_express,
+    extract_total=_express_extract_total,
+)
 register_supplier(
     "PAN_EKSPRES", "PT. PAN EKSPRES INTERNATIONAL",
     detect_pan_ekspres, parse_pan_ekspres,
+    extract_total=_pan_extract_total,
 )
 
 
@@ -1942,6 +2064,7 @@ def parse_pancaran(text: str) -> Dict:
 register_supplier(
     "PANCARAN", "PT. PANCARAN SRIKANDI LOGISTIK",
     detect_pancaran, parse_pancaran,
+    extract_total=_pancaran_extract_total,
 )
 
 
@@ -2285,6 +2408,7 @@ def parse_dhl(text: str) -> Dict:
 register_supplier(
     "DHL", "PT BIROTIKA SEMESTA / DHL EXPRESS",
     detect_dhl, parse_dhl,
+    extract_total=_dhl_extract_total,
 )
 
 
@@ -2418,6 +2542,7 @@ def parse_dsv(text: str) -> Dict:
 register_supplier(
     "DSV", "PT DSV Transport Indonesia",
     detect_dsv, parse_dsv, multi_page=True,
+    extract_total=_dsv_extract_total,
 )
 
 
@@ -2549,4 +2674,5 @@ def parse_evergreen(text: str) -> Dict:
 register_supplier(
     "EVERGREEN_LOGISTICS", "P.T. EVERGREEN LOGISTICS INDONESIA",
     detect_evergreen, parse_evergreen,
+    extract_total=_evergreen_extract_total,
 )

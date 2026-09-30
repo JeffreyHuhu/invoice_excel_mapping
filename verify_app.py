@@ -64,6 +64,7 @@ try:
         extract_text_from_pdf,
         supplier_label,
         list_registered_suppliers,
+        audit_invoice_totals,
     )
 except ImportError as e:
     st.set_page_config(page_title="供應商帳單辨識擷取系統 - 啟動失敗", layout="wide")
@@ -493,8 +494,18 @@ if run_clicked:
         quick_text = extract_text_from_pdf(tmp_path)
         supplier_key = detect_supplier(quick_text)
         result = find_best_extraction(tmp_path, supplier_key=supplier_key, reference_rows=None)
+        # 金額稽核：系統擷取出來的費用明細加總，要跟帳單原文自己寫的
+        # 「未稅總額」(Total (Excl. VAT) / Sub Total…) 一樣，不一致就跳出
+        # 警示 (只有已經實作稽核規則的供應商才會有結果，見 suppliers.py)。
+        try:
+            audit_results = audit_invoice_totals(
+                result["supplier_key"], tmp_path, result["rows"]
+            )
+        except Exception:
+            audit_results = []
 
     st.session_state["verify_result"] = result
+    st.session_state["verify_audit"] = audit_results
     st.session_state["verify_signature"] = file_signature
     # 換了新檔案重新擷取，把之前殘留的標記狀態清掉，避免誤把上一份帳單
     # 的錯誤標記/確認狀態誤植到這一份帳單上。
@@ -519,6 +530,28 @@ st.success(
     f"辨識供應商：**{supplier_label(detected_key)}** "
     f"（代碼：`{detected_key or '無法辨識'}`）"
 )
+
+# ---------------------------------------------------------------------------
+# 金額稽核：系統擷取出來的費用明細加總，要跟帳單原文自己寫的「未稅總額」
+# (Total (Excl. VAT) / Sub Total…，依供應商命名不同) 一樣，不一致就跳出
+# 警示，提醒人工複查。沒有稽核結果代表這家供應商還沒實作稽核規則，不算
+# 異常，不顯示任何訊息。
+# ---------------------------------------------------------------------------
+audit_results = st.session_state.get("verify_audit") or []
+for ar in audit_results:
+    if ar["match"]:
+        st.info(
+            f"✅ 金額稽核通過（發票 {ar['invoice_no']}）："
+            f"系統擷取加總 {ar['extracted_sum']:,.0f}，"
+            f"帳單未稅總額 {ar['invoice_total']:,.0f}，兩者一致。"
+        )
+    else:
+        st.error(
+            f"🚨 金額稽核不一致（發票 {ar['invoice_no']}）："
+            f"系統擷取加總 {ar['extracted_sum']:,.0f}，"
+            f"帳單未稅總額 {ar['invoice_total']:,.0f}，"
+            f"差額 {ar['diff']:,.0f}，請人工複查！"
+        )
 
 # ---------------------------------------------------------------------------
 # 依 invoice_no 分組：一般供應商只有一組 (一張帳單一個 invoice_no)，
