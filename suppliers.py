@@ -1016,8 +1016,13 @@ def _tata_receipt_clean_amount(text: Optional[str]) -> Optional[int]:
     return int(text) if text.isdigit() else None
 
 
+#   "3 NON REIMBURSEMENT AE - AGENCY FEE (PER AWB) X 750.000" (含 PPN 稅率
+#   標記 "X")，或
+#   "2 REIMBURSEMENT - INVOICE CENTURY LOGISTICS CO.,LTD. 4.125.420" (沒有
+#   "X" 標記，REIMBURSEMENT 類的費用單行時常常沒有這個標記)。
+# "X" 不是每筆都有，所以設成可有可無。
 _TATA_RECEIPT_FULL_ITEM_LINE = re.compile(
-    r"^\d+\s+(?P<desc>[A-Za-z][A-Za-z0-9 /\-.,()=@]*?)\s+X\s+(?P<amount>[\d.]+)\s*$"
+    r"^\d+\s+(?P<desc>[A-Za-z][A-Za-z0-9 /\-.,()=@]*?)\s+(?:X\s+)?(?P<amount>[\d.]+)\s*$"
 )
 _TATA_RECEIPT_NUM_AMOUNT_ONLY_LINE = re.compile(r"^(?P<num>\d+)\s+(?P<amount>[\d.]+)\s*$")
 
