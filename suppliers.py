@@ -2321,17 +2321,39 @@ _DHL_CUSTOMS_ITEM_PATTERN = re.compile(r"^([A-Z][A-Z /]+[A-Z])\s+([\d,]+)$")
 _DHL_CUSTOMS_AWB_ROW_PATTERN = re.compile(
     r"(\d{6,12})\s+(\d{6,12})\s+(\d{1,2}-\d{1,2}-\d{4})\s+JKT"
 )
+# 第 2 頁「Air Waybill…」明細表那一行的啟運港/目的港，例如：
+#   "1902246286 0853008513 23-12-2024 JKT, JAKARTA HAK, SOUTH CHINA AREA
+#    DUTIES & .! 0"
+# 港口代碼後面一定緊接著逗號，用這個特徵跟後面的地區名稱切開 (跟
+# _DHL_MAIN_LINE_PATTERN 的 ocode/dcode 同樣的做法)；用 "DUTIES" 當右邊界，
+# 因為這個掃描格式的 Type of Service 固定是 "DUTIES & TAXES"。
+_DHL_CUSTOMS_PORT_PATTERN = re.compile(
+    r"\d{6,12}\s+\d{6,12}\s+\d{1,2}-\d{1,2}-\d{4}\s+"
+    r"(?P<origin>[A-Z]{2,4},\s*[A-Za-z ]+?)\s+"
+    r"(?P<dest>[A-Z]{2,4},\s*[A-Za-z ]+?)\s+DUTIES"
+)
 _DHL_CUSTOMS_SUMMARY_LINE_PATTERN = re.compile(
-    r"^([A-Z][A-Z /&]+[A-Z])\s+\d+\s+[\d.]+\s+\d+\s+([\d,]+)\s+[\d,]+\s+[\d,]+\s+[\d,]+$"
+    # 第 1 頁「Type of Service」彙總表那一列，欄位依序是：Number of
+    # Shipments / Total Weight / Number of Items / Standard Shipping
+    # Charge / Total Extra Charges / VAT / Total (incl. VAT)，共用的欄位
+    # 數量在不同帳單上會有點差異 (pdfplumber 有時會把某條分隔線抽成一個
+    # 雜訊字元 "=")，所以這裡只把「名稱後面一整串數字/雜訊 token」都框起
+    # 來，實際要取第幾個 token 由 _dhl_customs_extract_items() 依固定順序
+    # (前 4 個一定是 Shipments/Weight/Items/StandardCharge) 自己判斷，
+    # 不在正規表示式裡死板規定總共有幾欄。
+    r"^([A-Z][A-Z /&]+[A-Z])\s+((?:[\d.,]+|=)(?:\s+(?:[\d.,]+|=))*)\s*$"
 )
 
 
 def _dhl_customs_extract_items(text: str) -> List[Dict]:
     """擷取每一筆費用項目：
 
-    1. 第 1 頁最上面「Type of Service」彙總表的服務類型列，我們要的金額
-       是「Standard Shipping Charge」欄；如果這欄是 0 (代表這張帳單沒有
-       基本運費，只有額外費用) 就不算一個項目。
+    1. 第 1 頁最上面「Type of Service」彙總表的服務類型列 (例如
+       "DUTIES & TAXES")，金額是「Standard Shipping Charge」欄——這種
+       關務/完稅費用帳單通常這欄是 0 (沒有基本運費，只有額外費用)，但
+       這一列本身仍然算一筆費用明細 (金額 0)，要跟其他供應商「有抓到
+       Type of Service 這一列就算一筆」的邏輯一致，不能因為金額剛好是 0
+       就跳過不算。
     2. 「Analysis of Extra Charges」區塊逐行擷取費用名稱/金額，這個區塊
        OCR 品質最好、沒有跟其他欄位擠在同一行，比第 2 頁明細表可靠。只
        在「Analysis of Extra Charges」到「Total Extra Charges」這個範圍
@@ -2345,9 +2367,14 @@ def _dhl_customs_extract_items(text: str) -> List[Dict]:
         m = _DHL_CUSTOMS_SUMMARY_LINE_PATTERN.match(line.strip())
         if not m:
             continue
-        amount = _dhl_clean_amount(m.group(2))
-        if amount:
-            items.append({"description": m.group(1).strip(), "amount": amount})
+        # 前 4 個 token 固定是 Number of Shipments / Total Weight /
+        # Number of Items / Standard Shipping Charge，第 4 個 (index 3)
+        # 才是我們要的金額，後面欄位數量不一定 (可能混著雜訊 "=") 所以不管。
+        tokens = [t for t in m.group(2).split() if t != "="]
+        if len(tokens) < 4:
+            continue
+        amount = _dhl_clean_amount(tokens[3])
+        items.append({"description": m.group(1).strip(), "amount": amount if amount is not None else 0})
         break
 
     in_extra_section = False
@@ -2386,8 +2413,11 @@ def _parse_dhl_scanned_customs(text: str) -> Dict:
         header["order_no"] = None
         header["onboard_date"] = None
 
-    for code in ("arrive_date", "mbl_no", "port_of_loading",
-                 "port_of_discharge", "volume", "vessel", "container_no"):
+    port_m = _DHL_CUSTOMS_PORT_PATTERN.search(text)
+    header["port_of_loading"] = port_m.group("origin").strip() if port_m else None
+    header["port_of_discharge"] = port_m.group("dest").strip() if port_m else None
+
+    for code in ("arrive_date", "mbl_no", "volume", "vessel", "container_no"):
         header[code] = None
 
     items = _dhl_customs_extract_items(text)

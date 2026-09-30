@@ -194,7 +194,7 @@ def _generate_extraction_configs(max_attempts: int = 100) -> List[Dict]:
 
 # 預設的「最多嘗試次數」：正確率沒有達到 100% 時，最多重新嘗試這麼多組
 # 不同的擷取參數，每組都算一次正確率，一達到 100% 就提早停止。
-MAX_EXTRACTION_ATTEMPTS = 20
+MAX_EXTRACTION_ATTEMPTS = 5
 EXTRACTION_CONFIGS: List[Dict] = _generate_extraction_configs(MAX_EXTRACTION_ATTEMPTS)
 
 
