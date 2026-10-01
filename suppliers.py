@@ -1863,8 +1863,10 @@ def _evergreen_extract_total(text: str) -> Optional[int]:
     (獨立一行、只有 "IDR 數字") 跟 "VAT IDR 數字" 兩個數字，未稅總額 =
     含稅總額 - VAT。
     """
-    grand_total = _evergreen_clean_amount(_search(r"^IDR\s+([\d,]+)\s*$", text))
-    vat = _evergreen_clean_amount(_search(r"VAT\s+IDR\s+([\d,]+)", text))
+    grand_total = _evergreen_clean_amount(
+        _search(r"^IDR\s+([\d,]+(?:\.\d+)?)\s*$", text)
+    )
+    vat = _evergreen_clean_amount(_search(r"VAT\s+IDR\s+([\d,]+(?:\.\d+)?)", text))
     if grand_total is None or vat is None:
         return None
     return grand_total - vat
@@ -2703,17 +2705,25 @@ def _evergreen_parse_yyyymmdd_slash(text: Optional[str]) -> Optional[str]:
 
 
 def _evergreen_clean_amount(text: Optional[str]) -> Optional[int]:
-    """英式數字 '11,562,850' (逗號千分位) -> 11562850。"""
+    """英式數字 '11,562,850' 或 '4,660,097.00' (逗號千分位，可能有小數點)
+    -> 11562850 / 4660097。小數部分是整數金額就轉成 int，不是整數才保留
+    小數 (目前觀察到的樣本小數都是 .00，但以防萬一仍支援非整數金額)。
+    """
     if not text:
         return None
     text = text.strip().replace(",", "")
-    return int(text) if text.isdigit() else None
+    try:
+        num = float(text)
+    except ValueError:
+        return None
+    return int(num) if num.is_integer() else num
 
 
-# 費用明細行，例如 "OCEAN FREIGHT IDR 11,562,850"。VAT 這一行 (稅金) 不算
+# 費用明細行，例如 "OCEAN FREIGHT IDR 11,562,850" 或 "ALL IN LOCAL CHARGES
+# IDR 4,660,097.00" (金額後面可能有 ".00" 小數)。VAT 這一行 (稅金) 不算
 # 進費用明細 (正確答案 Excel 沒有列這一筆)，用負向前瞻排除。
 _EVERGREEN_ITEM_PATTERN = re.compile(
-    r"^(?!VAT\b)(?P<desc>[A-Z][A-Z /]+?)\s+IDR\s+(?P<amount>[\d,]+)\s*$",
+    r"^(?!VAT\b)(?P<desc>[A-Z][A-Z /]+?)\s+IDR\s+(?P<amount>[\d,]+(?:\.\d+)?)\s*$",
     re.MULTILINE,
 )
 
