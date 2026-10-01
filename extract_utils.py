@@ -417,7 +417,10 @@ def normalize_value(value) -> str:
     if value is None:
         return ""
     if isinstance(value, (datetime.date, datetime.datetime)):
-        return value.strftime("%d.%m.%Y")
+        # 日期一律用「DD Mon YYYY」(月份英文縮寫) 表示，和 suppliers.py 的
+        # _format_date_en() 統一；大小寫交給下面文字分支一致處理 (轉大寫)，
+        # 這裡先轉成和文字分支相同的大寫，確保兩邊比對時格式完全一致。
+        return value.strftime("%d %b %Y").upper()
 
     # 先嘗試當數字比對 (int/float本身，或看起來像數字的字串)
     if isinstance(value, (int, float)):

@@ -42,6 +42,47 @@ def _search(pattern: str, text: str) -> Optional[str]:
     return m.group(1).strip().rstrip(",").strip()
 
 
+# ---------------------------------------------------------------------------
+# 全系統統一的日期顯示格式：「DD Mon YYYY」，月份用英文縮寫 (Jan/Feb/…)。
+# 所有供應商的日期擷取函式最後都呼叫這個共用函式組字串，不要各自手動拼
+# "DD.MM.YYYY"，確保畫面顯示、匯出 Excel、跟正確答案比對三處的日期格式
+# 永遠一致 (比對邏輯見 extract_utils.normalize_value()，它會把『正確答案
+# Excel 裡的日期型態儲存格』也用同一個英文月份格式重新格式化再比對)。
+# ---------------------------------------------------------------------------
+_MONTH_ABBR_EN = [
+    "Jan", "Feb", "Mar", "Apr", "May", "Jun",
+    "Jul", "Aug", "Sep", "Oct", "Nov", "Dec",
+]
+
+
+def _format_date_en(day, month, year) -> Optional[str]:
+    """day/month/year (int 或數字字串) -> 'DD Mon YYYY'，例如 (2, 1, 2025)
+    -> '02 Jan 2025'。month 不在 1~12 範圍就回傳 None (呼叫端視為擷取失敗)。
+    """
+    try:
+        day_i, month_i, year_i = int(day), int(month), int(year)
+    except (TypeError, ValueError):
+        return None
+    if not 1 <= month_i <= 12:
+        return None
+    return f"{day_i:02d} {_MONTH_ABBR_EN[month_i - 1]} {year_i}"
+
+
+_MONTH_NAME_TO_NUM = {name.upper(): i + 1 for i, name in enumerate(_MONTH_ABBR_EN)}
+
+
+def _format_date_en_from_month_name(day, month_name, year) -> Optional[str]:
+    """day/year 為數字 (或數字字串)、month_name 為英文月份縮寫 (任意大小寫，
+    例如 'Aug'、'AUG')時使用；轉成統一的 'DD Mon YYYY' 格式。
+    """
+    if month_name is None:
+        return None
+    month_i = _MONTH_NAME_TO_NUM.get(str(month_name).strip().upper()[:3])
+    if month_i is None:
+        return None
+    return _format_date_en(day, month_i, year)
+
+
 # ===========================================================================
 # 供應商 1：DWIHARTA (海運帳單，Invoice + 費用明細表格)
 # ===========================================================================
@@ -124,7 +165,7 @@ def _dwiharta_parse_indo_date(text: Optional[str]) -> Optional[str]:
     month = INDO_MONTHS.get(month_name.lower())
     if not month:
         return text
-    return f"{int(day):02d}.{month:02d}.{year}"
+    return _format_date_en(day, month, year)
 
 
 def parse_dwiharta(text: str) -> Dict:
@@ -267,9 +308,10 @@ def parse_kuehne_nagel(text: str) -> Dict:
 
     header["consignee"] = _search(rf"INVOICE TO\s*\n\s*(.+?){_KN_STOP}", text)
 
-    m = re.search(r"INVOICE NO\.\s*/\s*DATE\s+(\S+)\s+(\d{1,2}\.\d{1,2}\.\d{4})", text)
+    m = re.search(r"INVOICE NO\.\s*/\s*DATE\s+(\S+)\s+(\d{1,2})\.(\d{1,2})\.(\d{4})", text)
     if m:
-        header["invoice_no"], header["invoice_date"] = m.group(1), m.group(2)
+        header["invoice_no"] = m.group(1)
+        header["invoice_date"] = _format_date_en(m.group(2), m.group(3), m.group(4))
 
     header["bl_no"] = _kn_clean_tracking_no(_search(rf"KN TRACKING NO\.\s*(.+?){_KN_STOP}", text))
     # 注意：Order No. 欄位對應的是「COMMERCIAL INVOICE NUMBER」(例如
@@ -280,8 +322,14 @@ def parse_kuehne_nagel(text: str) -> Dict:
     header["vessel"] = _search(rf"VESSEL NAME\s*:\s*(.+?){_KN_STOP}", text)
     header["port_of_loading"] = _kn_clean_port(_search(rf"P\.\s*OF LOADING\s*:\s*(.+?){_KN_STOP}", text))
     header["port_of_discharge"] = _kn_clean_port(_search(rf"P\.\s*OF DISCHARGE\s*:\s*(.+?){_KN_STOP}", text))
-    header["onboard_date"] = _search(rf"ETD/ATD\s*:\s*(.+?){_KN_STOP}", text)
-    header["arrive_date"] = _search(rf"ETA/ATA\s*:\s*(.+?){_KN_STOP}", text)
+    _kn_etd_m = re.search(r"ETD/ATD\s*:\s*(\d{1,2})\.(\d{1,2})\.(\d{4})", text)
+    header["onboard_date"] = (
+        _format_date_en(*_kn_etd_m.groups()) if _kn_etd_m else None
+    )
+    _kn_eta_m = re.search(r"ETA/ATA\s*:\s*(\d{1,2})\.(\d{1,2})\.(\d{4})", text)
+    header["arrive_date"] = (
+        _format_date_en(*_kn_eta_m.groups()) if _kn_eta_m else None
+    )
 
     m2 = re.search(r"AS PER ATTACHED\s+([\d,\.]+)\s+([\d,\.]+)", text)
     header["volume"] = m2.group(2) if m2 else None
@@ -357,7 +405,7 @@ def _indo_add_space_after_pt(value: Optional[str]) -> Optional[str]:
 
 
 def _indo_parse_flight_date(vessel_value: Optional[str]) -> Optional[str]:
-    """從 FLIGHT 欄位尾碼反推日期，例如 'CX 777/01092026' -> '01/09/2026'
+    """從 FLIGHT 欄位尾碼反推日期，例如 'CX 777/01092026' -> '01 Sep 2026'
     (尾碼 8 碼數字是 DDMMYYYY)。抓不到就回傳 None，讓 expand_to_rows()
     補 N/A。
     """
@@ -367,7 +415,7 @@ def _indo_parse_flight_date(vessel_value: Optional[str]) -> Optional[str]:
     if not m:
         return None
     day, month, year = m.groups()
-    return f"{day}/{month}/{year}"
+    return _format_date_en(day, month, year)
 
 
 def _indo_clean_amount(text: Optional[str]) -> Optional[int]:
@@ -415,7 +463,10 @@ def parse_indoprostime(text: str) -> Dict:
     header: Dict[str, Optional[str]] = {}
 
     header["invoice_no"] = _search(r"Number\s*:\s*(\d+)", text)
-    header["invoice_date"] = _search(r"Date\s*:\s*(\d{1,2}/\d{1,2}/\d{4})", text)
+    _indo_inv_date_m = re.search(r"Date\s*:\s*(\d{1,2})/(\d{1,2})/(\d{4})", text)
+    header["invoice_date"] = (
+        _format_date_en(*_indo_inv_date_m.groups()) if _indo_inv_date_m else None
+    )
     header["supplier"] = _search(rf"A/C\s*name\s*:\s*(.+?){_INDO_STOP}", text)
     header["consignee"] = _indo_add_space_after_pt(
         _search(rf"\bCNEE\s*:\s*(.+?){_INDO_STOP}", text)
@@ -497,7 +548,7 @@ def _maersk_parse_date(text: Optional[str]) -> Optional[str]:
     month = _EN_MONTHS_ABBR.get(month_abbr.lower())
     if not month:
         return text
-    return f"{int(day):02d}.{month:02d}.{year}"
+    return _format_date_en(day, month, year)
 
 
 def _maersk_clean_amount_id(text: Optional[str]) -> Optional[int]:
@@ -538,7 +589,14 @@ def parse_maersk(text: str) -> Dict:
     header: Dict[str, Optional[str]] = {}
 
     header["invoice_no"] = _search(r"\bINVOICE\s+(\d+)\b", text)
-    header["invoice_date"] = _search(r"Invoice\s*Date\s*:\s*(\S+)", text)
+    _maersk_inv_m = re.search(r"Invoice\s*Date\s*:\s*(\d{1,2})\.([A-Za-z]{3,})\.(\d{4})", text)
+    header["invoice_date"] = (
+        _format_date_en_from_month_name(
+            _maersk_inv_m.group(1), _maersk_inv_m.group(2), _maersk_inv_m.group(3)
+        )
+        if _maersk_inv_m
+        else _search(r"Invoice\s*Date\s*:\s*(\S+)", text)
+    )
     header["supplier"] = _search(r"Issued by:\s*\n(.+)", text)
     header["consignee"] = _search(rf"Sold\s*to\s*:\s*(.+?){_MAERSK_STOP}", text)
     header["order_no"] = _search(r"Commercial Invoice No\s*:\s*(\S+)", text)
@@ -632,7 +690,7 @@ def _hyper_parse_date(text: Optional[str]) -> Optional[str]:
     month = _EN_MONTHS_FULL.get(month_name.lower())
     if not month:
         return text
-    return f"{int(day):02d}.{month:02d}.{year}"
+    return _format_date_en(day, month, year)
 
 
 def _hyper_clean_amount_id(text: Optional[str]) -> Optional[int]:
@@ -812,7 +870,14 @@ def parse_yje(text: str) -> Dict:
     header: Dict[str, Optional[str]] = {}
 
     header["invoice_no"] = _search(r"Inv\.?\s*No\s*[:：]\s*(\S+)", text)
-    header["invoice_date"] = _search(r"Inv\s*Date\s*[:：]\s*(\S+)", text)
+    _yje_inv_m = re.search(r"Inv\s*Date\s*[:：]\s*(\d{4})-([A-Za-z]{3,})-(\d{1,2})", text)
+    header["invoice_date"] = (
+        _format_date_en_from_month_name(
+            _yje_inv_m.group(3), _yje_inv_m.group(2), _yje_inv_m.group(1)
+        )
+        if _yje_inv_m
+        else _search(r"Inv\s*Date\s*[:：]\s*(\S+)", text)
+    )
     header["supplier"] = _search(r"AGENT\s*[:：]\s*(.+)$", text)
     header["consignee"] = _yje_clean_consignee(_search(r"TO\s*[:：]\s*(.+)$", text))
     header["bl_no"] = _search(r"HAWB\s*[:：]\s*(\S+)", text)
@@ -892,7 +957,7 @@ def _tata_parse_date(text: Optional[str]) -> Optional[str]:
     if not m:
         return text
     year, month, day = m.groups()
-    return f"{int(day):02d}.{int(month):02d}.{year}"
+    return _format_date_en(day, month, year)
 
 
 # 費用明細行，例如 "1 GUDANG FEE Rp 159,840" 或
@@ -1005,7 +1070,7 @@ def _tata_receipt_parse_date(text: Optional[str]) -> Optional[str]:
     if not m:
         return None
     day, month, year = m.groups()
-    return f"{int(day):02d}.{int(month):02d}.{year}"
+    return _format_date_en(day, month, year)
 
 
 def _tata_receipt_clean_amount(text: Optional[str]) -> Optional[int]:
@@ -1240,7 +1305,7 @@ def _trans_parse_date(text: Optional[str]) -> Optional[str]:
     month = _EN_MONTHS_ABBR.get(month_abbr.lower())
     if not month:
         return text
-    return f"{int(day):02d}.{month:02d}.{year}"
+    return _format_date_en(day, month, year)
 
 
 def _trans_clean_amount(text: Optional[str]) -> Optional[int]:
@@ -1403,7 +1468,7 @@ def _femaria_parse_date(text: Optional[str]) -> Optional[str]:
     if not m:
         return text
     year, month, day = m.groups()
-    return f"{int(day):02d}.{int(month):02d}.{year}"
+    return _format_date_en(day, month, year)
 
 
 def _femaria_clean_amount(text: Optional[str]) -> Optional[int]:
@@ -1556,7 +1621,7 @@ def _express_parse_long_date(text: Optional[str]) -> Optional[str]:
     month = _EN_MONTHS_FULL.get(month_name.lower())
     if not month:
         return text
-    return f"{int(day):02d}.{month:02d}.{year}"
+    return _format_date_en(day, month, year)
 
 
 def _express_parse_item_date(text: Optional[str]) -> Optional[str]:
@@ -1572,7 +1637,7 @@ def _express_parse_item_date(text: Optional[str]) -> Optional[str]:
     month = _EN_MONTHS_ABBR.get(month_abbr.lower())
     if not month:
         return text
-    return f"{int(day):02d}.{month:02d}.20{year_2digit}"
+    return _format_date_en(day, month, f"20{year_2digit}")
 
 
 def _express_clean_amount(text: Optional[str]) -> Optional[int]:
@@ -1878,7 +1943,7 @@ def _pan_parse_date(text: Optional[str]) -> Optional[str]:
     month = _EN_MONTHS_ABBR.get(month_abbr.lower())
     if not month:
         return text
-    return f"{int(day):02d}.{month:02d}.{year}"
+    return _format_date_en(day, month, year)
 
 
 def _pan_clean_amount(text: Optional[str]) -> Optional[int]:
@@ -2135,7 +2200,7 @@ def _dhl_parse_date(text: Optional[str]) -> Optional[str]:
     if not m:
         return text
     day, month, year = m.groups()
-    return f"{int(day):02d}.{int(month):02d}.{year}"
+    return _format_date_en(day, month, year)
 
 
 def _dhl_clean_amount(text: Optional[str]) -> Optional[int]:
@@ -2491,7 +2556,7 @@ def _dsv_parse_date(text: Optional[str]) -> Optional[str]:
     month = _EN_MONTHS_ABBR.get(month_abbr.lower())
     if not month:
         return text
-    return f"{int(day):02d}.{month:02d}.20{year_2digit}"
+    return _format_date_en(day, month, f"20{year_2digit}")
 
 
 def _dsv_clean_amount(text: Optional[str]) -> Optional[int]:
@@ -2617,24 +2682,24 @@ def _evergreen_parse_yyyymmdd(text: Optional[str]) -> Optional[str]:
     if not m:
         return None
     year, month, day = m.groups()
-    return f"{day}.{month}.{year}"
+    return _format_date_en(day, month, year)
 
 
 def _evergreen_parse_yyyymmdd_slash(text: Optional[str]) -> Optional[str]:
-    """'20260701' (YYYYMMDD) -> '2026/07/01'。
+    """'20260701' (YYYYMMDD) -> '01 Jul 2026'。
 
-    這家供應商正確答案 Excel 裡 arrive_date (ETD/ETA) 這一格是「純文字」
-    'YYYY/MM/DD'，不是像同一列 invoice_date 那樣的 Excel 日期型態儲存格
-    (normalize_value() 只會把「日期型態」的儲存格轉成 'DD.MM.YYYY' 再比對，
-    純文字儲存格不會被重新解析格式，所以要直接輸出跟正確答案一模一樣的
-    'YYYY/MM/DD' 文字寫法，才比對得起來)。"""
+    這家供應商正確答案 Excel 裡 arrive_date (ETD/ETA) 這一格過去是「純
+    文字」'YYYY/MM/DD' (不是 Excel 日期型態儲存格)，為了配合全系統統一
+    改成「月份英文縮寫」的顯示格式，已經請使用者把這一格也改成跟其他
+    日期欄位一樣的 'DD Mon YYYY' 文字寫法，所以這裡直接沿用跟
+    _evergreen_parse_yyyymmdd() 一樣的共用格式化函式即可。"""
     if not text:
         return None
     m = re.match(r"(\d{4})(\d{2})(\d{2})\s*$", text.strip())
     if not m:
         return None
     year, month, day = m.groups()
-    return f"{year}/{month}/{day}"
+    return _format_date_en(day, month, year)
 
 
 def _evergreen_clean_amount(text: Optional[str]) -> Optional[int]:
