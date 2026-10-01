@@ -1000,6 +1000,7 @@ def parse_tata_classic(text: str) -> Dict:
     header["vessel"] = _search(rf"\bFlight\s*:\s*(.+?){_TATA_STOP}", text)
     header["volume"] = _search(rf"\bQTY\s*:\s*(.+?){_TATA_STOP}", text)
     header["port_of_loading"] = _search(rf"\bORIGIN\s*:\s*(.+?){_TATA_STOP}", text)
+    header["shipper"] = _search(rf"\bShipper\s*:\s*(.+?){_TATA_STOP}", text)
 
     # 注意：不能用 r"\bDate\s*:\s*..." 這種寬鬆寫法，因為同一頁最上方
     # "INV Date :2026-08-24 15:55:13" 也符合這個樣式 (字面上 "Date :" 前面

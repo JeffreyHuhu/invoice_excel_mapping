@@ -19,7 +19,7 @@ extract_utils.py
 同一份 Excel、用同一套比對/查核邏輯)：
   invoice_date, invoice_no, supplier, consignee, order_no, arrive_date,
   onboard_date, bl_no, mbl_no, port_of_loading, port_of_discharge, volume,
-  vessel, container_no  → 每張帳單「共用」一次 (抬頭欄位)
+  vessel, container_no, shipper  → 每張帳單「共用」一次 (抬頭欄位)
   description, amount   → 每筆費用明細各一列 (一張帳單可能有多筆費用)
 """
 
@@ -52,18 +52,19 @@ NA = "N/A"  # 抓不到值時，一律填這個 (使用者需求)
 HEADER_FIELD_CODES: List[str] = [
     "invoice_date", "invoice_no", "supplier", "consignee", "order_no",
     "arrive_date", "onboard_date", "bl_no", "mbl_no", "port_of_loading",
-    "port_of_discharge", "volume", "vessel", "container_no",
+    "port_of_discharge", "volume", "vessel", "container_no", "shipper",
 ]
 ITEM_FIELD_CODES: List[str] = ["description", "amount"]
 
 # 完整欄位順序 (輸出 Excel 用，對應各供應商範本欄位順序：
 # INVOICE DATE, INVOICE NO, SUPPLIER, CONSIGNEE, Description, AMOUNT, Order No.,
 # Arrive Date, on board date, B/L NO., MBL NO., Port of Loading,
-# Port of discharge, Volume, Vessel, Container no.)
+# Port of discharge, Volume, Vessel, Container no., Shipper)
 FIELD_CODES: List[str] = [
     "invoice_date", "invoice_no", "supplier", "consignee", "description",
     "amount", "order_no", "arrive_date", "onboard_date", "bl_no", "mbl_no",
     "port_of_loading", "port_of_discharge", "volume", "vessel", "container_no",
+    "shipper",
 ]
 
 DISPLAY_HEADERS: Dict[str, str] = {
@@ -83,6 +84,7 @@ DISPLAY_HEADERS: Dict[str, str] = {
     "volume":            "Volume\n材積",
     "vessel":             "Vessel\n船名",
     "container_no":      "Container no.\n貨櫃號碼",
+    "shipper":           "Shipper\n出貨方",
 }
 
 
@@ -868,9 +870,14 @@ def read_reference_excel(source) -> pd.DataFrame:
         rec = {}
         empty = True
         for idx, code in enumerate(FIELD_CODES):
-            cell = row[start_col - 1 + idx]
-            rec[code] = cell.value
-            if cell.value not in (None, ""):
+            col_idx = start_col - 1 + idx
+            # 舊的供應商範本可能沒有後來才新增的欄位 (例如 shipper)，這一列
+            # 實際儲存格數量會比目前的 FIELD_CODES 短，超出範圍一律當作
+            # 沒有這欄 (None，後續 _is_na() 會視為「這欄不適用」略過不比對)，
+            # 不會因為新欄位而讓舊範本直接 IndexError 壞掉。
+            value = row[col_idx].value if col_idx < len(row) else None
+            rec[code] = value
+            if value not in (None, ""):
                 empty = False
         if not empty:
             records.append(rec)
