@@ -186,6 +186,15 @@ def parse_dwiharta(text: str) -> Dict:
             supplier_line = supplier_line[:stop_m.start()]
         header["supplier"] = supplier_line.strip()
 
+    # Shipper 欄位的值常常換行 (例如 "Shipper : SHANGHAI LIGHT INDUSTRY AND\n
+    # TEXTILE GROUP IMP. & EXP. CO.,LTD.; Container No. : ...")，不能用一般
+    # 欄位的 _DWIHARTA_STOP (遇到換行就停) 處理，這裡改用允許跨行的寫法，
+    # 抓到 "Container No." 前的所有文字，再把裡面的換行/多重空白收斂成
+    # 一個空白，還原成一行完整的出貨方名稱。
+    _shipper_m = re.search(r"Shipper\s*:\s*([\s\S]+?)\s*Container\s*No\.?\s*:", text)
+    if _shipper_m:
+        header["shipper"] = re.sub(r"\s+", " ", _shipper_m.group(1)).strip()
+
     items: List[Dict] = []
     for raw_line in text.splitlines():
         line = raw_line.strip()
@@ -195,9 +204,15 @@ def parse_dwiharta(text: str) -> Dict:
         if not m:
             continue
         amount_str = m.group("amount").replace(",", "")
+        vat_str = m.group("vat")
+        vat_val = None
+        if vat_str:
+            vat_str = vat_str.replace(",", "")
+            vat_val = int(vat_str) if vat_str.isdigit() else None
         items.append({
             "description": m.group("desc").strip(),
             "amount": int(amount_str) if amount_str.isdigit() else None,
+            "vat": vat_val,
         })
 
     return {"header": header, "items": items}

@@ -27,6 +27,7 @@ import re
 import io
 import os
 import json
+import math
 import datetime
 from typing import Callable, Dict, List, Optional, Tuple
 
@@ -54,17 +55,20 @@ HEADER_FIELD_CODES: List[str] = [
     "arrive_date", "onboard_date", "bl_no", "mbl_no", "port_of_loading",
     "port_of_discharge", "volume", "vessel", "container_no", "shipper",
 ]
-ITEM_FIELD_CODES: List[str] = ["description", "amount"]
+# 注意：vat 是「每筆費用明細各自可能不同」的欄位 (同一張帳單裡，有些費用
+# 有 VAT、有些沒有)，所以歸在 ITEM_FIELD_CODES (跟 description/amount 一樣
+# 逐筆列出)，不是 HEADER_FIELD_CODES (整張帳單共用一次)。
+ITEM_FIELD_CODES: List[str] = ["description", "amount", "vat"]
 
-# 完整欄位順序 (輸出 Excel 用，對應各供應商範本欄位順序：
-# INVOICE DATE, INVOICE NO, SUPPLIER, CONSIGNEE, Description, AMOUNT, Order No.,
-# Arrive Date, on board date, B/L NO., MBL NO., Port of Loading,
+# 完整欄位順序 (輸出 Excel 用，對應使用者最新範本的欄位順序：
+# INVOICE DATE, INVOICE NO, SUPPLIER, CONSIGNEE, Description, AMOUNT, VAT,
+# Order No., Arrive Date, on board date, B/L NO., MBL NO., Port of Loading,
 # Port of discharge, Volume, Vessel, Container no., Shipper)
 FIELD_CODES: List[str] = [
     "invoice_date", "invoice_no", "supplier", "consignee", "description",
-    "amount", "order_no", "arrive_date", "onboard_date", "bl_no", "mbl_no",
-    "port_of_loading", "port_of_discharge", "volume", "vessel", "container_no",
-    "shipper",
+    "amount", "vat", "order_no", "arrive_date", "onboard_date", "bl_no",
+    "mbl_no", "port_of_loading", "port_of_discharge", "volume", "vessel",
+    "container_no", "shipper",
 ]
 
 DISPLAY_HEADERS: Dict[str, str] = {
@@ -74,6 +78,7 @@ DISPLAY_HEADERS: Dict[str, str] = {
     "consignee":         "CONSIGNEE\n集團公司名稱",
     "description":       "Description\n費用名稱",
     "amount":            "AMOUNT\n金額",
+    "vat":               "VAT\n稅額",
     "order_no":          "Order No.",
     "arrive_date":       "Arrive Date\n到達日",
     "onboard_date":      "on board date\n開船日",
@@ -355,8 +360,8 @@ def expand_to_rows(parsed: Dict) -> List[Dict[str, object]]:
         for code in HEADER_FIELD_CODES:
             if code in item:
                 row[code] = _fill_na(item.get(code))
-        row["description"] = _fill_na(item.get("description"))
-        row["amount"] = _fill_na(item.get("amount"))
+        for code in ITEM_FIELD_CODES:
+            row[code] = _fill_na(item.get(code))
         rows.append(row)
     return rows
 
@@ -434,6 +439,15 @@ def normalize_value(value) -> str:
         num = float(text)
         return f"{num:.6f}".rstrip("0").rstrip(".")
 
+    # 使用者的正確答案 Excel 有時會把金額打成「英式千分位逗號」文字
+    # (例如 '100,000') 而不是真正的 Excel 數字儲存格，去掉逗號後如果變成
+    # 純數字，一樣當數字比對，不要因為多了逗號就跟擷取結果 (int 100000)
+    # 判定成不相符。
+    no_comma = text.replace(",", "")
+    if re.fullmatch(r"-?\d+(\.\d+)?", no_comma):
+        num = float(no_comma)
+        return f"{num:.6f}".rstrip("0").rstrip(".")
+
     text = text.upper()
     text = re.sub(r"\s+", " ", text)
     return text.rstrip(",")
@@ -441,9 +455,15 @@ def normalize_value(value) -> str:
 
 def _is_na(value) -> bool:
     """判斷『正確答案』這一格是不是 N/A (代表這欄位對這張帳單不適用)。
-    涵蓋 None、空字串、以及不分大小寫/前後空白的 'N/A' 字樣。
+    涵蓋 None、空字串、不分大小寫/前後空白的 'N/A' 字樣，以及 pandas 幫
+    「某幾列有值、某幾列整欄都空白」的欄位 (例如 vat 這種逐筆明細欄位，
+    不是每一筆費用都有稅額) 自動補的 NaN (浮點數)——一整欄混著數字跟空白
+    時，pandas 會把空白轉成 float('nan')，不是 None，字面轉成字串是
+    'nan'，不先特判會被誤判成「有值、只是文字是 nan」而算不相符。
     """
     if value is None:
+        return True
+    if isinstance(value, float) and math.isnan(value):
         return True
     text = str(value).strip()
     return text == "" or text.upper() == "N/A"
@@ -502,24 +522,45 @@ def compare_rows(rows: List[Dict], reference_rows: pd.DataFrame) -> List[Dict]:
         if len(ext_vals) > 1 or len(ref_vals) > 1:
             varying_codes.append(code)
 
+    # 逐筆費用明細比對的欄位：description/amount 一定都要比對，但像 vat
+    # 這種「比較晚才加進來」的明細欄位，舊版供應商範本 (還沒加這欄) 整份
+    # 正確答案根本沒有這個資料，不是「這筆費用剛好沒有稅額」。如果不分青
+    # 紅皂白把 vat 一律納入比對 key，擷取結果真的抓到稅額時反而會被這種
+    # 舊範本誤判成不相符 (正確答案那邊因為整欄都沒資料被當成空白，兩邊就
+    # 對不起來)。這裡只有當「這份正確答案裡這個欄位確實有填過至少一筆非
+    # 空白值」才納入比對，沒有填過就當作這個欄位對這張帳單不適用，不納入
+    # 比對 key (跟 HEADER_FIELD_CODES 的 varying_codes 是同一種「選擇性
+    # 啟用」精神，只是判斷條件不同：varying_codes 看「是否不只一種值」，
+    # 這裡看「正確答案是否真的用過這個欄位」)。
+    def _norm_item_field(value):
+        return "" if _is_na(value) else normalize_value(value)
+
+    item_codes = ["description", "amount"]
+    for code in ITEM_FIELD_CODES:
+        if code in item_codes:
+            continue
+        ref_has_data = code in reference_rows.columns and reference_rows[code].apply(
+            lambda v: not _is_na(v)
+        ).any()
+        if ref_has_data:
+            item_codes.append(code)
+    item_labels = [DISPLAY_HEADERS[c].split("\n")[0] for c in item_codes]
+
     if varying_codes:
         extra_labels = [DISPLAY_HEADERS[c].split("\n")[0] for c in varying_codes]
-        item_label = "Description/Amount/" + "/".join(extra_labels)
+        item_label = "/".join(item_labels) + "/" + "/".join(extra_labels)
 
         def _item_key(r):
-            return (normalize_value(r.get("description")), normalize_value(r.get("amount"))) + \
+            return tuple(_norm_item_field(r.get(c)) for c in item_codes) + \
                 tuple(normalize_value(r.get(c)) for c in varying_codes)
-
-        def _item_fmt(t):
-            return " / ".join(str(x) for x in t)
     else:
-        item_label = "Description/Amount"
+        item_label = "/".join(item_labels)
 
         def _item_key(r):
-            return (normalize_value(r.get("description")), normalize_value(r.get("amount")))
+            return tuple(_norm_item_field(r.get(c)) for c in item_codes)
 
-        def _item_fmt(t):
-            return f"{t[0]} / {t[1]}"
+    def _item_fmt(t):
+        return " / ".join(str(x) for x in t)
 
     ext_items = {_item_key(r) for r in rows}
     ref_items = {_item_key(r) for _, r in reference_rows.iterrows()}
@@ -843,21 +884,52 @@ def find_best_extraction(
 _HEADER_ANCHOR = "INVOICE DATE"
 
 
+def _field_code_for_header_text(text) -> Optional[str]:
+    """把範本表頭儲存格的文字 (可能是 "INVOICE DATE\n發票日期" 這種雙行，
+    也可能使用者範本只打了單行 "VAT") 對應回標準欄位代碼，只比對「第一行」
+    (跟 DISPLAY_HEADERS 的英文標籤一致)，不分大小寫、去除頭尾空白。
+    """
+    if text is None:
+        return None
+    first_line = str(text).split("\n")[0].strip().upper()
+    if not first_line:
+        return None
+    for code in FIELD_CODES:
+        if DISPLAY_HEADERS[code].split("\n")[0].strip().upper() == first_line:
+            return code
+    return None
+
+
 def read_reference_excel(source) -> pd.DataFrame:
     """讀取『正確答案』Excel。不同供應商範本的表頭可能在第1列或第2列、
     欄位可能從A欄或B欄開始，這裡自動搜尋含有 'INVOICE DATE' 字樣的儲存格
     當作錨點定位，不用替每個供應商範本各寫一次死板的座標。
+
+    欄位對應不是用「第幾欄」這種死板位置算的，而是逐欄讀表頭文字、拿去跟
+    DISPLAY_HEADERS 比對找出代表哪個標準欄位 (_field_code_for_header_text())
+    ——這樣不管使用者的範本把欄位加在中間 (例如 VAT 插在 AMOUNT 跟
+    Order No. 之間) 還是最後面 (例如 Shipper)，都能正確對應，不用每次使用
+    者調整範本欄位順序/新增欄位時，連同所有舊範本的欄位位置都要跟著改。
+    舊範本沒有的欄位 (例如還沒加 VAT/Shipper 的範本) 單純比對不到、值是
+    None，後續 _is_na() 會視為「這欄不適用」略過不計入正確率。
     """
     if isinstance(source, (bytes, bytearray)):
         source = io.BytesIO(source)
     wb = load_workbook(source, data_only=True)
     ws = wb.active
 
+    # 2026-10 起使用者範本在正式表頭上面多加了一列「抓取欄位」(給自己看的
+    # 內部欄位命名備忘，例如 "Invoice Date"/"Payment can be Transfer to")，
+    # 這一列的文字恰好也可能包含 "INVOICE DATE" 這個錨點字樣，如果不排除
+    # 會被誤認成表頭列，比正式的「顯示欄位」列多抓了一列、害後面全部資料
+    # 錯位一行。真正的表頭列一定是我們自己 DISPLAY_HEADERS 的雙行格式
+    # ("INVOICE DATE\n發票日期" 這種英文+中文兩行)，所以這裡額外要求儲存
+    # 格文字裡要有換行符號，排除掉那種只有英文單行的「備忘列」。
     header_row, start_col = None, None
     for r in range(1, 5):
         for c in range(1, 5):
             val = ws.cell(row=r, column=c).value
-            if val and _HEADER_ANCHOR in str(val).upper():
+            if val and "\n" in str(val) and _HEADER_ANCHOR in str(val).upper():
                 header_row, start_col = r, c
                 break
         if header_row:
@@ -865,23 +937,25 @@ def read_reference_excel(source) -> pd.DataFrame:
     if header_row is None:
         header_row, start_col = 1, 1
 
+    col_to_code: Dict[int, str] = {}
+    for c in range(start_col, ws.max_column + 1):
+        code = _field_code_for_header_text(ws.cell(row=header_row, column=c).value)
+        if code and code not in col_to_code.values():
+            col_to_code[c] = code
+
     records = []
     for row in ws.iter_rows(min_row=header_row + 1, values_only=False):
-        rec = {}
+        rec = {code: None for code in FIELD_CODES}
         empty = True
-        for idx, code in enumerate(FIELD_CODES):
-            col_idx = start_col - 1 + idx
-            # 舊的供應商範本可能沒有後來才新增的欄位 (例如 shipper)，這一列
-            # 實際儲存格數量會比目前的 FIELD_CODES 短，超出範圍一律當作
-            # 沒有這欄 (None，後續 _is_na() 會視為「這欄不適用」略過不比對)，
-            # 不會因為新欄位而讓舊範本直接 IndexError 壞掉。
-            value = row[col_idx].value if col_idx < len(row) else None
+        for col_idx, code in col_to_code.items():
+            idx0 = col_idx - 1
+            value = row[idx0].value if idx0 < len(row) else None
             rec[code] = value
             if value not in (None, ""):
                 empty = False
         if not empty:
             records.append(rec)
-    return pd.DataFrame(records)
+    return pd.DataFrame(records, columns=FIELD_CODES)
 
 
 def build_excel(all_rows: List[Dict[str, object]]) -> bytes:
