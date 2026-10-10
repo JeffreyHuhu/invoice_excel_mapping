@@ -273,18 +273,27 @@ def _kn_clean_tracking_no(value: Optional[str]) -> Optional[str]:
     return re.sub(r"\s+", "", value.strip())
 
 
-# 費用明細行 (在 KN Sales Invoice 的 "CHARGE" 區塊裡)，例如：
-#   "OVERTIME CHARGES EXPORT 85.00 USD 1,521,098 7"
-# 格式：費用名稱 ... 外幣金額 USD 台幣/印尼幣金額 VAT代碼
+# 費用明細行 (在 KN Sales Invoice 的 "CHARGE" 區塊裡)，有兩種格式：
+#   1. 有外幣金額的："THC - ORIGIN 385.00 USD 7,173,967 7"
+#      格式：費用名稱 ... 外幣金額 USD 印尼幣金額 VAT代碼
+#   2. 只有印尼幣的（沒有外幣換算）："SECURITY FILING 700,000 7"
+#      格式：費用名稱 ... 印尼幣金額 VAT代碼
 # 這是「使用者真正要的 Description」，跟 Faktur Pajak (稅務發票) 上寫的
 # 那種概括性文字 (例如 "Domestic transport & ancillary services") 是兩回事：
 # 稅務發票的文字只是報稅用的統稱，帳單上實際列出的每筆費用名稱才是查核
-# 要比對的欄位。這裡用「結尾是 USD 金額+金額+VAT代碼」的格式辨識這種行，
-# 一張帳單若有多筆費用，會抓到多筆、各自展開成一列 (呼應 DWIHARTA
-# 「一筆費用一列」的設計)。
+# 要比對的欄位。這裡用「結尾是 (可選的外幣金額+USD) + 印尼幣金額 + VAT
+# 代碼」的格式辨識這種行，一張帳單若有多筆費用，會抓到多筆、各自展開成
+# 一列 (呼應 DWIHARTA「一筆費用一列」的設計)。VAT 代碼固定是單獨一個數字
+# (目前觀察到的樣本都是 "7")，不是金額的一部分——限定成單一位數字，避免
+# 誤吃到後面緊接著的其他數字 (例如貨櫃追蹤號碼 "1076 285 746" 被誤判成
+# 金額+VAT代碼)。金額部分也要求「英式千分位逗號」格式 (例如 "700,000")，
+# 不接受沒有逗號分隔的連續數字，這樣才不會誤抓到 PO 單號、提單號這類沒
+# 有千分位逗號、純數字黏在旁邊字母後面的雜訊行 (pdfplumber 有時會把側邊
+# 直排文字的單個字母併進旁邊的數字行)。
 _KN_CHARGE_LINE_PATTERN = re.compile(
-    r"^(?P<desc>[A-Z][A-Za-z0-9 /\-\.,()&]+?)\s+[\d,]+\.\d{2}\s*USD\s+"
-    r"(?P<amount>[\d,]+)\s+\d+\s*$",
+    r"^(?P<desc>[A-Z][A-Za-z0-9 /\-\.,()&]+?)\s+"
+    r"(?:[\d,]+\.\d{2}\s*[A-Z]{3}\s+)?"
+    r"(?P<amount>\d{1,3}(?:,\d{3})+)\s+\d\s*$",
     re.MULTILINE,
 )
 
@@ -355,12 +364,58 @@ def parse_kuehne_nagel(text: str) -> Dict:
 
     m2 = re.search(r"AS PER ATTACHED\s+([\d,\.]+)\s+([\d,\.]+)", text)
     header["volume"] = m2.group(2) if m2 else None
+    # 注意：上面這個「整張帳單共用一個 Volume」只適用於沒有逐櫃拆分費用的
+    # 帳單 (例如只有一筆 OVERTIME CHARGES EXPORT 的簡單帳單)。如果帳單裡有
+    # 「CONTAINER POSITIONING EXPORT」這種逐個貨櫃分開收費的項目，使用者的
+    # 正確答案改用「每個貨櫃自己的櫃型代碼」(例如 "1X40GE") 當那幾筆費用
+    # 各自的 Volume，其餘費用列則留空，不套用整張帳單共用的材積總量——這裡
+    # 先記下有沒有這種逐櫃費用，等下面抓到 items 之後再決定要不要蓋掉這個
+    # 預設值 (見下方 _kn_container_positioning 區塊)。
 
     # 這種帳單本來就沒有海運提單/貨櫃資訊，留空給 expand_to_rows() 補 N/A
     header["mbl_no"] = None
     header["container_no"] = None
 
     items = _kn_extract_charge_items(text)
+    # 這家供應商的 PDF 常常把同一張 Sales Invoice「整份內容」重複印兩次
+    # (ORIGINAL 跟 DIGITAL COPY 各一份，直排在頁面兩側當水印文字，肉眼看
+    # 不出來，但 pdfplumber 把兩份內容前後接在一起)，導致費用明細行數量
+    # 剛好是真實筆數的兩倍、且前後兩半完全一樣。這裡偵測「整個清單剛好可
+    # 以切成前後兩半、且兩半逐筆完全相同」時，只留前半，避免每筆費用都被
+    # 誤判成重複兩筆；如果不是這種剛好對半重複的情況 (例如真的有兩筆金額
+    # 剛好相同的費用)，兩半不會逐筆完全相等，不會被誤刪。
+    if items and len(items) % 2 == 0:
+        half = len(items) // 2
+        if items[:half] == items[half:]:
+            items = items[:half]
+
+    # 「CONTAINER POSITIONING EXPORT」費用行下面緊接著的明細行會寫出這筆
+    # 費用對應的貨櫃型態，例如 "1 40' GE X 23 USD = 23.00 USD" 代表一個
+    # 40 呎 GE (General Export) 櫃，使用者的正確答案把它轉成 "1X40GE" 這種
+    # 代碼格式填在 Volume 欄位 (只填在這幾筆費用列，不是整張帳單共用一個
+    # 值)。這裡依照文件順序抓出每一個這種代碼，跟 items 裡同樣依文件順序
+    # 出現的 CONTAINER POSITIONING EXPORT 項目一一對應；跟費用明細行一樣，
+    # 整份文字常常重複印兩次，所以也套用同樣的「對半相同就只留前半」處理。
+    _kn_container_codes = [
+        f"1X{num}{kind}"
+        for num, kind in re.findall(r"1\s+(\d+)'\s*([A-Z]+)\s*X\s*[\d.]+\s*USD\s*=", text)
+    ]
+    if _kn_container_codes and len(_kn_container_codes) % 2 == 0:
+        _half = len(_kn_container_codes) // 2
+        if _kn_container_codes[:_half] == _kn_container_codes[_half:]:
+            _kn_container_codes = _kn_container_codes[:_half]
+    if _kn_container_codes:
+        # 有逐櫃費用時，整張帳單共用的材積總量就不適用了 (正確答案這幾張
+        # 帳單的其他費用列 Volume 欄位都是留空，不是填整張帳單的材積總量)。
+        header["volume"] = None
+        _kn_code_iter = iter(_kn_container_codes)
+        for item in items:
+            if item.get("description") == "CONTAINER POSITIONING EXPORT":
+                try:
+                    item["volume"] = next(_kn_code_iter)
+                except StopIteration:
+                    break
+
     if not items:
         # 備援：真的抓不到任何費用明細行時，退回用稅務發票 (Faktur Pajak)
         # 的概括描述+總金額，至少不要整張全空。
@@ -374,11 +429,19 @@ def parse_kuehne_nagel(text: str) -> Dict:
     # 1,521,098 7") 結尾那個數字只是 VAT 稅率代碼的註腳編號 (對照下面
     # "7: 11.00% GROSS / 12% NET VAT..." 的說明)，不是稅額金額；真正的
     # VAT 金額要從 "SUBTOTAL IDR 1,521,098 167,321" 這一行抓，跟費用明細
-    # 金額並排在同一行 (兩個都是英式千分位逗號數字)。這種帳單目前每張都
-    # 只有一筆費用明細，所以直接套用在那一筆上。
+    # 金額並排在同一行 (兩個都是英式千分位逗號數字)。
+    #
+    # 這張帳單無論有幾筆費用明細，VAT 永遠只有「一個」整張帳單的總稅額
+    # (不是每筆費用各自的稅額)，所以不能像其他供應商一樣把 vat 塞進某一
+    # 筆費用明細的 dict 裡 (塞進第一筆會讓人誤以為那筆費用才有稅額)。使用
+    # 者更新後的正確答案範本也是這樣處理：額外「多一列」只填 VAT 金額，
+    # Description/Amount 都留空——因此這裡額外附加一筆「只有 vat、沒有
+    # description/amount」的 item，讓 expand_to_rows() 展開成獨立的一列，
+    # 跟正確答案的列結構對齊。
     _kn_subtotal_m = re.search(r"SUBTOTAL\s+IDR\s+[\d,]+\s+([\d,]+)", text)
-    if _kn_subtotal_m and items:
-        items[0]["vat"] = _kn_clean_amount_comma_thousands(_kn_subtotal_m.group(1))
+    if _kn_subtotal_m:
+        vat_amount = _kn_clean_amount_comma_thousands(_kn_subtotal_m.group(1))
+        items.append({"description": None, "amount": None, "vat": vat_amount})
 
     return {"header": header, "items": items}
 

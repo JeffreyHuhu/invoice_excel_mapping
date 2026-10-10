@@ -550,9 +550,17 @@ def compare_rows(rows: List[Dict], reference_rows: pd.DataFrame) -> List[Dict]:
         extra_labels = [DISPLAY_HEADERS[c].split("\n")[0] for c in varying_codes]
         item_label = "/".join(item_labels) + "/" + "/".join(extra_labels)
 
+        # varying_codes 裡的欄位也要用 _norm_item_field (不是 normalize_value)
+        # 把 N/A 統一轉成同一個空字串再比較：像 KUEHNE NAGEL 的 Volume 這種
+        # 「只有某幾筆費用才有值 (例如逐櫃費用)、其他筆留空」的欄位，擷取結果
+        # 留空時填的是 NA 常數 "N/A"，但正確答案 Excel 整欄裡只要「有些列有
+        # 值、有些列空白」就會被 pandas 自動補 float('nan')——這兩種「空白」
+        # 字面轉成字串不一樣 ("N/A" vs "nan")，如果直接用 normalize_value()
+        # 逐字比較會被誤判成不相符，所以這裡跟 item_codes 用同一套、對 N/A
+        # 有特判的 _norm_item_field()。
         def _item_key(r):
             return tuple(_norm_item_field(r.get(c)) for c in item_codes) + \
-                tuple(normalize_value(r.get(c)) for c in varying_codes)
+                tuple(_norm_item_field(r.get(c)) for c in varying_codes)
     else:
         item_label = "/".join(item_labels)
 
