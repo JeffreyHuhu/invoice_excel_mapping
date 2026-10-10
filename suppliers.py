@@ -322,6 +322,13 @@ def parse_kuehne_nagel(text: str) -> Dict:
     header["supplier"] = _search(r"Pengusaha Kena Pajak:\s*\n\s*Nama\s*:\s*(.+)", text)
 
     header["consignee"] = _search(rf"INVOICE TO\s*\n\s*(.+?){_KN_STOP}", text)
+    # Sales Invoice 頁的 "CONSIGNEE SHIPPER" 這個區塊裡，SHIPPER 欄位的值
+    # 觀察到的樣本都跟上面的 INVOICE TO (header["consignee"]) 一樣，都是
+    # PT. POU YUEN INDONESIA (這裡的 CONSIGNEE 欄位其實是另一個不同欄位，
+    # 貨物真正收件地的 "NIKE RETAIL SERVICES, INC."，不是我們的 consignee
+    # 標準欄位)，所以沿用已經可靠抓到的 consignee 值，不用再處理那兩欄
+    # 左右並排、文字黏在一起的版面。
+    header["shipper"] = header["consignee"]
 
     m = re.search(r"INVOICE NO\.\s*/\s*DATE\s+(\S+)\s+(\d{1,2})\.(\d{1,2})\.(\d{4})", text)
     if m:
@@ -362,6 +369,16 @@ def parse_kuehne_nagel(text: str) -> Dict:
             r"Harga Jual\s*/\s*Penggantian\s*/\s*Uang Muka\s*/\s*Termin\s+([\d.,]+)", text
         )
         items = [{"description": description, "amount": _kn_clean_amount(amount_raw)}]
+
+    # VAT：費用明細行本身 (例如 "OVERTIME CHARGES EXPORT 85.00 USD
+    # 1,521,098 7") 結尾那個數字只是 VAT 稅率代碼的註腳編號 (對照下面
+    # "7: 11.00% GROSS / 12% NET VAT..." 的說明)，不是稅額金額；真正的
+    # VAT 金額要從 "SUBTOTAL IDR 1,521,098 167,321" 這一行抓，跟費用明細
+    # 金額並排在同一行 (兩個都是英式千分位逗號數字)。這種帳單目前每張都
+    # 只有一筆費用明細，所以直接套用在那一筆上。
+    _kn_subtotal_m = re.search(r"SUBTOTAL\s+IDR\s+[\d,]+\s+([\d,]+)", text)
+    if _kn_subtotal_m and items:
+        items[0]["vat"] = _kn_clean_amount_comma_thousands(_kn_subtotal_m.group(1))
 
     return {"header": header, "items": items}
 
