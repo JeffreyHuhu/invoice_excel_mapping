@@ -2591,6 +2591,10 @@ def _dsv_extract_items(text: str) -> List[Dict]:
         items.append({
             "description": m.group("desc").strip(),
             "amount": _dsv_clean_amount(m.group("amount")),
+            # 費用明細行裡 "PPN IN IDR" 這一欄就是這筆費用的稅額 (VAT)，
+            # 跟 "CHARGES IN IDR" (amount) 並排在同一行，_DSV_ITEM_PATTERN
+            # 本來就有抓這個群組，只是先前沒有用上。
+            "vat": _dsv_clean_amount(m.group("ppn")),
         })
     return items
 
@@ -2610,6 +2614,15 @@ def parse_dsv(text: str) -> Dict:
     else:
         header["consignee"] = None
         header["invoice_date"] = None
+
+    # "ULTIMATE SHIPPER" 跟 "ULTIMATE CONSIGNEE" 兩欄的名稱是左右並排、
+    # 兩欄中間沒有明顯分隔符號 (pdfplumber 抽取後變成同一行文字直接黏在
+    # 一起，例如 "PT. GLOSTAR INDONESIA ADIDAS SPOR MALZEMLERI...")，沒辦
+    # 法單純用正則表達式切開兩欄。但觀察到的樣本裡，ULTIMATE SHIPPER 的值
+    # 每一張都跟最上面「帳單寄送對象」(也就是 header["consignee"]) 完全
+    # 一樣 (都是同一家委任 DSV 出貨的公司)，所以直接沿用已經可靠抓到的
+    # consignee 值，不用再另外處理那兩欄黏在一起的文字。
+    header["shipper"] = header["consignee"]
 
     header["order_no"] = _search(r"OWNER'S REFERENCE\s*\n\s*(\S+)", text)
 
