@@ -325,19 +325,60 @@ def _kn_extract_charge_items(text: str) -> List[Dict]:
     return items
 
 
+# "CONSIGNEE SHIPPER" 這個區塊是左右兩欄並排、但 pdfplumber 抓文字時會把
+# 同一行的兩欄黏成一行 (中間只隔一個空白，不是兩個以上，沒辦法用「兩個
+# 空白就切開」那招拆開)，例如：
+#   "ASICS JAPAN CORPORATION THE LOOK (MACAO COMMERCIAL OFFSHORE"
+#   "7-2 MARUNOUCHI 2-CHOME, COMPANY LIMITED O/B PT. POUCHEN"
+# 這裡用一個技巧還原：帳單下面緊接著的 "NOTIFY" 區塊，常常跟 CONSIGNEE
+# 欄位是同一個收件人、逐行文字完全一樣 (地址寫兩次)，所以只要「NOTIFY
+# 每一行」剛好是「CONSIGNEE/SHIPPER 對應那一行」的開頭前綴，就能把前綴
+# 去掉、剩下的部分就是 SHIPPER 欄位那一行的文字；把每一行的 SHIPPER 片段
+# 接起來，再依照使用者的規則，取到「LIMITED」或「LTD」等公司型態字樣為
+# 止 (使用者確認：Shipper 公司全名只到這個字樣，後面接的是地址/備註，不
+# 算在內)。如果 NOTIFY 跟 CONSIGNEE 不是同一個收件人 (兩個區塊行數不同，
+# 或對不起來)，就代表這招用不上，回傳 None，呼叫端會改用其他方式 (沿用
+# 已經可靠抓到的 consignee 值)。
+_KN_LIMITED_WORD = re.compile(r"\bL(?:IMITED|TD\.?)\b", re.IGNORECASE)
+
+
+def _kn_extract_shipper_via_notify(text: str) -> Optional[str]:
+    block_m = re.search(r"CONSIGNEE SHIPPER\n((?:.+\n)+?)(?=NOTIFY\b)", text)
+    notify_m = re.search(r"NOTIFY\n((?:.+\n)+?)(?=FIRST VESSEL|Gov doc#)", text)
+    if not block_m or not notify_m:
+        return None
+    merged_lines = [ln for ln in block_m.group(1).split("\n") if ln.strip()]
+    notify_lines = [ln for ln in notify_m.group(1).split("\n") if ln.strip()]
+    if len(merged_lines) != len(notify_lines) or not merged_lines:
+        return None
+
+    fragments = []
+    for merged, notify_line in zip(merged_lines, notify_lines):
+        if not merged.startswith(notify_line):
+            return None
+        fragments.append(merged[len(notify_line):].strip())
+
+    shipper_text = " ".join(f for f in fragments if f)
+    limit_m = _KN_LIMITED_WORD.search(shipper_text)
+    if not limit_m:
+        return None
+    return re.sub(r"\s+", " ", shipper_text[: limit_m.end()]).strip()
+
+
 def parse_kuehne_nagel(text: str) -> Dict:
     header: Dict[str, Optional[str]] = {}
 
     header["supplier"] = _search(r"Pengusaha Kena Pajak:\s*\n\s*Nama\s*:\s*(.+)", text)
 
     header["consignee"] = _search(rf"INVOICE TO\s*\n\s*(.+?){_KN_STOP}", text)
-    # Sales Invoice 頁的 "CONSIGNEE SHIPPER" 這個區塊裡，SHIPPER 欄位的值
-    # 觀察到的樣本都跟上面的 INVOICE TO (header["consignee"]) 一樣，都是
-    # PT. POU YUEN INDONESIA (這裡的 CONSIGNEE 欄位其實是另一個不同欄位，
-    # 貨物真正收件地的 "NIKE RETAIL SERVICES, INC."，不是我們的 consignee
-    # 標準欄位)，所以沿用已經可靠抓到的 consignee 值，不用再處理那兩欄
-    # 左右並排、文字黏在一起的版面。
-    header["shipper"] = header["consignee"]
+    # Sales Invoice 頁的 "CONSIGNEE SHIPPER" 這個區塊裡，SHIPPER 欄位有時
+    # 跟上面的 INVOICE TO (header["consignee"]) 是同一家公司 (觀察到的部分
+    # 樣本都是 PT. POU YUEN INDONESIA，這裡的 CONSIGNEE 欄位其實是另一個
+    # 不同欄位，貨物真正收件地，不是我們的 consignee 標準欄位)，但不是每
+    # 張都這樣 (例如這家貨主跟收件人是不同公司時)，所以優先用
+    # _kn_extract_shipper_via_notify() 真正解析這個左右並排的欄位；解析不
+    # 出來時才退回沿用 consignee 值。
+    header["shipper"] = _kn_extract_shipper_via_notify(text) or header["consignee"]
 
     m = re.search(r"INVOICE NO\.\s*/\s*DATE\s+(\S+)\s+(\d{1,2})\.(\d{1,2})\.(\d{4})", text)
     if m:
@@ -350,7 +391,14 @@ def parse_kuehne_nagel(text: str) -> Dict:
     # (例如 VB26072003093319) —— 這兩個編號在版面上前後相鄰、很容易搞混，
     # 但使用者核對過的正確答案是以 COMMERCIAL INVOICE NUMBER 為準。
     header["order_no"] = _search(rf"COMMERCIAL INVOICE NUMBER\s*\n\s*(.+?){_KN_STOP}", text)
-    header["vessel"] = _search(rf"VESSEL NAME\s*:\s*(.+?){_KN_STOP}", text)
+    # Vessel 欄位使用者確認要「船名+航次」(例如 "VANCOUVER 058N")，不是只
+    # 取船名；VESSEL NAME/VOYAGE 兩個欄位左右並排在同一行 ("VESSEL NAME :
+    # VANCOUVER VOYAGE : 058N")，這裡兩個都抓出來、中間用一個空白接起來。
+    _kn_vessel_m = re.search(r"VESSEL NAME\s*:\s*(.+?)\s+VOYAGE\s*:\s*(.+?)(?=\n|$)", text)
+    if _kn_vessel_m:
+        header["vessel"] = f"{_kn_vessel_m.group(1).strip()} {_kn_vessel_m.group(2).strip()}"
+    else:
+        header["vessel"] = _search(rf"VESSEL NAME\s*:\s*(.+?){_KN_STOP}", text)
     header["port_of_loading"] = _kn_clean_port(_search(rf"P\.\s*OF LOADING\s*:\s*(.+?){_KN_STOP}", text))
     header["port_of_discharge"] = _kn_clean_port(_search(rf"P\.\s*OF DISCHARGE\s*:\s*(.+?){_KN_STOP}", text))
     _kn_etd_m = re.search(r"ETD/ATD\s*:\s*(\d{1,2})\.(\d{1,2})\.(\d{4})", text)
