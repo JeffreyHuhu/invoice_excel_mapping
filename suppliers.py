@@ -3160,3 +3160,146 @@ register_supplier(
     detect_evergreen, parse_evergreen,
     extract_total=_evergreen_extract_total,
 )
+
+
+# ===========================================================================
+# 供應商：PT. APL LOGISTICS (單頁、單張發票，VAT 只有整張發票一個總額)
+# ===========================================================================
+#
+# 版面特徵：
+#   - "BILLED TO :\nPT. NIKOMAS GEMILANG NO. 2026-0904-0114\n..." -> 公司
+#     名稱後面緊接著 "NO." 跟發票號碼，同一行。
+#   - 費用明細表格有兩種排版 (同一家供應商、不同帳單會混用)：
+#       (a) "Description Amount (IDR)"：單一貨幣，例如
+#           "OVERTIME CHARGES 700,000.00"
+#       (b) "Description Amount (USD) Amount (IDR)"：雙貨幣並排，例如
+#           "SEAL FEE 12.00 217,872.00" (12.00 是美金、217,872.00 才是
+#           正確答案要的 Amount(IDR))。
+#     兩種排版用同一個規則處理：一律取「這一行最後一個金額數字」當
+#     Amount，前面如果還有一個金額數字 (美金) 就直接略過不用。
+#   - 費用明細表格裡偶爾會有「不是真正費用」的參考資訊行夾在裡面 (例如
+#     "LI No: JKTL246686"、"BOOKING NO.\n319263"，或費用名稱後面額外幾行
+#     備註如 "ETD 30 AUG 2026")，這些行结尾不是「數字.兩位小數」，用同一個
+#     正規表示式掃描時會自然被跳過，不需要額外的排除邏輯。
+#   - VAT 只有整張帳單一個總額 (不是逐筆列出)，跟 KUEHNE_NAGEL/
+#     TRANS_DAYA_PRIMA 一樣，獨立成一筆 description=None/amount=None/
+#     vat=稅額 的合成列，附加在費用明細最後面。
+#   - 開船日 (onboard_date/ETD) 有兩個可能的來源，依序嘗試：
+#       1. 費用明細備註裡的 "ETD 30 AUG 2026" (英文月份縮寫)，如果有的話
+#          這個才是正確答案要的值 (比帳單最上方 "We debit your account
+#          for: ... - ETD : 09/09/2026" 那個日期更準)。
+#       2. 沒有備註的帳單 (例如雙貨幣排版那種，費用明細裡沒有額外備註)，
+#          改抓最上方那一行的 "ETD : 10/03/2026" (美式 MM/DD/YYYY)。
+#   - Order No./Arrive Date/MBL NO./Port of discharge/Volume/Vessel/
+#     Container no./Shipper 這張帳單都沒有對應資訊，留空給
+#     expand_to_rows() 補 N/A。Port of Loading 兩個樣本都是 "Jakarta"
+#     (帳單本身沒有印出「啟運港」這個標籤，固定用這家供應商所在地)。
+
+def detect_apl(text: str) -> bool:
+    return "APL LOGISTICS" in text.upper()
+
+
+_APL_ITEM_PATTERN = re.compile(
+    r"^(?P<desc>[A-Z][A-Z0-9 /\-\.]*?)\s+(?:[\d,]+\.\d{2}\s+)?(?P<amount>[\d,]+\.\d{2})\s*$",
+    re.MULTILINE,
+)
+
+
+def _apl_clean_amount(text: Optional[str]) -> Optional[int]:
+    """英式數字 '700,000.00' (逗號千分位、小數點) -> 700000。"""
+    if not text:
+        return None
+    text = text.strip().replace(",", "")
+    try:
+        return round(float(text))
+    except ValueError:
+        return None
+
+
+def _apl_extract_items(text: str) -> List[Dict]:
+    m = re.search(r"Description\s+Amount.*?\n(.*?)\nSubtotal", text, re.DOTALL)
+    if not m:
+        return []
+    items = []
+    for im in _APL_ITEM_PATTERN.finditer(m.group(1)):
+        items.append({
+            "description": im.group("desc").strip(),
+            "amount": _apl_clean_amount(im.group("amount")),
+        })
+    vat = _apl_clean_amount(_search(r"VAT\s*:\s*([\d,]+\.\d{2})", text))
+    if vat is not None:
+        # 正確答案的慣例：只有一筆費用明細時 (不會混淆這個稅額是哪一筆
+        # 費用算出來的)，VAT 那一列的 Description 直接沿用那筆費用的描述；
+        # 有兩筆以上費用明細時 (無法判斷稅額對應哪一筆)，VAT 那一列留空。
+        vat_desc = items[0]["description"] if len(items) == 1 else None
+        items.append({"description": vat_desc, "amount": None, "vat": vat})
+    return items
+
+
+def _apl_extract_total(text: str) -> Optional[int]:
+    return _apl_clean_amount(_search(r"Subtotal\s*:\s*([\d,]+\.\d{2})", text))
+
+
+def _apl_extract_grand_total(text: str) -> Optional[int]:
+    return _apl_clean_amount(_search(r"Total Amount\s*:\s*([\d,]+\.\d{2})", text))
+
+
+def parse_apl(text: str) -> Dict:
+    header: Dict[str, Optional[str]] = {}
+
+    header["supplier"] = _search(r"^(PT\.\s*APL\s*LOGISTICS)", text)
+
+    m = re.search(r"BILLED TO\s*:\s*\n(.+?)\s+NO\.\s*(\S+)", text)
+    header["consignee"] = m.group(1).strip() if m else None
+    header["invoice_no"] = m.group(2).strip() if m else None
+
+    _apl_inv_m = re.search(r"Jakarta,\s*([A-Za-z]+)\s+(\d{1,2}),\s*(\d{4})", text)
+    header["invoice_date"] = (
+        _format_date_en_from_month_name(
+            _apl_inv_m.group(2), _apl_inv_m.group(1)[:3], _apl_inv_m.group(3)
+        )
+        if _apl_inv_m else None
+    )
+
+    # 開船日：先試費用明細備註裡的 "ETD 30 AUG 2026"，沒有才退回最上方
+    # "We debit your account for: ... - ETD : 10/03/2026" (美式 MM/DD/YYYY)。
+    _apl_etd_note_m = re.search(r"\bETD\s+(\d{1,2})\s+([A-Za-z]{3})\s+(\d{4})", text)
+    if _apl_etd_note_m:
+        header["onboard_date"] = _format_date_en_from_month_name(
+            _apl_etd_note_m.group(1), _apl_etd_note_m.group(2), _apl_etd_note_m.group(3)
+        )
+    else:
+        _apl_etd_hdr_m = re.search(r"\bETD\s*:\s*(\d{1,2})/(\d{1,2})/(\d{4})", text)
+        header["onboard_date"] = (
+            _format_date_en(_apl_etd_hdr_m.group(2), _apl_etd_hdr_m.group(1),
+                             _apl_etd_hdr_m.group(3))
+            if _apl_etd_hdr_m else None
+        )
+
+    header["bl_no"] = _search(r"\b(?:LI\s*No|FCR\s*No)\s*:\s*(\S+)", text)
+    # 帳單上沒有印出「啟運港」這個標籤，但兩個樣本都是從 Jakarta 出貨，
+    # 固定填 "Jakarta" (這家供應商公司本身就在 Jakarta)。
+    header["port_of_loading"] = "Jakarta"
+
+    # 這張帳單沒有單號/到貨日/主提單/目的港/材積/船名/貨櫃/出貨方資訊，
+    # 留空給 expand_to_rows() 補 N/A。
+    header["order_no"] = None
+    header["arrive_date"] = None
+    header["mbl_no"] = None
+    header["port_of_discharge"] = None
+    header["volume"] = None
+    header["vessel"] = None
+    header["container_no"] = None
+    header["shipper"] = None
+
+    items = _apl_extract_items(text)
+    if not items:
+        items = [{"description": None, "amount": None, "vat": None}]
+
+    return {"header": header, "items": items}
+
+
+register_supplier(
+    "APL", "PT. APL LOGISTICS", detect_apl, parse_apl,
+    extract_total=_apl_extract_total, extract_grand_total=_apl_extract_grand_total,
+)
