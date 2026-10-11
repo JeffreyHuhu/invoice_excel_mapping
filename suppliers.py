@@ -1500,14 +1500,16 @@ def _trans_extract_items(text: str) -> List[Dict]:
                 if looks_like_suffix:
                     do_no = do_no + nxt
                     i += 1  # 續行已經併進上一筆，跳過不要再單獨處理一次
-            # 注意：Amount 欄位對應的是「Unit Price」(單價) 那一欄，不是
-            # 「Total Price」(單價 x 數量)——之前送測的樣本數量都剛好是 1，
-            # 單價跟總價數字一樣看不出差別；這次數量有一筆是 2 (見下面簡化
-            # 版費用行)，正確答案填的是單價 (300.000) 不是總價 (600.000)，
-            # 才發現真正要抓的是 Unit Price 這一欄。
+            # 注意：Amount 欄位對應的是「Total Price」(單價 x 數量) 那一欄，
+            # 不是「Unit Price」(單價)——先前有一版錯以為是單價，是因為之前
+            # 送測的樣本數量都剛好是 1，單價跟總價數字一樣看不出差別；這次
+            # 使用者確認 Handling GSI-2 那筆 (數量 2、單價 300.000、總價
+            # 600.000) 正確答案填的是總價 (600.000)，而且用 Sub Total 反推
+            # 也對得起來 (Sub Total = 所有費用明細的總價加總，不是單價加
+            # 總)，才確認真正要抓的是 Total Price 這一欄。
             items.append({
                 "description": _trans_clean_desc(m.group("desc")),
-                "amount": _trans_clean_amount(m.group("unit_price")),
+                "amount": _trans_clean_amount(m.group("total")),
                 "order_no": do_no.strip(),
             })
             i += 1
@@ -1517,11 +1519,37 @@ def _trans_extract_items(text: str) -> List[Dict]:
         if m2:
             items.append({
                 "description": _trans_clean_desc(m2.group("desc")),
-                "amount": _trans_clean_amount(m2.group("unit_price")),
+                "amount": _trans_clean_amount(m2.group("total")),
                 "order_no": None,
             })
         i += 1
 
+    items.extend(_trans_extract_cost_items(text))
+    return items
+
+
+# 有些帳單在費用明細表格下面、Sub Total 之前，另外有一個「Cost Description
+# Total」小表格列出額外的雜費 (例如吊櫃/堆存費)，之前的版本完全沒有把這幾
+# 筆費用列進 Excel。格式很單純：費用名稱 + 金額 (印尼式千分位)，跟上面主
+# 表格「數量+單價+總價」三欄的格式不同，只有一個數字，所以用一個獨立、更
+# 簡單的規則抓，不會跟上面的完整版/簡化版費用行搶著比對同一行。這幾筆費用
+# 沒有對應的 DO No.，Order No. 留 None 讓 expand_to_rows() 補 N/A。
+_TRANS_COST_ITEM_PATTERN = re.compile(r"^(?P<desc>[A-Za-z][A-Za-z ]+?)\s+(?P<amount>[\d.]+)\s*$")
+
+
+def _trans_extract_cost_items(text: str) -> List[Dict]:
+    m = re.search(r"Cost\s*Description\s*Total\s*\n((?:.+\n)*?)(?=Sub\s*Total\b)", text)
+    if not m:
+        return []
+    items: List[Dict] = []
+    for line in m.group(1).split("\n"):
+        line_m = _TRANS_COST_ITEM_PATTERN.match(line.strip())
+        if line_m:
+            items.append({
+                "description": _trans_clean_desc(line_m.group("desc")),
+                "amount": _trans_clean_amount(line_m.group("amount")),
+                "order_no": None,
+            })
     return items
 
 
@@ -2004,6 +2032,24 @@ def _yje_tata_extract_total(text: str) -> Optional[int]:
     return None
 
 
+def _trans_extract_total(text: str) -> Optional[int]:
+    """注意：TRANS_DAYA_PRIMA 是 multi_page 供應商，text 是『一頁』的文字。
+
+    這裡要跟系統擷取出來的「所有費用明細加總」(不含 VAT 那一列) 互相核對，
+    但帳單上的 "Sub Total" 只是主費用表格 (Service Description 那個表格)
+    的未稅小計，不包含 "Cost Description" 那個小表格裡的額外雜費 (例如
+    Biaya LOLO/Biaya Penumpukan)——這些雜費另外加總成 "Other Cost" 這個
+    獨立欄位，沒有雜費的帳單這裡會印 "Other Cost 0"。所以這裡要用
+    「Sub Total + Other Cost」才會跟 (主費用 + Cost Description 費用) 的
+    加總對得起來，單用 Sub Total 核對，有雜費的帳單一定會被誤判成不一致。
+    """
+    sub_total = _trans_clean_amount(_search(r"Sub\s*Total\s+([\d.,]+)", text))
+    other_cost = _trans_clean_amount(_search(r"Other\s*Cost\s+([\d.,]+)", text))
+    if sub_total is None:
+        return None
+    return sub_total + (other_cost or 0)
+
+
 def _femaria_extract_total(text: str) -> Optional[int]:
     # "Jumlah Transaksi : 7 Total : 7.499.546,00" 跟 "Total\nJumlah
     # Transaksi : 10 86.999.502,00" 兩種排版都有出現過 ("Total" 字樣位置
@@ -2076,7 +2122,7 @@ register_supplier(
 )
 register_supplier(
     "TRANS_DAYA_PRIMA", "PT. TRANS DAYA PRIMA", detect_trans, parse_trans,
-    multi_page=True,
+    multi_page=True, extract_total=_trans_extract_total,
 )
 register_supplier(
     "FEMARIA", "PT. FEMARIA BUANA CARGO", detect_femaria, parse_femaria,
