@@ -694,6 +694,29 @@ def _maersk_parse_date(text: Optional[str]) -> Optional[str]:
     return _format_date_en(day, month, year)
 
 
+def _maersk_format_invoice_date(day, month_abbr, year) -> Optional[str]:
+    """MAERSK 的 INVOICE DATE 欄位，正確答案 Excel 裡是純文字儲存格 (不是
+    Excel 日期型態)，格式是帳單原文印的 '30.Sep.2026' (點分隔)，跟其他
+    供應商共用的 _format_date_en_from_month_name()『DD Mon YYYY』(空白分
+    隔) 不一樣——因為那個共用函式是給『Excel 日期型態』欄位用的 (Arrive
+    Date/on board date…)，normalize_value() 比對時會把真正的日期物件也
+    格式化成『DD Mon YYYY』再比較；但 MAERSK 的 INVOICE DATE 這裡本來就是
+    文字儲存格，不會被 normalize_value() 重新格式化，必須直接輸出跟正確
+    答案一樣的點分隔格式，才對得起來。只有這個欄位這樣處理，不要去動共用
+    的 _format_date_en()，否則會把其他供應商已經驗證過的日期欄位全部改壞。
+    """
+    if month_abbr is None:
+        return None
+    month_i = _MONTH_NAME_TO_NUM.get(str(month_abbr).strip().upper()[:3])
+    if month_i is None:
+        return None
+    try:
+        day_i, year_i = int(day), int(year)
+    except (TypeError, ValueError):
+        return None
+    return f"{day_i:02d}.{_MONTH_ABBR_EN[month_i - 1]}.{year_i}"
+
+
 def _maersk_clean_amount_id(text: Optional[str]) -> Optional[int]:
     """印尼式數字 '623.699,00' (句點=千分位、逗號=小數) -> 623699。
     跟 KUEHNE NAGEL 的 _kn_clean_amount() 是同一種格式，各供應商各自維護
@@ -706,26 +729,93 @@ def _maersk_clean_amount_id(text: Optional[str]) -> Optional[int]:
     return int(text) if text.isdigit() else None
 
 
-# Faktur Pajak (稅務發票) 頁面的費用明細行，例如：
-#   "2 Origin Terminal Handling Charge 149.659,00"
-# 格式：項次 + 費用名稱 + 印尼式金額。用這一頁的明細而不是 Invoice 頁面，
-# 是因為 Invoice 頁面的表格欄寬不夠，長一點的費用名稱 (例如這筆) 會被自動
-# 換行拆成兩行，很難可靠重組；Faktur Pajak 頁面版面不同，同一筆描述都在
-# 同一行，擷取起來穩定得多。
-_MAERSK_TAX_ITEM_PATTERN = re.compile(
-    r"^\d+\s+(?P<desc>[A-Za-z][A-Za-z0-9 /\-\.]*?)\s+(?P<amount>[\d.]+,\d{2})\s*$",
-    re.MULTILINE,
+# 舊版做法：改抓 Faktur Pajak (稅務發票) 頁面的費用明細行 (例如
+# "2 Origin Terminal Handling Charge 149.659,00")。那一頁版面每筆描述都在
+# 同一行，擷取起來比較穩定，但缺點是「沒有逐筆 VAT 金額」(Faktur Pajak頁
+# 只有整張發票的 Total PPN 一個數字)。
+#
+# 使用者新增「每個費用後面有自己對應的 VAT 金額」的需求後，改成抓 Invoice
+# 頁面本身的 "ItemDescription of Charges ... Qty UoM Total(IDR)" 表格，
+# 因為只有這裡才有「每一筆費用後面緊接著 VAT 那一行」的資訊，而且不是每張
+# 帳單都有附 Faktur Pajak 頁 (例如新樣本 5617858220 這份 PDF 只有 2 頁
+# Invoice，沒有 Faktur Pajak 頁)。
+#
+# 版面特徵：
+#   "1 CFS Receiving Charge 4.094 M3 1,677,125"   -> 單行：項次+費用名稱+
+#                                                     數量+單位+金額(英式
+#                                                     千分位、無小數)
+#   "VAT 184,484"                                 -> 緊接著下一行就是這筆
+#                                                     費用自己的 VAT 金額
+#   費用名稱太長時會被自動換行拆成兩段，例如：
+#   "2 Origin Terminal Handling 4.094 M3 361,055"
+#   "Charge"                                       -> 這是費用名稱的續行，
+#   "VAT 39,716"                                      要併回上一筆描述
+# 用逐行掃描 (不是一個大正規表示式)，比較好處理「描述可能多一行續行」
+# 這種不固定的情況。
+_MAERSK_ITEM_START_PATTERN = re.compile(
+    r"^(?P<num>\d+)\s+(?P<desc>.+?)\s+(?P<qty>\d+(?:\.\d+)?)\s+(?P<uom>[A-Za-z0-9]+)\s+"
+    r"(?P<amount>[\d,]+)\s*$"
 )
+_MAERSK_VAT_LINE_PATTERN = re.compile(r"^VAT\s+([\d,]+)\s*$")
+
+
+def _maersk_clean_amount_comma(text: Optional[str]) -> Optional[int]:
+    """英式數字 '1,677,125' (逗號千分位、無小數) -> 1677125。跟 Faktur
+    Pajak 頁用的印尼式數字 (_maersk_clean_amount_id，句點千分位、逗號小數)
+    是不同格式，Invoice 頁面本身的金額都是這種英式格式。
+    """
+    if not text:
+        return None
+    text = text.strip().replace(",", "")
+    return int(text) if text.isdigit() else None
 
 
 def _maersk_extract_items(text: str) -> List[Dict]:
-    items = []
-    for m in _MAERSK_TAX_ITEM_PATTERN.finditer(text):
+    m = re.search(
+        r"ItemDescription of Charges.*?Total\(IDR\)\s*\n(.*?)\nTotal Packages",
+        text, re.DOTALL,
+    )
+    if not m:
+        return []
+    lines = [ln.strip() for ln in m.group(1).split("\n") if ln.strip()]
+
+    items: List[Dict] = []
+    i = 0
+    while i < len(lines):
+        start_m = _MAERSK_ITEM_START_PATTERN.match(lines[i])
+        if not start_m:
+            i += 1
+            continue
+        desc_parts = [start_m.group("desc").strip()]
+        amount = _maersk_clean_amount_comma(start_m.group("amount"))
+        i += 1
+        vat = None
+        # 往下找這一筆的 VAT 那一行；中間如果還有非 VAT、非下一筆項次開頭
+        # 的文字，代表是費用名稱被自動換行拆出來的續行，併回描述裡。
+        while i < len(lines):
+            vat_m = _MAERSK_VAT_LINE_PATTERN.match(lines[i])
+            if vat_m:
+                vat = _maersk_clean_amount_comma(vat_m.group(1))
+                i += 1
+                break
+            if _MAERSK_ITEM_START_PATTERN.match(lines[i]):
+                break  # 下一筆已經開始，這筆沒有抓到 VAT (防禦性處理)
+            desc_parts.append(lines[i])
+            i += 1
         items.append({
-            "description": m.group("desc").strip(),
-            "amount": _maersk_clean_amount_id(m.group("amount")),
+            "description": " ".join(desc_parts).strip(),
+            "amount": amount,
+            "vat": vat,
         })
     return items
+
+
+def _maersk_extract_grand_total(text: str) -> Optional[int]:
+    """'Amount Due 2,946,119' 是「Total Amount Due」小表格裡的含稅總額
+    (英式千分位、無小數)，用來做『未稅加總 + VAT 加總 = 含稅總額』的稽核
+    (見 extract_utils.audit_invoice_totals())。"""
+    m = _search(r"Amount\s*Due\s+([\d,]+)", text)
+    return _maersk_clean_amount_comma(m)
 
 
 def parse_maersk(text: str) -> Dict:
@@ -734,7 +824,7 @@ def parse_maersk(text: str) -> Dict:
     header["invoice_no"] = _search(r"\bINVOICE\s+(\d+)\b", text)
     _maersk_inv_m = re.search(r"Invoice\s*Date\s*:\s*(\d{1,2})\.([A-Za-z]{3,})\.(\d{4})", text)
     header["invoice_date"] = (
-        _format_date_en_from_month_name(
+        _maersk_format_invoice_date(
             _maersk_inv_m.group(1), _maersk_inv_m.group(2), _maersk_inv_m.group(3)
         )
         if _maersk_inv_m
@@ -753,6 +843,9 @@ def parse_maersk(text: str) -> Dict:
         _search(rf"\bETA\s*:\s*(.+?){_MAERSK_STOP}", text)
     )
     header["volume"] = _search(r"Volume\s*:\s*([\d.]+)\s*m3", text)
+    # Shipper：帳單上 "SHPR:" 後面的公司名稱 (跟 "Sold to:" 的帳單對象可能
+    # 不是同一家，不要直接沿用 consignee 的值)。
+    header["shipper"] = _search(rf"\bSHPR\s*:\s*(.+?){_MAERSK_STOP}", text)
 
     # 這張帳單沒有主提單/船名/貨櫃資訊，留空給 expand_to_rows() 補 N/A
     header["mbl_no"] = None
@@ -761,7 +854,7 @@ def parse_maersk(text: str) -> Dict:
 
     items = _maersk_extract_items(text)
     if not items:
-        items = [{"description": None, "amount": None}]
+        items = [{"description": None, "amount": None, "vat": None}]
 
     return {"header": header, "items": items}
 
@@ -2026,6 +2119,14 @@ def _kn_extract_total(text: str) -> Optional[int]:
     return _kn_clean_amount_comma_thousands(_search(r"SUBTOTAL\s+IDR\s+([\d,]+)", text))
 
 
+def _kn_extract_grand_total(text: str) -> Optional[int]:
+    # "INVOICE TOTAL IDR 1,688,419" 是含稅總額 (= SUBTOTAL + VAT)，用來做
+    # 『未稅加總 + VAT 加總 = 含稅總額』的稽核 (見
+    # extract_utils.audit_invoice_totals())。跟上面的 SUBTOTAL 是不同行，
+    # 用 "INVOICE TOTAL" 這個獨有字樣區分，不會跟 SUBTOTAL 那一行搶到。
+    return _kn_clean_amount_comma_thousands(_search(r"INVOICE\s+TOTAL\s+IDR\s+([\d,]+)", text))
+
+
 def _indo_extract_total(text: str) -> Optional[int]:
     """注意：INDOPROSTIME 是 multi_page 供應商，text 是『一頁』的文字。"""
     return _indo_clean_amount(_search(r"^Total\s+([\d,]+)\s*$", text))
@@ -2080,6 +2181,17 @@ def _trans_extract_total(text: str) -> Optional[int]:
     return sub_total + (other_cost or 0)
 
 
+def _trans_extract_grand_total(text: str) -> Optional[int]:
+    """注意：TRANS_DAYA_PRIMA 是 multi_page 供應商，text 是『一頁』的文字。
+
+    帳單右下角單獨一行印著 "Total 14.982.004" (= Sub Total + VAT + Other
+    Cost，含稅總額)，用來做『未稅加總 + VAT 加總 = 含稅總額』的稽核 (見
+    extract_utils.audit_invoice_totals())。要用「行首就是 Total」限定，
+    不能只找 "Total" 字樣，否則會跟前面 "Sub Total ..." 那一行搶到。
+    """
+    return _trans_clean_amount(_search(r"^Total\s+([\d.,]+)\s*$", text))
+
+
 def _femaria_extract_total(text: str) -> Optional[int]:
     # "Jumlah Transaksi : 7 Total : 7.499.546,00" 跟 "Total\nJumlah
     # Transaksi : 10 86.999.502,00" 兩種排版都有出現過 ("Total" 字樣位置
@@ -2131,7 +2243,7 @@ register_supplier(
 )
 register_supplier(
     "KUEHNE_NAGEL", "KUEHNE NAGEL INDONESIA", detect_kuehne_nagel, parse_kuehne_nagel,
-    extract_total=_kn_extract_total,
+    extract_total=_kn_extract_total, extract_grand_total=_kn_extract_grand_total,
 )
 register_supplier(
     "INDOPROSTIME", "PT. INDO PROSTIME EXPRESS", detect_indoprostime, parse_indoprostime,
@@ -2139,7 +2251,7 @@ register_supplier(
 )
 register_supplier(
     "MAERSK", "PT MAERSK LOGISTICS INDONESIA", detect_maersk, parse_maersk,
-    extract_total=_maersk_extract_total,
+    extract_total=_maersk_extract_total, extract_grand_total=_maersk_extract_grand_total,
 )
 register_supplier(
     "HYPER_MEGA", "PT. HYPER MEGA SHIPPING", detect_hyper_mega, parse_hyper_mega,
@@ -2153,6 +2265,7 @@ register_supplier(
 register_supplier(
     "TRANS_DAYA_PRIMA", "PT. TRANS DAYA PRIMA", detect_trans, parse_trans,
     multi_page=True, extract_total=_trans_extract_total,
+    extract_grand_total=_trans_extract_grand_total,
 )
 register_supplier(
     "FEMARIA", "PT. FEMARIA BUANA CARGO", detect_femaria, parse_femaria,
