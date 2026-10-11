@@ -2223,15 +2223,26 @@ def _dsv_extract_total(text: str) -> Optional[int]:
     return _dsv_clean_amount(_search(r"SUBTOTAL\s+([\d.]+)", text))
 
 
+def _evergreen_extract_grand_total(text: str) -> Optional[int]:
+    """帳單最下面獨立一行、只有 "IDR 數字" 的那一行是含稅總額 (VAT 已經
+    算進去的最終應付金額)。"""
+    return _evergreen_clean_amount(_search(r"^IDR\s+([\d,]+(?:\.\d+)?)\s*$", text))
+
+
+def _evergreen_extract_vat(text: str) -> Optional[int]:
+    """"VAT IDR 197,638.00" 是整張帳單只有一個的稅額總計 (不是逐筆費用
+    各自的稅額)，跟 KUEHNE_NAGEL/TRANS_DAYA_PRIMA/APL 一樣另外獨立成一筆
+    合成列 (見 _evergreen_extract_items())，不要跟費用明細混在一起算。"""
+    return _evergreen_clean_amount(_search(r"VAT\s+IDR\s+([\d,]+(?:\.\d+)?)", text))
+
+
 def _evergreen_extract_total(text: str) -> Optional[int]:
     """EVERGREEN_LOGISTICS 帳單原文沒有直接寫『未稅總額』，只有『含稅總額』
     (獨立一行、只有 "IDR 數字") 跟 "VAT IDR 數字" 兩個數字，未稅總額 =
     含稅總額 - VAT。
     """
-    grand_total = _evergreen_clean_amount(
-        _search(r"^IDR\s+([\d,]+(?:\.\d+)?)\s*$", text)
-    )
-    vat = _evergreen_clean_amount(_search(r"VAT\s+IDR\s+([\d,]+(?:\.\d+)?)", text))
+    grand_total = _evergreen_extract_grand_total(text)
+    vat = _evergreen_extract_vat(text)
     if grand_total is None or vat is None:
         return None
     return grand_total - vat
@@ -3114,6 +3125,13 @@ def _evergreen_extract_items(text: str) -> List[Dict]:
             "description": m.group("desc").strip(),
             "amount": _evergreen_clean_amount(m.group("amount")),
         })
+    vat = _evergreen_extract_vat(text)
+    if vat is not None:
+        # 跟 APL 同一套慣例：只有一筆費用明細時 (不會混淆稅額對應哪一筆)，
+        # VAT 那一列的 Description 直接沿用那筆費用的描述；兩筆以上費用
+        # 明細時 (無法判斷稅額對應哪一筆) 留空。
+        vat_desc = items[0]["description"] if len(items) == 1 else None
+        items.append({"description": vat_desc, "amount": None, "vat": vat})
     return items
 
 
@@ -3141,16 +3159,17 @@ def parse_evergreen(text: str) -> Dict:
         rf"\bCONTAINER\s*NO\s*:\s*(.+?){_EVERGREEN_STOP}", text
     )
 
-    # 這張帳單沒有訂單編號/開船日/裝貨港/材積資訊，留空給 expand_to_rows()
-    # 補 N/A。
+    # 這張帳單沒有訂單編號/開船日/裝貨港/材積/Shipper 資訊，留空給
+    # expand_to_rows() 補 N/A。
     header["order_no"] = None
     header["onboard_date"] = None
     header["port_of_loading"] = None
     header["volume"] = None
+    header["shipper"] = None
 
     items = _evergreen_extract_items(text)
     if not items:
-        items = [{"description": None, "amount": None}]
+        items = [{"description": None, "amount": None, "vat": None}]
 
     return {"header": header, "items": items}
 
@@ -3159,4 +3178,324 @@ register_supplier(
     "EVERGREEN_LOGISTICS", "P.T. EVERGREEN LOGISTICS INDONESIA",
     detect_evergreen, parse_evergreen,
     extract_total=_evergreen_extract_total,
+    extract_grand_total=_evergreen_extract_grand_total,
+)
+
+
+# ===========================================================================
+# 供應商：PT. APL LOGISTICS (單頁、單張發票，VAT 只有整張發票一個總額)
+# ===========================================================================
+#
+# 版面特徵：
+#   - "BILLED TO :\nPT. NIKOMAS GEMILANG NO. 2026-0904-0114\n..." -> 公司
+#     名稱後面緊接著 "NO." 跟發票號碼，同一行。
+#   - 費用明細表格有兩種排版 (同一家供應商、不同帳單會混用)：
+#       (a) "Description Amount (IDR)"：單一貨幣，例如
+#           "OVERTIME CHARGES 700,000.00"
+#       (b) "Description Amount (USD) Amount (IDR)"：雙貨幣並排，例如
+#           "SEAL FEE 12.00 217,872.00" (12.00 是美金、217,872.00 才是
+#           正確答案要的 Amount(IDR))。
+#     兩種排版用同一個規則處理：一律取「這一行最後一個金額數字」當
+#     Amount，前面如果還有一個金額數字 (美金) 就直接略過不用。
+#   - 費用明細表格裡偶爾會有「不是真正費用」的參考資訊行夾在裡面 (例如
+#     "LI No: JKTL246686"、"BOOKING NO.\n319263"，或費用名稱後面額外幾行
+#     備註如 "ETD 30 AUG 2026")，這些行结尾不是「數字.兩位小數」，用同一個
+#     正規表示式掃描時會自然被跳過，不需要額外的排除邏輯。
+#   - VAT 只有整張帳單一個總額 (不是逐筆列出)，跟 KUEHNE_NAGEL/
+#     TRANS_DAYA_PRIMA 一樣，獨立成一筆 description=None/amount=None/
+#     vat=稅額 的合成列，附加在費用明細最後面。
+#   - 開船日 (onboard_date/ETD) 有兩個可能的來源，依序嘗試：
+#       1. 費用明細備註裡的 "ETD 30 AUG 2026" (英文月份縮寫)，如果有的話
+#          這個才是正確答案要的值 (比帳單最上方 "We debit your account
+#          for: ... - ETD : 09/09/2026" 那個日期更準)。
+#       2. 沒有備註的帳單 (例如雙貨幣排版那種，費用明細裡沒有額外備註)，
+#          改抓最上方那一行的 "ETD : 10/03/2026" (美式 MM/DD/YYYY)。
+#   - Order No./Arrive Date/MBL NO./Port of discharge/Volume/Vessel/
+#     Container no./Shipper 這張帳單都沒有對應資訊，留空給
+#     expand_to_rows() 補 N/A。Port of Loading 兩個樣本都是 "Jakarta"
+#     (帳單本身沒有印出「啟運港」這個標籤，固定用這家供應商所在地)。
+
+def detect_apl(text: str) -> bool:
+    return "APL LOGISTICS" in text.upper()
+
+
+_APL_ITEM_PATTERN = re.compile(
+    r"^(?P<desc>[A-Z][A-Z0-9 /\-\.]*?)\s+(?:[\d,]+\.\d{2}\s+)?(?P<amount>[\d,]+\.\d{2})\s*$",
+    re.MULTILINE,
+)
+
+
+def _apl_clean_amount(text: Optional[str]) -> Optional[int]:
+    """英式數字 '700,000.00' (逗號千分位、小數點) -> 700000。"""
+    if not text:
+        return None
+    text = text.strip().replace(",", "")
+    try:
+        return round(float(text))
+    except ValueError:
+        return None
+
+
+def _apl_extract_items(text: str) -> List[Dict]:
+    m = re.search(r"Description\s+Amount.*?\n(.*?)\nSubtotal", text, re.DOTALL)
+    if not m:
+        return []
+    items = []
+    for im in _APL_ITEM_PATTERN.finditer(m.group(1)):
+        items.append({
+            "description": im.group("desc").strip(),
+            "amount": _apl_clean_amount(im.group("amount")),
+        })
+    vat = _apl_clean_amount(_search(r"VAT\s*:\s*([\d,]+\.\d{2})", text))
+    if vat is not None:
+        # 正確答案的慣例：只有一筆費用明細時 (不會混淆這個稅額是哪一筆
+        # 費用算出來的)，VAT 那一列的 Description 直接沿用那筆費用的描述；
+        # 有兩筆以上費用明細時 (無法判斷稅額對應哪一筆)，VAT 那一列留空。
+        vat_desc = items[0]["description"] if len(items) == 1 else None
+        items.append({"description": vat_desc, "amount": None, "vat": vat})
+    return items
+
+
+def _apl_extract_total(text: str) -> Optional[int]:
+    return _apl_clean_amount(_search(r"Subtotal\s*:\s*([\d,]+\.\d{2})", text))
+
+
+def _apl_extract_grand_total(text: str) -> Optional[int]:
+    return _apl_clean_amount(_search(r"Total Amount\s*:\s*([\d,]+\.\d{2})", text))
+
+
+def parse_apl(text: str) -> Dict:
+    header: Dict[str, Optional[str]] = {}
+
+    header["supplier"] = _search(r"^(PT\.\s*APL\s*LOGISTICS)", text)
+
+    m = re.search(r"BILLED TO\s*:\s*\n(.+?)\s+NO\.\s*(\S+)", text)
+    header["consignee"] = m.group(1).strip() if m else None
+    header["invoice_no"] = m.group(2).strip() if m else None
+
+    _apl_inv_m = re.search(r"Jakarta,\s*([A-Za-z]+)\s+(\d{1,2}),\s*(\d{4})", text)
+    header["invoice_date"] = (
+        _format_date_en_from_month_name(
+            _apl_inv_m.group(2), _apl_inv_m.group(1)[:3], _apl_inv_m.group(3)
+        )
+        if _apl_inv_m else None
+    )
+
+    # 開船日：先試費用明細備註裡的 "ETD 30 AUG 2026"，沒有才退回最上方
+    # "We debit your account for: ... - ETD : 10/03/2026" (美式 MM/DD/YYYY)。
+    _apl_etd_note_m = re.search(r"\bETD\s+(\d{1,2})\s+([A-Za-z]{3})\s+(\d{4})", text)
+    if _apl_etd_note_m:
+        header["onboard_date"] = _format_date_en_from_month_name(
+            _apl_etd_note_m.group(1), _apl_etd_note_m.group(2), _apl_etd_note_m.group(3)
+        )
+    else:
+        _apl_etd_hdr_m = re.search(r"\bETD\s*:\s*(\d{1,2})/(\d{1,2})/(\d{4})", text)
+        header["onboard_date"] = (
+            _format_date_en(_apl_etd_hdr_m.group(2), _apl_etd_hdr_m.group(1),
+                             _apl_etd_hdr_m.group(3))
+            if _apl_etd_hdr_m else None
+        )
+
+    header["bl_no"] = _search(r"\b(?:LI\s*No|FCR\s*No)\s*:\s*(\S+)", text)
+    # 帳單上沒有印出「啟運港」這個標籤，但兩個樣本都是從 Jakarta 出貨，
+    # 固定填 "Jakarta" (這家供應商公司本身就在 Jakarta)。
+    header["port_of_loading"] = "Jakarta"
+
+    # 這張帳單沒有單號/到貨日/主提單/目的港/材積/船名/貨櫃/出貨方資訊，
+    # 留空給 expand_to_rows() 補 N/A。
+    header["order_no"] = None
+    header["arrive_date"] = None
+    header["mbl_no"] = None
+    header["port_of_discharge"] = None
+    header["volume"] = None
+    header["vessel"] = None
+    header["container_no"] = None
+    header["shipper"] = None
+
+    items = _apl_extract_items(text)
+    if not items:
+        items = [{"description": None, "amount": None, "vat": None}]
+
+    return {"header": header, "items": items}
+
+
+register_supplier(
+    "APL", "PT. APL LOGISTICS", detect_apl, parse_apl,
+    extract_total=_apl_extract_total, extract_grand_total=_apl_extract_grand_total,
+)
+
+
+# ===========================================================================
+# 供應商：PT. GALUH INTI BAHARI (單頁、單張發票，稅額逐筆列在費用明細裡)
+# ===========================================================================
+#
+# 版面特徵：
+#   - "TO PT. HARDASES ABADI INDONESIA No. Invoice : 2601312-KWTGIB" ->
+#     收件公司跟發票號碼同一行，中間用 "No. Invoice :" 分隔。
+#   - "Wonopringgo Tgl. Invoice : 07 Agt 2026" -> 發票日期用印尼文月份縮寫
+#     (Agt=Agustus、Sep=September...)，跟 DWIHARTA 的印尼文全名不同，所以
+#     用這家供應商自己的縮寫對照表 _GALUH_MONTH_ABBR，不沿用 INDO_MONTHS。
+#   - 費用明細表格 "No. KETERANGAN JUMLAH" 之後是逐行費用，格式
+#     "<序號> <費用名稱> <金額>" (金額千分位用句點，例如 "9.400.000")；
+#     這家供應商跟其他供應商不同的地方是：PPN/PPh 稅額**不是整張帳單只有
+#     一個總額的獨立列**，而是逐筆直接列在費用明細裡 (沒有前面的序號)，
+#     例如 "PPN 11% 16.500"、"PPh 2% -191.000" (PPh 是從金額裡「扣除」，
+#     所以是負數)。這兩種稅額行各自獨立成一筆 description=稅額名稱/
+#     amount=None/vat=稅額 的列，不套用其他供應商「VAT 只有一個總額」的
+#     合成列慣例 (那種慣例的 description 規則不適用，這裡本來就有自己的
+#     description)。
+#   - 有些費用名稱後面會黏著一段日期備註 (例如 "Trucking 27 Juli 2026"、
+#     "TRUCKING PER TGL 31 AGUSTUS - 05 SEPTEMBER 2026")，正確答案只要
+#     名稱本身 ("Trucking"/"TRUCKING")，日期備註要用
+#     _galuh_strip_date_suffix() 去掉。
+#   - 帳單本身沒有另外印出「未稅總額」，費用明細加總 (不含稅額列) 直接
+#     加上 PPN/PPh 稅額就等於帳單最下面的 "Total" (已經是含稅後的總額)，
+#     所以只註冊 extract_grand_total，不註冊 extract_total (沒有獨立的未稅
+#     小計可以比對)。
+#   - 收件公司 (consignee) 通常從最上面 "TO <公司名> No. Invoice :" 抓；
+#     但遇到像 ASICS 這張帳單時，帳單本身用簡稱 "PT. POUCHEN ( ASICS )"，
+#     實際報表第二頁 (same PDF 的「REKAPITULASI TAGIHAN...」明細頁) 開頭
+#     印出的才是正確答案要的正式公司全名 "PT. POU CHEN INDONESIA\nNo
+#     :2601512-KWTGIB"，所以優先找「行首是 PT. 開頭、後面接 No : <發票號>
+#     的那一行」，有找到就用那個覆寫，沒有 (單頁帳單通常沒有這一行) 才退
+#     回用最上面 "TO ..." 那一行。
+#   - 這張帳單沒有訂單編號/到貨日/開船日/提單號/主提單號/啟運港/目的港/
+#     材積/船名/貨櫃號/出貨方資訊，留空給 expand_to_rows() 補 N/A。
+
+def detect_galuh(text: str) -> bool:
+    return "GALUH INTI BAHARI" in text.upper()
+
+
+_GALUH_MONTH_ABBR = {
+    "jan": 1, "feb": 2, "mar": 3, "apr": 4, "mei": 5, "jun": 6,
+    "jul": 7, "agt": 8, "sep": 9, "okt": 10, "nov": 11, "des": 12,
+}
+
+
+def _galuh_parse_date(day, month_abbr: Optional[str], year) -> Optional[str]:
+    if not month_abbr:
+        return None
+    month = _GALUH_MONTH_ABBR.get(str(month_abbr).strip().lower()[:3])
+    if not month:
+        return None
+    return _format_date_en(day, month, year)
+
+
+def _galuh_clean_amount(text: Optional[str]) -> Optional[int]:
+    """印尼式數字 '9.400.000' (句點千分位) -> 9400000；PPh 常見是負數
+    '-191.000' -> -191000，int() 本身就支援前面的負號，不用特別處理。
+    """
+    if not text:
+        return None
+    text = text.strip().replace(".", "").replace(",", "")
+    try:
+        return int(text)
+    except ValueError:
+        return None
+
+
+_GALUH_BLOCK_PATTERN = re.compile(
+    r"No\.\s*KETERANGAN\s*JUMLAH\s*\n(.*?)\nTotal\s+[\d.,]+\s*$",
+    re.DOTALL | re.MULTILINE,
+)
+_GALUH_TAX_LINE_PATTERN = re.compile(r"^(?P<desc>PP[Nh]\s+\d+%)\s+(?P<amount>-?[\d.]+)\s*$")
+_GALUH_ITEM_LINE_PATTERN = re.compile(
+    r"^\d+\s+(?P<desc>.+?)\s+(?P<amount>\d{1,3}(?:\.\d{3})*)\s*$"
+)
+_GALUH_MONTH_NAMES = (
+    "Januari|Februari|Maret|April|Mei|Juni|Juli|Agustus|September|"
+    "Oktober|November|Desember"
+)
+
+
+def _galuh_strip_date_suffix(desc: Optional[str]) -> Optional[str]:
+    """去掉費用名稱後面黏著的日期備註，例如 'Trucking 27 Juli 2026' ->
+    'Trucking'、'TRUCKING PER TGL 31 AGUSTUS - 05 SEPTEMBER 2026' ->
+    'TRUCKING'。沒有日期備註的名稱 (例如 'Fiat Dokumen'、'TOTAL BIAYA
+    EKSTERNAL NON PPH 2%') 原樣保留。
+    """
+    if not desc:
+        return desc
+    desc = re.sub(r"\s+(?:PER\s+)?TGL\b.*$", "", desc, flags=re.IGNORECASE)
+    desc = re.sub(
+        rf"\s+\d{{1,2}}\s+(?:{_GALUH_MONTH_NAMES})\s+\d{{4}}.*$",
+        "", desc, flags=re.IGNORECASE,
+    )
+    return desc.strip()
+
+
+def _galuh_extract_items(text: str) -> List[Dict]:
+    block_m = _GALUH_BLOCK_PATTERN.search(text)
+    if not block_m:
+        return []
+    items: List[Dict] = []
+    for line in block_m.group(1).splitlines():
+        line = line.strip()
+        if not line:
+            continue
+        tax_m = _GALUH_TAX_LINE_PATTERN.match(line)
+        if tax_m:
+            items.append({
+                "description": tax_m.group("desc").strip(),
+                "amount": None,
+                "vat": _galuh_clean_amount(tax_m.group("amount")),
+            })
+            continue
+        item_m = _GALUH_ITEM_LINE_PATTERN.match(line)
+        if item_m:
+            items.append({
+                "description": _galuh_strip_date_suffix(item_m.group("desc").strip()),
+                "amount": _galuh_clean_amount(item_m.group("amount")),
+                "vat": None,
+            })
+    return items
+
+
+def _galuh_extract_grand_total(text: str) -> Optional[int]:
+    return _galuh_clean_amount(_search(r"^Total\s+([\d.,]+)\s*$", text))
+
+
+def parse_galuh(text: str) -> Dict:
+    header: Dict[str, Optional[str]] = {}
+
+    header["supplier"] = _search(r"^(PT\.\s*GALUH\s*INTI\s*BAHARI)", text)
+    header["invoice_no"] = _search(r"No\.\s*Invoice\s*:\s*(\S+)", text)
+
+    _galuh_date_m = re.search(r"Tgl\.\s*Invoice\s*:\s*(\d{1,2})\s+(\w+)\s+(\d{4})", text)
+    header["invoice_date"] = (
+        _galuh_parse_date(*_galuh_date_m.groups()) if _galuh_date_m else None
+    )
+
+    # consignee：優先找報表明細頁開頭「PT. 開頭、後面接 No : <發票號>」那
+    # 一行 (比最上面的 "TO ..." 簡稱更正式/更準確)，找不到才退回 "TO ..."。
+    _galuh_rekap_m = re.search(r"^(PT\..+?)\s+No\s*:\s*\S+\s*$", text, re.MULTILINE)
+    if _galuh_rekap_m:
+        header["consignee"] = _galuh_rekap_m.group(1).strip()
+    else:
+        header["consignee"] = _search(r"\bTO\s+(.+?)\s+No\.\s*Invoice", text)
+
+    # 這張帳單沒有訂單編號/到貨日/開船日/提單號/主提單號/啟運港/目的港/
+    # 材積/船名/貨櫃號/出貨方資訊，留空給 expand_to_rows() 補 N/A。
+    header["order_no"] = None
+    header["arrive_date"] = None
+    header["onboard_date"] = None
+    header["bl_no"] = None
+    header["mbl_no"] = None
+    header["port_of_loading"] = None
+    header["port_of_discharge"] = None
+    header["volume"] = None
+    header["vessel"] = None
+    header["container_no"] = None
+    header["shipper"] = None
+
+    items = _galuh_extract_items(text)
+    if not items:
+        items = [{"description": None, "amount": None, "vat": None}]
+
+    return {"header": header, "items": items}
+
+
+register_supplier(
+    "GALUH", "PT. GALUH INTI BAHARI", detect_galuh, parse_galuh,
+    extract_grand_total=_galuh_extract_grand_total,
 )
