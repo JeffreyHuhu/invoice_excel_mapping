@@ -42,6 +42,47 @@ def _search(pattern: str, text: str) -> Optional[str]:
     return m.group(1).strip().rstrip(",").strip()
 
 
+# ---------------------------------------------------------------------------
+# 全系統統一的日期顯示格式：「DD Mon YYYY」，月份用英文縮寫 (Jan/Feb/…)。
+# 所有供應商的日期擷取函式最後都呼叫這個共用函式組字串，不要各自手動拼
+# "DD.MM.YYYY"，確保畫面顯示、匯出 Excel、跟正確答案比對三處的日期格式
+# 永遠一致 (比對邏輯見 extract_utils.normalize_value()，它會把『正確答案
+# Excel 裡的日期型態儲存格』也用同一個英文月份格式重新格式化再比對)。
+# ---------------------------------------------------------------------------
+_MONTH_ABBR_EN = [
+    "Jan", "Feb", "Mar", "Apr", "May", "Jun",
+    "Jul", "Aug", "Sep", "Oct", "Nov", "Dec",
+]
+
+
+def _format_date_en(day, month, year) -> Optional[str]:
+    """day/month/year (int 或數字字串) -> 'DD Mon YYYY'，例如 (2, 1, 2025)
+    -> '02 Jan 2025'。month 不在 1~12 範圍就回傳 None (呼叫端視為擷取失敗)。
+    """
+    try:
+        day_i, month_i, year_i = int(day), int(month), int(year)
+    except (TypeError, ValueError):
+        return None
+    if not 1 <= month_i <= 12:
+        return None
+    return f"{day_i:02d} {_MONTH_ABBR_EN[month_i - 1]} {year_i}"
+
+
+_MONTH_NAME_TO_NUM = {name.upper(): i + 1 for i, name in enumerate(_MONTH_ABBR_EN)}
+
+
+def _format_date_en_from_month_name(day, month_name, year) -> Optional[str]:
+    """day/year 為數字 (或數字字串)、month_name 為英文月份縮寫 (任意大小寫，
+    例如 'Aug'、'AUG')時使用；轉成統一的 'DD Mon YYYY' 格式。
+    """
+    if month_name is None:
+        return None
+    month_i = _MONTH_NAME_TO_NUM.get(str(month_name).strip().upper()[:3])
+    if month_i is None:
+        return None
+    return _format_date_en(day, month_i, year)
+
+
 # ===========================================================================
 # 供應商 1：DWIHARTA (海運帳單，Invoice + 費用明細表格)
 # ===========================================================================
@@ -124,7 +165,7 @@ def _dwiharta_parse_indo_date(text: Optional[str]) -> Optional[str]:
     month = INDO_MONTHS.get(month_name.lower())
     if not month:
         return text
-    return f"{int(day):02d}.{month:02d}.{year}"
+    return _format_date_en(day, month, year)
 
 
 def parse_dwiharta(text: str) -> Dict:
@@ -145,6 +186,15 @@ def parse_dwiharta(text: str) -> Dict:
             supplier_line = supplier_line[:stop_m.start()]
         header["supplier"] = supplier_line.strip()
 
+    # Shipper 欄位的值常常換行 (例如 "Shipper : SHANGHAI LIGHT INDUSTRY AND\n
+    # TEXTILE GROUP IMP. & EXP. CO.,LTD.; Container No. : ...")，不能用一般
+    # 欄位的 _DWIHARTA_STOP (遇到換行就停) 處理，這裡改用允許跨行的寫法，
+    # 抓到 "Container No." 前的所有文字，再把裡面的換行/多重空白收斂成
+    # 一個空白，還原成一行完整的出貨方名稱。
+    _shipper_m = re.search(r"Shipper\s*:\s*([\s\S]+?)\s*Container\s*No\.?\s*:", text)
+    if _shipper_m:
+        header["shipper"] = re.sub(r"\s+", " ", _shipper_m.group(1)).strip()
+
     items: List[Dict] = []
     for raw_line in text.splitlines():
         line = raw_line.strip()
@@ -154,9 +204,15 @@ def parse_dwiharta(text: str) -> Dict:
         if not m:
             continue
         amount_str = m.group("amount").replace(",", "")
+        vat_str = m.group("vat")
+        vat_val = None
+        if vat_str:
+            vat_str = vat_str.replace(",", "")
+            vat_val = int(vat_str) if vat_str.isdigit() else None
         items.append({
             "description": m.group("desc").strip(),
             "amount": int(amount_str) if amount_str.isdigit() else None,
+            "vat": vat_val,
         })
 
     return {"header": header, "items": items}
@@ -217,18 +273,27 @@ def _kn_clean_tracking_no(value: Optional[str]) -> Optional[str]:
     return re.sub(r"\s+", "", value.strip())
 
 
-# 費用明細行 (在 KN Sales Invoice 的 "CHARGE" 區塊裡)，例如：
-#   "OVERTIME CHARGES EXPORT 85.00 USD 1,521,098 7"
-# 格式：費用名稱 ... 外幣金額 USD 台幣/印尼幣金額 VAT代碼
+# 費用明細行 (在 KN Sales Invoice 的 "CHARGE" 區塊裡)，有兩種格式：
+#   1. 有外幣金額的："THC - ORIGIN 385.00 USD 7,173,967 7"
+#      格式：費用名稱 ... 外幣金額 USD 印尼幣金額 VAT代碼
+#   2. 只有印尼幣的（沒有外幣換算）："SECURITY FILING 700,000 7"
+#      格式：費用名稱 ... 印尼幣金額 VAT代碼
 # 這是「使用者真正要的 Description」，跟 Faktur Pajak (稅務發票) 上寫的
 # 那種概括性文字 (例如 "Domestic transport & ancillary services") 是兩回事：
 # 稅務發票的文字只是報稅用的統稱，帳單上實際列出的每筆費用名稱才是查核
-# 要比對的欄位。這裡用「結尾是 USD 金額+金額+VAT代碼」的格式辨識這種行，
-# 一張帳單若有多筆費用，會抓到多筆、各自展開成一列 (呼應 DWIHARTA
-# 「一筆費用一列」的設計)。
+# 要比對的欄位。這裡用「結尾是 (可選的外幣金額+USD) + 印尼幣金額 + VAT
+# 代碼」的格式辨識這種行，一張帳單若有多筆費用，會抓到多筆、各自展開成
+# 一列 (呼應 DWIHARTA「一筆費用一列」的設計)。VAT 代碼固定是單獨一個數字
+# (目前觀察到的樣本都是 "7")，不是金額的一部分——限定成單一位數字，避免
+# 誤吃到後面緊接著的其他數字 (例如貨櫃追蹤號碼 "1076 285 746" 被誤判成
+# 金額+VAT代碼)。金額部分也要求「英式千分位逗號」格式 (例如 "700,000")，
+# 不接受沒有逗號分隔的連續數字，這樣才不會誤抓到 PO 單號、提單號這類沒
+# 有千分位逗號、純數字黏在旁邊字母後面的雜訊行 (pdfplumber 有時會把側邊
+# 直排文字的單個字母併進旁邊的數字行)。
 _KN_CHARGE_LINE_PATTERN = re.compile(
-    r"^(?P<desc>[A-Z][A-Za-z0-9 /\-\.,()&]+?)\s+[\d,]+\.\d{2}\s*USD\s+"
-    r"(?P<amount>[\d,]+)\s+\d+\s*$",
+    r"^(?P<desc>[A-Z][A-Za-z0-9 /\-\.,()&]+?)\s+"
+    r"(?:[\d,]+\.\d{2}\s*[A-Z]{3}\s+)?"
+    r"(?P<amount>\d{1,3}(?:,\d{3})+)\s+\d\s*$",
     re.MULTILINE,
 )
 
@@ -260,16 +325,65 @@ def _kn_extract_charge_items(text: str) -> List[Dict]:
     return items
 
 
+# "CONSIGNEE SHIPPER" 這個區塊是左右兩欄並排、但 pdfplumber 抓文字時會把
+# 同一行的兩欄黏成一行 (中間只隔一個空白，不是兩個以上，沒辦法用「兩個
+# 空白就切開」那招拆開)，例如：
+#   "ASICS JAPAN CORPORATION THE LOOK (MACAO COMMERCIAL OFFSHORE"
+#   "7-2 MARUNOUCHI 2-CHOME, COMPANY LIMITED O/B PT. POUCHEN"
+# 這裡用一個技巧還原：帳單下面緊接著的 "NOTIFY" 區塊，常常跟 CONSIGNEE
+# 欄位是同一個收件人、逐行文字完全一樣 (地址寫兩次)，所以只要「NOTIFY
+# 每一行」剛好是「CONSIGNEE/SHIPPER 對應那一行」的開頭前綴，就能把前綴
+# 去掉、剩下的部分就是 SHIPPER 欄位那一行的文字；把每一行的 SHIPPER 片段
+# 接起來，再依照使用者的規則，取到「LIMITED」或「LTD」等公司型態字樣為
+# 止 (使用者確認：Shipper 公司全名只到這個字樣，後面接的是地址/備註，不
+# 算在內)。如果 NOTIFY 跟 CONSIGNEE 不是同一個收件人 (兩個區塊行數不同，
+# 或對不起來)，就代表這招用不上，回傳 None，呼叫端會改用其他方式 (沿用
+# 已經可靠抓到的 consignee 值)。
+_KN_LIMITED_WORD = re.compile(r"\bL(?:IMITED|TD\.?)\b", re.IGNORECASE)
+
+
+def _kn_extract_shipper_via_notify(text: str) -> Optional[str]:
+    block_m = re.search(r"CONSIGNEE SHIPPER\n((?:.+\n)+?)(?=NOTIFY\b)", text)
+    notify_m = re.search(r"NOTIFY\n((?:.+\n)+?)(?=FIRST VESSEL|Gov doc#)", text)
+    if not block_m or not notify_m:
+        return None
+    merged_lines = [ln for ln in block_m.group(1).split("\n") if ln.strip()]
+    notify_lines = [ln for ln in notify_m.group(1).split("\n") if ln.strip()]
+    if len(merged_lines) != len(notify_lines) or not merged_lines:
+        return None
+
+    fragments = []
+    for merged, notify_line in zip(merged_lines, notify_lines):
+        if not merged.startswith(notify_line):
+            return None
+        fragments.append(merged[len(notify_line):].strip())
+
+    shipper_text = " ".join(f for f in fragments if f)
+    limit_m = _KN_LIMITED_WORD.search(shipper_text)
+    if not limit_m:
+        return None
+    return re.sub(r"\s+", " ", shipper_text[: limit_m.end()]).strip()
+
+
 def parse_kuehne_nagel(text: str) -> Dict:
     header: Dict[str, Optional[str]] = {}
 
     header["supplier"] = _search(r"Pengusaha Kena Pajak:\s*\n\s*Nama\s*:\s*(.+)", text)
 
     header["consignee"] = _search(rf"INVOICE TO\s*\n\s*(.+?){_KN_STOP}", text)
+    # Sales Invoice 頁的 "CONSIGNEE SHIPPER" 這個區塊裡，SHIPPER 欄位有時
+    # 跟上面的 INVOICE TO (header["consignee"]) 是同一家公司 (觀察到的部分
+    # 樣本都是 PT. POU YUEN INDONESIA，這裡的 CONSIGNEE 欄位其實是另一個
+    # 不同欄位，貨物真正收件地，不是我們的 consignee 標準欄位)，但不是每
+    # 張都這樣 (例如這家貨主跟收件人是不同公司時)，所以優先用
+    # _kn_extract_shipper_via_notify() 真正解析這個左右並排的欄位；解析不
+    # 出來時才退回沿用 consignee 值。
+    header["shipper"] = _kn_extract_shipper_via_notify(text) or header["consignee"]
 
-    m = re.search(r"INVOICE NO\.\s*/\s*DATE\s+(\S+)\s+(\d{1,2}\.\d{1,2}\.\d{4})", text)
+    m = re.search(r"INVOICE NO\.\s*/\s*DATE\s+(\S+)\s+(\d{1,2})\.(\d{1,2})\.(\d{4})", text)
     if m:
-        header["invoice_no"], header["invoice_date"] = m.group(1), m.group(2)
+        header["invoice_no"] = m.group(1)
+        header["invoice_date"] = _format_date_en(m.group(2), m.group(3), m.group(4))
 
     header["bl_no"] = _kn_clean_tracking_no(_search(rf"KN TRACKING NO\.\s*(.+?){_KN_STOP}", text))
     # 注意：Order No. 欄位對應的是「COMMERCIAL INVOICE NUMBER」(例如
@@ -277,20 +391,79 @@ def parse_kuehne_nagel(text: str) -> Dict:
     # (例如 VB26072003093319) —— 這兩個編號在版面上前後相鄰、很容易搞混，
     # 但使用者核對過的正確答案是以 COMMERCIAL INVOICE NUMBER 為準。
     header["order_no"] = _search(rf"COMMERCIAL INVOICE NUMBER\s*\n\s*(.+?){_KN_STOP}", text)
-    header["vessel"] = _search(rf"VESSEL NAME\s*:\s*(.+?){_KN_STOP}", text)
+    # Vessel 欄位使用者確認要「船名+航次」(例如 "VANCOUVER 058N")，不是只
+    # 取船名；VESSEL NAME/VOYAGE 兩個欄位左右並排在同一行 ("VESSEL NAME :
+    # VANCOUVER VOYAGE : 058N")，這裡兩個都抓出來、中間用一個空白接起來。
+    _kn_vessel_m = re.search(r"VESSEL NAME\s*:\s*(.+?)\s+VOYAGE\s*:\s*(.+?)(?=\n|$)", text)
+    if _kn_vessel_m:
+        header["vessel"] = f"{_kn_vessel_m.group(1).strip()} {_kn_vessel_m.group(2).strip()}"
+    else:
+        header["vessel"] = _search(rf"VESSEL NAME\s*:\s*(.+?){_KN_STOP}", text)
     header["port_of_loading"] = _kn_clean_port(_search(rf"P\.\s*OF LOADING\s*:\s*(.+?){_KN_STOP}", text))
     header["port_of_discharge"] = _kn_clean_port(_search(rf"P\.\s*OF DISCHARGE\s*:\s*(.+?){_KN_STOP}", text))
-    header["onboard_date"] = _search(rf"ETD/ATD\s*:\s*(.+?){_KN_STOP}", text)
-    header["arrive_date"] = _search(rf"ETA/ATA\s*:\s*(.+?){_KN_STOP}", text)
+    _kn_etd_m = re.search(r"ETD/ATD\s*:\s*(\d{1,2})\.(\d{1,2})\.(\d{4})", text)
+    header["onboard_date"] = (
+        _format_date_en(*_kn_etd_m.groups()) if _kn_etd_m else None
+    )
+    _kn_eta_m = re.search(r"ETA/ATA\s*:\s*(\d{1,2})\.(\d{1,2})\.(\d{4})", text)
+    header["arrive_date"] = (
+        _format_date_en(*_kn_eta_m.groups()) if _kn_eta_m else None
+    )
 
     m2 = re.search(r"AS PER ATTACHED\s+([\d,\.]+)\s+([\d,\.]+)", text)
     header["volume"] = m2.group(2) if m2 else None
+    # 注意：上面這個「整張帳單共用一個 Volume」只適用於沒有逐櫃拆分費用的
+    # 帳單 (例如只有一筆 OVERTIME CHARGES EXPORT 的簡單帳單)。如果帳單裡有
+    # 「CONTAINER POSITIONING EXPORT」這種逐個貨櫃分開收費的項目，使用者的
+    # 正確答案改用「每個貨櫃自己的櫃型代碼」(例如 "1X40GE") 當那幾筆費用
+    # 各自的 Volume，其餘費用列則留空，不套用整張帳單共用的材積總量——這裡
+    # 先記下有沒有這種逐櫃費用，等下面抓到 items 之後再決定要不要蓋掉這個
+    # 預設值 (見下方 _kn_container_positioning 區塊)。
 
     # 這種帳單本來就沒有海運提單/貨櫃資訊，留空給 expand_to_rows() 補 N/A
     header["mbl_no"] = None
     header["container_no"] = None
 
     items = _kn_extract_charge_items(text)
+    # 這家供應商的 PDF 常常把同一張 Sales Invoice「整份內容」重複印兩次
+    # (ORIGINAL 跟 DIGITAL COPY 各一份，直排在頁面兩側當水印文字，肉眼看
+    # 不出來，但 pdfplumber 把兩份內容前後接在一起)，導致費用明細行數量
+    # 剛好是真實筆數的兩倍、且前後兩半完全一樣。這裡偵測「整個清單剛好可
+    # 以切成前後兩半、且兩半逐筆完全相同」時，只留前半，避免每筆費用都被
+    # 誤判成重複兩筆；如果不是這種剛好對半重複的情況 (例如真的有兩筆金額
+    # 剛好相同的費用)，兩半不會逐筆完全相等，不會被誤刪。
+    if items and len(items) % 2 == 0:
+        half = len(items) // 2
+        if items[:half] == items[half:]:
+            items = items[:half]
+
+    # 「CONTAINER POSITIONING EXPORT」費用行下面緊接著的明細行會寫出這筆
+    # 費用對應的貨櫃型態，例如 "1 40' GE X 23 USD = 23.00 USD" 代表一個
+    # 40 呎 GE (General Export) 櫃，使用者的正確答案把它轉成 "1X40GE" 這種
+    # 代碼格式填在 Volume 欄位 (只填在這幾筆費用列，不是整張帳單共用一個
+    # 值)。這裡依照文件順序抓出每一個這種代碼，跟 items 裡同樣依文件順序
+    # 出現的 CONTAINER POSITIONING EXPORT 項目一一對應；跟費用明細行一樣，
+    # 整份文字常常重複印兩次，所以也套用同樣的「對半相同就只留前半」處理。
+    _kn_container_codes = [
+        f"1X{num}{kind}"
+        for num, kind in re.findall(r"1\s+(\d+)'\s*([A-Z]+)\s*X\s*[\d.]+\s*USD\s*=", text)
+    ]
+    if _kn_container_codes and len(_kn_container_codes) % 2 == 0:
+        _half = len(_kn_container_codes) // 2
+        if _kn_container_codes[:_half] == _kn_container_codes[_half:]:
+            _kn_container_codes = _kn_container_codes[:_half]
+    if _kn_container_codes:
+        # 有逐櫃費用時，整張帳單共用的材積總量就不適用了 (正確答案這幾張
+        # 帳單的其他費用列 Volume 欄位都是留空，不是填整張帳單的材積總量)。
+        header["volume"] = None
+        _kn_code_iter = iter(_kn_container_codes)
+        for item in items:
+            if item.get("description") == "CONTAINER POSITIONING EXPORT":
+                try:
+                    item["volume"] = next(_kn_code_iter)
+                except StopIteration:
+                    break
+
     if not items:
         # 備援：真的抓不到任何費用明細行時，退回用稅務發票 (Faktur Pajak)
         # 的概括描述+總金額，至少不要整張全空。
@@ -299,6 +472,24 @@ def parse_kuehne_nagel(text: str) -> Dict:
             r"Harga Jual\s*/\s*Penggantian\s*/\s*Uang Muka\s*/\s*Termin\s+([\d.,]+)", text
         )
         items = [{"description": description, "amount": _kn_clean_amount(amount_raw)}]
+
+    # VAT：費用明細行本身 (例如 "OVERTIME CHARGES EXPORT 85.00 USD
+    # 1,521,098 7") 結尾那個數字只是 VAT 稅率代碼的註腳編號 (對照下面
+    # "7: 11.00% GROSS / 12% NET VAT..." 的說明)，不是稅額金額；真正的
+    # VAT 金額要從 "SUBTOTAL IDR 1,521,098 167,321" 這一行抓，跟費用明細
+    # 金額並排在同一行 (兩個都是英式千分位逗號數字)。
+    #
+    # 這張帳單無論有幾筆費用明細，VAT 永遠只有「一個」整張帳單的總稅額
+    # (不是每筆費用各自的稅額)，所以不能像其他供應商一樣把 vat 塞進某一
+    # 筆費用明細的 dict 裡 (塞進第一筆會讓人誤以為那筆費用才有稅額)。使用
+    # 者更新後的正確答案範本也是這樣處理：額外「多一列」只填 VAT 金額，
+    # Description/Amount 都留空——因此這裡額外附加一筆「只有 vat、沒有
+    # description/amount」的 item，讓 expand_to_rows() 展開成獨立的一列，
+    # 跟正確答案的列結構對齊。
+    _kn_subtotal_m = re.search(r"SUBTOTAL\s+IDR\s+[\d,]+\s+([\d,]+)", text)
+    if _kn_subtotal_m:
+        vat_amount = _kn_clean_amount_comma_thousands(_kn_subtotal_m.group(1))
+        items.append({"description": None, "amount": None, "vat": vat_amount})
 
     return {"header": header, "items": items}
 
@@ -357,7 +548,7 @@ def _indo_add_space_after_pt(value: Optional[str]) -> Optional[str]:
 
 
 def _indo_parse_flight_date(vessel_value: Optional[str]) -> Optional[str]:
-    """從 FLIGHT 欄位尾碼反推日期，例如 'CX 777/01092026' -> '01/09/2026'
+    """從 FLIGHT 欄位尾碼反推日期，例如 'CX 777/01092026' -> '01 Sep 2026'
     (尾碼 8 碼數字是 DDMMYYYY)。抓不到就回傳 None，讓 expand_to_rows()
     補 N/A。
     """
@@ -367,7 +558,7 @@ def _indo_parse_flight_date(vessel_value: Optional[str]) -> Optional[str]:
     if not m:
         return None
     day, month, year = m.groups()
-    return f"{day}/{month}/{year}"
+    return _format_date_en(day, month, year)
 
 
 def _indo_clean_amount(text: Optional[str]) -> Optional[int]:
@@ -415,7 +606,10 @@ def parse_indoprostime(text: str) -> Dict:
     header: Dict[str, Optional[str]] = {}
 
     header["invoice_no"] = _search(r"Number\s*:\s*(\d+)", text)
-    header["invoice_date"] = _search(r"Date\s*:\s*(\d{1,2}/\d{1,2}/\d{4})", text)
+    _indo_inv_date_m = re.search(r"Date\s*:\s*(\d{1,2})/(\d{1,2})/(\d{4})", text)
+    header["invoice_date"] = (
+        _format_date_en(*_indo_inv_date_m.groups()) if _indo_inv_date_m else None
+    )
     header["supplier"] = _search(rf"A/C\s*name\s*:\s*(.+?){_INDO_STOP}", text)
     header["consignee"] = _indo_add_space_after_pt(
         _search(rf"\bCNEE\s*:\s*(.+?){_INDO_STOP}", text)
@@ -497,7 +691,7 @@ def _maersk_parse_date(text: Optional[str]) -> Optional[str]:
     month = _EN_MONTHS_ABBR.get(month_abbr.lower())
     if not month:
         return text
-    return f"{int(day):02d}.{month:02d}.{year}"
+    return _format_date_en(day, month, year)
 
 
 def _maersk_clean_amount_id(text: Optional[str]) -> Optional[int]:
@@ -538,7 +732,14 @@ def parse_maersk(text: str) -> Dict:
     header: Dict[str, Optional[str]] = {}
 
     header["invoice_no"] = _search(r"\bINVOICE\s+(\d+)\b", text)
-    header["invoice_date"] = _search(r"Invoice\s*Date\s*:\s*(\S+)", text)
+    _maersk_inv_m = re.search(r"Invoice\s*Date\s*:\s*(\d{1,2})\.([A-Za-z]{3,})\.(\d{4})", text)
+    header["invoice_date"] = (
+        _format_date_en_from_month_name(
+            _maersk_inv_m.group(1), _maersk_inv_m.group(2), _maersk_inv_m.group(3)
+        )
+        if _maersk_inv_m
+        else _search(r"Invoice\s*Date\s*:\s*(\S+)", text)
+    )
     header["supplier"] = _search(r"Issued by:\s*\n(.+)", text)
     header["consignee"] = _search(rf"Sold\s*to\s*:\s*(.+?){_MAERSK_STOP}", text)
     header["order_no"] = _search(r"Commercial Invoice No\s*:\s*(\S+)", text)
@@ -632,7 +833,7 @@ def _hyper_parse_date(text: Optional[str]) -> Optional[str]:
     month = _EN_MONTHS_FULL.get(month_name.lower())
     if not month:
         return text
-    return f"{int(day):02d}.{month:02d}.{year}"
+    return _format_date_en(day, month, year)
 
 
 def _hyper_clean_amount_id(text: Optional[str]) -> Optional[int]:
@@ -812,7 +1013,14 @@ def parse_yje(text: str) -> Dict:
     header: Dict[str, Optional[str]] = {}
 
     header["invoice_no"] = _search(r"Inv\.?\s*No\s*[:：]\s*(\S+)", text)
-    header["invoice_date"] = _search(r"Inv\s*Date\s*[:：]\s*(\S+)", text)
+    _yje_inv_m = re.search(r"Inv\s*Date\s*[:：]\s*(\d{4})-([A-Za-z]{3,})-(\d{1,2})", text)
+    header["invoice_date"] = (
+        _format_date_en_from_month_name(
+            _yje_inv_m.group(3), _yje_inv_m.group(2), _yje_inv_m.group(1)
+        )
+        if _yje_inv_m
+        else _search(r"Inv\s*Date\s*[:：]\s*(\S+)", text)
+    )
     header["supplier"] = _search(r"AGENT\s*[:：]\s*(.+)$", text)
     header["consignee"] = _yje_clean_consignee(_search(r"TO\s*[:：]\s*(.+)$", text))
     header["bl_no"] = _search(r"HAWB\s*[:：]\s*(\S+)", text)
@@ -892,7 +1100,7 @@ def _tata_parse_date(text: Optional[str]) -> Optional[str]:
     if not m:
         return text
     year, month, day = m.groups()
-    return f"{int(day):02d}.{int(month):02d}.{year}"
+    return _format_date_en(day, month, year)
 
 
 # 費用明細行，例如 "1 GUDANG FEE Rp 159,840" 或
@@ -935,6 +1143,7 @@ def parse_tata_classic(text: str) -> Dict:
     header["vessel"] = _search(rf"\bFlight\s*:\s*(.+?){_TATA_STOP}", text)
     header["volume"] = _search(rf"\bQTY\s*:\s*(.+?){_TATA_STOP}", text)
     header["port_of_loading"] = _search(rf"\bORIGIN\s*:\s*(.+?){_TATA_STOP}", text)
+    header["shipper"] = _search(rf"\bShipper\s*:\s*(.+?){_TATA_STOP}", text)
 
     # 注意：不能用 r"\bDate\s*:\s*..." 這種寬鬆寫法，因為同一頁最上方
     # "INV Date :2026-08-24 15:55:13" 也符合這個樣式 (字面上 "Date :" 前面
@@ -1005,7 +1214,7 @@ def _tata_receipt_parse_date(text: Optional[str]) -> Optional[str]:
     if not m:
         return None
     day, month, year = m.groups()
-    return f"{int(day):02d}.{int(month):02d}.{year}"
+    return _format_date_en(day, month, year)
 
 
 def _tata_receipt_clean_amount(text: Optional[str]) -> Optional[int]:
@@ -1240,7 +1449,7 @@ def _trans_parse_date(text: Optional[str]) -> Optional[str]:
     month = _EN_MONTHS_ABBR.get(month_abbr.lower())
     if not month:
         return text
-    return f"{int(day):02d}.{month:02d}.{year}"
+    return _format_date_en(day, month, year)
 
 
 def _trans_clean_amount(text: Optional[str]) -> Optional[int]:
@@ -1252,12 +1461,17 @@ def _trans_clean_amount(text: Optional[str]) -> Optional[int]:
 
 
 def _trans_clean_desc(text: Optional[str]) -> Optional[str]:
-    """去掉貨櫃呎吋標示裡的引號字元 (例如 '... 40"' -> '... 40')，正確答案
-    是不帶引號的寫法。
+    """單純去除前後空白。
+
+    注意：這裡原本會把貨櫃呎吋標示的引號字元拿掉 (例如 '... 40"' ->
+    '... 40')，但這次使用者新增 VAT/Shipper 欄位時一併送來的新版正確答案
+    (sample1/sample2 的 'LCL Lokal Serang - GSI-2 40"'、'GSI-2 FCL Trucking
+    40"') 都保留了引號，跟舊版規則相反，所以改成照抄 PDF 原文、不拿掉
+    引號。
     """
     if not text:
         return text
-    return text.replace('"', "").strip()
+    return text.strip()
 
 
 def _trans_extract_items(text: str) -> List[Dict]:
@@ -1286,14 +1500,16 @@ def _trans_extract_items(text: str) -> List[Dict]:
                 if looks_like_suffix:
                     do_no = do_no + nxt
                     i += 1  # 續行已經併進上一筆，跳過不要再單獨處理一次
-            # 注意：Amount 欄位對應的是「Unit Price」(單價) 那一欄，不是
-            # 「Total Price」(單價 x 數量)——之前送測的樣本數量都剛好是 1，
-            # 單價跟總價數字一樣看不出差別；這次數量有一筆是 2 (見下面簡化
-            # 版費用行)，正確答案填的是單價 (300.000) 不是總價 (600.000)，
-            # 才發現真正要抓的是 Unit Price 這一欄。
+            # 注意：Amount 欄位對應的是「Total Price」(單價 x 數量) 那一欄，
+            # 不是「Unit Price」(單價)——先前有一版錯以為是單價，是因為之前
+            # 送測的樣本數量都剛好是 1，單價跟總價數字一樣看不出差別；這次
+            # 使用者確認 Handling GSI-2 那筆 (數量 2、單價 300.000、總價
+            # 600.000) 正確答案填的是總價 (600.000)，而且用 Sub Total 反推
+            # 也對得起來 (Sub Total = 所有費用明細的總價加總，不是單價加
+            # 總)，才確認真正要抓的是 Total Price 這一欄。
             items.append({
                 "description": _trans_clean_desc(m.group("desc")),
-                "amount": _trans_clean_amount(m.group("unit_price")),
+                "amount": _trans_clean_amount(m.group("total")),
                 "order_no": do_no.strip(),
             })
             i += 1
@@ -1303,11 +1519,37 @@ def _trans_extract_items(text: str) -> List[Dict]:
         if m2:
             items.append({
                 "description": _trans_clean_desc(m2.group("desc")),
-                "amount": _trans_clean_amount(m2.group("unit_price")),
+                "amount": _trans_clean_amount(m2.group("total")),
                 "order_no": None,
             })
         i += 1
 
+    items.extend(_trans_extract_cost_items(text))
+    return items
+
+
+# 有些帳單在費用明細表格下面、Sub Total 之前，另外有一個「Cost Description
+# Total」小表格列出額外的雜費 (例如吊櫃/堆存費)，之前的版本完全沒有把這幾
+# 筆費用列進 Excel。格式很單純：費用名稱 + 金額 (印尼式千分位)，跟上面主
+# 表格「數量+單價+總價」三欄的格式不同，只有一個數字，所以用一個獨立、更
+# 簡單的規則抓，不會跟上面的完整版/簡化版費用行搶著比對同一行。這幾筆費用
+# 沒有對應的 DO No.，Order No. 留 None 讓 expand_to_rows() 補 N/A。
+_TRANS_COST_ITEM_PATTERN = re.compile(r"^(?P<desc>[A-Za-z][A-Za-z ]+?)\s+(?P<amount>[\d.]+)\s*$")
+
+
+def _trans_extract_cost_items(text: str) -> List[Dict]:
+    m = re.search(r"Cost\s*Description\s*Total\s*\n((?:.+\n)*?)(?=Sub\s*Total\b)", text)
+    if not m:
+        return []
+    items: List[Dict] = []
+    for line in m.group(1).split("\n"):
+        line_m = _TRANS_COST_ITEM_PATTERN.match(line.strip())
+        if line_m:
+            items.append({
+                "description": _trans_clean_desc(line_m.group("desc")),
+                "amount": _trans_clean_amount(line_m.group("amount")),
+                "order_no": None,
+            })
     return items
 
 
@@ -1327,18 +1569,46 @@ def parse_trans(text: str) -> Dict:
     header["supplier"] = _search(r"^(PT\.\s*TRANS\s*DAYA\s*PRIMA)", text)
     header["port_of_discharge"] = _search(r"P\.O\.D\s*:\s*(.+?)\s*$", text)
 
-    # 這種帳單沒有到達日/開船日/提單/主提單/啟運港/材積/船名/貨櫃資訊，留空
-    # 給 expand_to_rows() 補 N/A。Order No. 現在是逐筆費用各自帶自己的值
+    # 大部分這種帳單右下角沒有船名/貨櫃資訊 (整頁找不到 "Vessel :"/"Cont No
+    # :" 這兩個關鍵字)，留 None 讓 expand_to_rows() 補 N/A；少數有海運貨櫃
+    # 的帳單則會印在 Remarks 旁邊一小塊 "Vessel : PHEN BASIN Flight/Voy No.
+    # : 125N" + "Cont No : OOCU7801321"，這裡才需要真的抓出來。Vessel 欄位
+    # 使用者的正確答案是「船名+航次」接在一起 (跟 KUEHNE NAGEL 同一套規則)。
+    _trans_vessel_m = re.search(
+        r"Vessel\s*:\s*(.+?)\s+Flight/Voy No\.\s*:\s*(.+?)(?=\s+VAT\b|\n|$)", text
+    )
+    header["vessel"] = (
+        f"{_trans_vessel_m.group(1).strip()} {_trans_vessel_m.group(2).strip()}"
+        if _trans_vessel_m else None
+    )
+    # Cont No 欄位有時後面還接著第二個貨櫃號碼 (另起一行)，正確答案只取
+    # 「Cont No :」後面緊接著的第一個貨櫃號碼，不含後面額外多出來的那個。
+    header["container_no"] = _search(r"Cont No\s*:\s*(.+?)\s+Other Cost", text)
+
+    # 這種帳單沒有到達日/開船日/提單/主提單/啟運港/材積/Shipper 資訊 (帳單
+    # 上完全沒有印這些欄位，不是抓不到，是本來就不適用)，留空給
+    # expand_to_rows() 補 N/A。Order No. 現在是逐筆費用各自帶自己的值
     # (見 _trans_extract_items())，這裡的抬頭預設值留 None，沒有費用明細
     # 帶值時才會用到 (整張帳單抓不到任何費用行的防禦性情況)。
     for code in ("arrive_date", "onboard_date", "bl_no", "mbl_no",
-                 "port_of_loading", "volume", "vessel", "container_no",
-                 "order_no"):
+                 "port_of_loading", "volume", "shipper", "order_no"):
         header[code] = None
 
     items = _trans_extract_items(text)
     if not items:
         items = [{"description": None, "amount": None}]
+
+    # VAT：跟 KUEHNE NAGEL 一樣，這種帳單無論有幾筆費用明細，VAT 永遠只有
+    # 「一個」整張帳單的總稅額 (印在 "VAT (11%) 327.250" 這一行)，不是每筆
+    # 費用各自的稅額，所以不塞進某一筆費用明細裡，額外附加一筆「只有 vat、
+    # 沒有 description/amount/order_no」的 item，展開成獨立的一列，Order
+    # No. 留 None 讓 expand_to_rows() 補 N/A (這一列本來就沒有對應的 DO
+    # No.)。
+    vat_raw = _search(r"VAT\s*\(\d+%\)\s*([\d.,]+)", text)
+    vat_amount = _trans_clean_amount(vat_raw)
+    if vat_amount is not None:
+        items.append({"description": None, "amount": None, "order_no": None,
+                      "vat": vat_amount})
 
     return {"header": header, "items": items}
 
@@ -1403,7 +1673,7 @@ def _femaria_parse_date(text: Optional[str]) -> Optional[str]:
     if not m:
         return text
     year, month, day = m.groups()
-    return f"{int(day):02d}.{int(month):02d}.{year}"
+    return _format_date_en(day, month, year)
 
 
 def _femaria_clean_amount(text: Optional[str]) -> Optional[int]:
@@ -1556,7 +1826,7 @@ def _express_parse_long_date(text: Optional[str]) -> Optional[str]:
     month = _EN_MONTHS_FULL.get(month_name.lower())
     if not month:
         return text
-    return f"{int(day):02d}.{month:02d}.{year}"
+    return _format_date_en(day, month, year)
 
 
 def _express_parse_item_date(text: Optional[str]) -> Optional[str]:
@@ -1572,7 +1842,7 @@ def _express_parse_item_date(text: Optional[str]) -> Optional[str]:
     month = _EN_MONTHS_ABBR.get(month_abbr.lower())
     if not month:
         return text
-    return f"{int(day):02d}.{month:02d}.20{year_2digit}"
+    return _format_date_en(day, month, f"20{year_2digit}")
 
 
 def _express_clean_amount(text: Optional[str]) -> Optional[int]:
@@ -1762,6 +2032,24 @@ def _yje_tata_extract_total(text: str) -> Optional[int]:
     return None
 
 
+def _trans_extract_total(text: str) -> Optional[int]:
+    """注意：TRANS_DAYA_PRIMA 是 multi_page 供應商，text 是『一頁』的文字。
+
+    這裡要跟系統擷取出來的「所有費用明細加總」(不含 VAT 那一列) 互相核對，
+    但帳單上的 "Sub Total" 只是主費用表格 (Service Description 那個表格)
+    的未稅小計，不包含 "Cost Description" 那個小表格裡的額外雜費 (例如
+    Biaya LOLO/Biaya Penumpukan)——這些雜費另外加總成 "Other Cost" 這個
+    獨立欄位，沒有雜費的帳單這裡會印 "Other Cost 0"。所以這裡要用
+    「Sub Total + Other Cost」才會跟 (主費用 + Cost Description 費用) 的
+    加總對得起來，單用 Sub Total 核對，有雜費的帳單一定會被誤判成不一致。
+    """
+    sub_total = _trans_clean_amount(_search(r"Sub\s*Total\s+([\d.,]+)", text))
+    other_cost = _trans_clean_amount(_search(r"Other\s*Cost\s+([\d.,]+)", text))
+    if sub_total is None:
+        return None
+    return sub_total + (other_cost or 0)
+
+
 def _femaria_extract_total(text: str) -> Optional[int]:
     # "Jumlah Transaksi : 7 Total : 7.499.546,00" 跟 "Total\nJumlah
     # Transaksi : 10 86.999.502,00" 兩種排版都有出現過 ("Total" 字樣位置
@@ -1798,8 +2086,10 @@ def _evergreen_extract_total(text: str) -> Optional[int]:
     (獨立一行、只有 "IDR 數字") 跟 "VAT IDR 數字" 兩個數字，未稅總額 =
     含稅總額 - VAT。
     """
-    grand_total = _evergreen_clean_amount(_search(r"^IDR\s+([\d,]+)\s*$", text))
-    vat = _evergreen_clean_amount(_search(r"VAT\s+IDR\s+([\d,]+)", text))
+    grand_total = _evergreen_clean_amount(
+        _search(r"^IDR\s+([\d,]+(?:\.\d+)?)\s*$", text)
+    )
+    vat = _evergreen_clean_amount(_search(r"VAT\s+IDR\s+([\d,]+(?:\.\d+)?)", text))
     if grand_total is None or vat is None:
         return None
     return grand_total - vat
@@ -1832,7 +2122,7 @@ register_supplier(
 )
 register_supplier(
     "TRANS_DAYA_PRIMA", "PT. TRANS DAYA PRIMA", detect_trans, parse_trans,
-    multi_page=True,
+    multi_page=True, extract_total=_trans_extract_total,
 )
 register_supplier(
     "FEMARIA", "PT. FEMARIA BUANA CARGO", detect_femaria, parse_femaria,
@@ -1878,7 +2168,7 @@ def _pan_parse_date(text: Optional[str]) -> Optional[str]:
     month = _EN_MONTHS_ABBR.get(month_abbr.lower())
     if not month:
         return text
-    return f"{int(day):02d}.{month:02d}.{year}"
+    return _format_date_en(day, month, year)
 
 
 def _pan_clean_amount(text: Optional[str]) -> Optional[int]:
@@ -2135,7 +2425,7 @@ def _dhl_parse_date(text: Optional[str]) -> Optional[str]:
     if not m:
         return text
     day, month, year = m.groups()
-    return f"{int(day):02d}.{int(month):02d}.{year}"
+    return _format_date_en(day, month, year)
 
 
 def _dhl_clean_amount(text: Optional[str]) -> Optional[int]:
@@ -2491,7 +2781,7 @@ def _dsv_parse_date(text: Optional[str]) -> Optional[str]:
     month = _EN_MONTHS_ABBR.get(month_abbr.lower())
     if not month:
         return text
-    return f"{int(day):02d}.{month:02d}.20{year_2digit}"
+    return _format_date_en(day, month, f"20{year_2digit}")
 
 
 def _dsv_clean_amount(text: Optional[str]) -> Optional[int]:
@@ -2508,6 +2798,10 @@ def _dsv_extract_items(text: str) -> List[Dict]:
         items.append({
             "description": m.group("desc").strip(),
             "amount": _dsv_clean_amount(m.group("amount")),
+            # 費用明細行裡 "PPN IN IDR" 這一欄就是這筆費用的稅額 (VAT)，
+            # 跟 "CHARGES IN IDR" (amount) 並排在同一行，_DSV_ITEM_PATTERN
+            # 本來就有抓這個群組，只是先前沒有用上。
+            "vat": _dsv_clean_amount(m.group("ppn")),
         })
     return items
 
@@ -2527,6 +2821,15 @@ def parse_dsv(text: str) -> Dict:
     else:
         header["consignee"] = None
         header["invoice_date"] = None
+
+    # "ULTIMATE SHIPPER" 跟 "ULTIMATE CONSIGNEE" 兩欄的名稱是左右並排、
+    # 兩欄中間沒有明顯分隔符號 (pdfplumber 抽取後變成同一行文字直接黏在
+    # 一起，例如 "PT. GLOSTAR INDONESIA ADIDAS SPOR MALZEMLERI...")，沒辦
+    # 法單純用正則表達式切開兩欄。但觀察到的樣本裡，ULTIMATE SHIPPER 的值
+    # 每一張都跟最上面「帳單寄送對象」(也就是 header["consignee"]) 完全
+    # 一樣 (都是同一家委任 DSV 出貨的公司)，所以直接沿用已經可靠抓到的
+    # consignee 值，不用再另外處理那兩欄黏在一起的文字。
+    header["shipper"] = header["consignee"]
 
     header["order_no"] = _search(r"OWNER'S REFERENCE\s*\n\s*(\S+)", text)
 
@@ -2617,38 +2920,46 @@ def _evergreen_parse_yyyymmdd(text: Optional[str]) -> Optional[str]:
     if not m:
         return None
     year, month, day = m.groups()
-    return f"{day}.{month}.{year}"
+    return _format_date_en(day, month, year)
 
 
 def _evergreen_parse_yyyymmdd_slash(text: Optional[str]) -> Optional[str]:
-    """'20260701' (YYYYMMDD) -> '2026/07/01'。
+    """'20260701' (YYYYMMDD) -> '01 Jul 2026'。
 
-    這家供應商正確答案 Excel 裡 arrive_date (ETD/ETA) 這一格是「純文字」
-    'YYYY/MM/DD'，不是像同一列 invoice_date 那樣的 Excel 日期型態儲存格
-    (normalize_value() 只會把「日期型態」的儲存格轉成 'DD.MM.YYYY' 再比對，
-    純文字儲存格不會被重新解析格式，所以要直接輸出跟正確答案一模一樣的
-    'YYYY/MM/DD' 文字寫法，才比對得起來)。"""
+    這家供應商正確答案 Excel 裡 arrive_date (ETD/ETA) 這一格過去是「純
+    文字」'YYYY/MM/DD' (不是 Excel 日期型態儲存格)，為了配合全系統統一
+    改成「月份英文縮寫」的顯示格式，已經請使用者把這一格也改成跟其他
+    日期欄位一樣的 'DD Mon YYYY' 文字寫法，所以這裡直接沿用跟
+    _evergreen_parse_yyyymmdd() 一樣的共用格式化函式即可。"""
     if not text:
         return None
     m = re.match(r"(\d{4})(\d{2})(\d{2})\s*$", text.strip())
     if not m:
         return None
     year, month, day = m.groups()
-    return f"{year}/{month}/{day}"
+    return _format_date_en(day, month, year)
 
 
 def _evergreen_clean_amount(text: Optional[str]) -> Optional[int]:
-    """英式數字 '11,562,850' (逗號千分位) -> 11562850。"""
+    """英式數字 '11,562,850' 或 '4,660,097.00' (逗號千分位，可能有小數點)
+    -> 11562850 / 4660097。小數部分是整數金額就轉成 int，不是整數才保留
+    小數 (目前觀察到的樣本小數都是 .00，但以防萬一仍支援非整數金額)。
+    """
     if not text:
         return None
     text = text.strip().replace(",", "")
-    return int(text) if text.isdigit() else None
+    try:
+        num = float(text)
+    except ValueError:
+        return None
+    return int(num) if num.is_integer() else num
 
 
-# 費用明細行，例如 "OCEAN FREIGHT IDR 11,562,850"。VAT 這一行 (稅金) 不算
+# 費用明細行，例如 "OCEAN FREIGHT IDR 11,562,850" 或 "ALL IN LOCAL CHARGES
+# IDR 4,660,097.00" (金額後面可能有 ".00" 小數)。VAT 這一行 (稅金) 不算
 # 進費用明細 (正確答案 Excel 沒有列這一筆)，用負向前瞻排除。
 _EVERGREEN_ITEM_PATTERN = re.compile(
-    r"^(?!VAT\b)(?P<desc>[A-Z][A-Z /]+?)\s+IDR\s+(?P<amount>[\d,]+)\s*$",
+    r"^(?!VAT\b)(?P<desc>[A-Z][A-Z /]+?)\s+IDR\s+(?P<amount>[\d,]+(?:\.\d+)?)\s*$",
     re.MULTILINE,
 )
 

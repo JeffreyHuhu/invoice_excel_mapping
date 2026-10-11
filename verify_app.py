@@ -100,6 +100,7 @@ HEADER_DISPLAY_FIELDS = [
     ("volume", "材積"),
     ("vessel", "船名"),
     ("container_no", "貨櫃號碼"),
+    ("shipper", "出貨方"),
 ]
 ITEM_DISPLAY_FIELDS = [
     ("description", "費用名稱"),
