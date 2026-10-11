@@ -1461,12 +1461,17 @@ def _trans_clean_amount(text: Optional[str]) -> Optional[int]:
 
 
 def _trans_clean_desc(text: Optional[str]) -> Optional[str]:
-    """去掉貨櫃呎吋標示裡的引號字元 (例如 '... 40"' -> '... 40')，正確答案
-    是不帶引號的寫法。
+    """單純去除前後空白。
+
+    注意：這裡原本會把貨櫃呎吋標示的引號字元拿掉 (例如 '... 40"' ->
+    '... 40')，但這次使用者新增 VAT/Shipper 欄位時一併送來的新版正確答案
+    (sample1/sample2 的 'LCL Lokal Serang - GSI-2 40"'、'GSI-2 FCL Trucking
+    40"') 都保留了引號，跟舊版規則相反，所以改成照抄 PDF 原文、不拿掉
+    引號。
     """
     if not text:
         return text
-    return text.replace('"', "").strip()
+    return text.strip()
 
 
 def _trans_extract_items(text: str) -> List[Dict]:
@@ -1536,18 +1541,46 @@ def parse_trans(text: str) -> Dict:
     header["supplier"] = _search(r"^(PT\.\s*TRANS\s*DAYA\s*PRIMA)", text)
     header["port_of_discharge"] = _search(r"P\.O\.D\s*:\s*(.+?)\s*$", text)
 
-    # 這種帳單沒有到達日/開船日/提單/主提單/啟運港/材積/船名/貨櫃資訊，留空
-    # 給 expand_to_rows() 補 N/A。Order No. 現在是逐筆費用各自帶自己的值
+    # 大部分這種帳單右下角沒有船名/貨櫃資訊 (整頁找不到 "Vessel :"/"Cont No
+    # :" 這兩個關鍵字)，留 None 讓 expand_to_rows() 補 N/A；少數有海運貨櫃
+    # 的帳單則會印在 Remarks 旁邊一小塊 "Vessel : PHEN BASIN Flight/Voy No.
+    # : 125N" + "Cont No : OOCU7801321"，這裡才需要真的抓出來。Vessel 欄位
+    # 使用者的正確答案是「船名+航次」接在一起 (跟 KUEHNE NAGEL 同一套規則)。
+    _trans_vessel_m = re.search(
+        r"Vessel\s*:\s*(.+?)\s+Flight/Voy No\.\s*:\s*(.+?)(?=\s+VAT\b|\n|$)", text
+    )
+    header["vessel"] = (
+        f"{_trans_vessel_m.group(1).strip()} {_trans_vessel_m.group(2).strip()}"
+        if _trans_vessel_m else None
+    )
+    # Cont No 欄位有時後面還接著第二個貨櫃號碼 (另起一行)，正確答案只取
+    # 「Cont No :」後面緊接著的第一個貨櫃號碼，不含後面額外多出來的那個。
+    header["container_no"] = _search(r"Cont No\s*:\s*(.+?)\s+Other Cost", text)
+
+    # 這種帳單沒有到達日/開船日/提單/主提單/啟運港/材積/Shipper 資訊 (帳單
+    # 上完全沒有印這些欄位，不是抓不到，是本來就不適用)，留空給
+    # expand_to_rows() 補 N/A。Order No. 現在是逐筆費用各自帶自己的值
     # (見 _trans_extract_items())，這裡的抬頭預設值留 None，沒有費用明細
     # 帶值時才會用到 (整張帳單抓不到任何費用行的防禦性情況)。
     for code in ("arrive_date", "onboard_date", "bl_no", "mbl_no",
-                 "port_of_loading", "volume", "vessel", "container_no",
-                 "order_no"):
+                 "port_of_loading", "volume", "shipper", "order_no"):
         header[code] = None
 
     items = _trans_extract_items(text)
     if not items:
         items = [{"description": None, "amount": None}]
+
+    # VAT：跟 KUEHNE NAGEL 一樣，這種帳單無論有幾筆費用明細，VAT 永遠只有
+    # 「一個」整張帳單的總稅額 (印在 "VAT (11%) 327.250" 這一行)，不是每筆
+    # 費用各自的稅額，所以不塞進某一筆費用明細裡，額外附加一筆「只有 vat、
+    # 沒有 description/amount/order_no」的 item，展開成獨立的一列，Order
+    # No. 留 None 讓 expand_to_rows() 補 N/A (這一列本來就沒有對應的 DO
+    # No.)。
+    vat_raw = _search(r"VAT\s*\(\d+%\)\s*([\d.,]+)", text)
+    vat_amount = _trans_clean_amount(vat_raw)
+    if vat_amount is not None:
+        items.append({"description": None, "amount": None, "order_no": None,
+                      "vat": vat_amount})
 
     return {"header": header, "items": items}
 
