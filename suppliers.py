@@ -2223,15 +2223,26 @@ def _dsv_extract_total(text: str) -> Optional[int]:
     return _dsv_clean_amount(_search(r"SUBTOTAL\s+([\d.]+)", text))
 
 
+def _evergreen_extract_grand_total(text: str) -> Optional[int]:
+    """帳單最下面獨立一行、只有 "IDR 數字" 的那一行是含稅總額 (VAT 已經
+    算進去的最終應付金額)。"""
+    return _evergreen_clean_amount(_search(r"^IDR\s+([\d,]+(?:\.\d+)?)\s*$", text))
+
+
+def _evergreen_extract_vat(text: str) -> Optional[int]:
+    """"VAT IDR 197,638.00" 是整張帳單只有一個的稅額總計 (不是逐筆費用
+    各自的稅額)，跟 KUEHNE_NAGEL/TRANS_DAYA_PRIMA/APL 一樣另外獨立成一筆
+    合成列 (見 _evergreen_extract_items())，不要跟費用明細混在一起算。"""
+    return _evergreen_clean_amount(_search(r"VAT\s+IDR\s+([\d,]+(?:\.\d+)?)", text))
+
+
 def _evergreen_extract_total(text: str) -> Optional[int]:
     """EVERGREEN_LOGISTICS 帳單原文沒有直接寫『未稅總額』，只有『含稅總額』
     (獨立一行、只有 "IDR 數字") 跟 "VAT IDR 數字" 兩個數字，未稅總額 =
     含稅總額 - VAT。
     """
-    grand_total = _evergreen_clean_amount(
-        _search(r"^IDR\s+([\d,]+(?:\.\d+)?)\s*$", text)
-    )
-    vat = _evergreen_clean_amount(_search(r"VAT\s+IDR\s+([\d,]+(?:\.\d+)?)", text))
+    grand_total = _evergreen_extract_grand_total(text)
+    vat = _evergreen_extract_vat(text)
     if grand_total is None or vat is None:
         return None
     return grand_total - vat
@@ -3114,6 +3125,13 @@ def _evergreen_extract_items(text: str) -> List[Dict]:
             "description": m.group("desc").strip(),
             "amount": _evergreen_clean_amount(m.group("amount")),
         })
+    vat = _evergreen_extract_vat(text)
+    if vat is not None:
+        # 跟 APL 同一套慣例：只有一筆費用明細時 (不會混淆稅額對應哪一筆)，
+        # VAT 那一列的 Description 直接沿用那筆費用的描述；兩筆以上費用
+        # 明細時 (無法判斷稅額對應哪一筆) 留空。
+        vat_desc = items[0]["description"] if len(items) == 1 else None
+        items.append({"description": vat_desc, "amount": None, "vat": vat})
     return items
 
 
@@ -3141,16 +3159,17 @@ def parse_evergreen(text: str) -> Dict:
         rf"\bCONTAINER\s*NO\s*:\s*(.+?){_EVERGREEN_STOP}", text
     )
 
-    # 這張帳單沒有訂單編號/開船日/裝貨港/材積資訊，留空給 expand_to_rows()
-    # 補 N/A。
+    # 這張帳單沒有訂單編號/開船日/裝貨港/材積/Shipper 資訊，留空給
+    # expand_to_rows() 補 N/A。
     header["order_no"] = None
     header["onboard_date"] = None
     header["port_of_loading"] = None
     header["volume"] = None
+    header["shipper"] = None
 
     items = _evergreen_extract_items(text)
     if not items:
-        items = [{"description": None, "amount": None}]
+        items = [{"description": None, "amount": None, "vat": None}]
 
     return {"header": header, "items": items}
 
@@ -3159,6 +3178,7 @@ register_supplier(
     "EVERGREEN_LOGISTICS", "P.T. EVERGREEN LOGISTICS INDONESIA",
     detect_evergreen, parse_evergreen,
     extract_total=_evergreen_extract_total,
+    extract_grand_total=_evergreen_extract_grand_total,
 )
 
 
