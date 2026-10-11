@@ -3424,12 +3424,34 @@ def _galuh_strip_date_suffix(desc: Optional[str]) -> Optional[str]:
     return desc.strip()
 
 
+def _galuh_rejoin_split_tax_lines(block: str) -> str:
+    """費用項目筆數變多時，PDF 版面「KETERANGAN」跟「JUMLAH」兩欄的垂直
+    對齊會跟著跑掉，導致 PPN/PPh 那一列的金額被 pdfplumber 拆到跟名稱不同
+    的一行，例如 (3 筆費用項目的帳單)：
+        PPN 11% 33.000
+        -194.000
+        PPh 2%
+    "PPh 2%" 自己落單一行、金額 "-194.000" 反而黏在上一行。這裡用正規表
+    示式把「金額自己一行 + 緊接著下一行是稅額名稱」重新接回同一行，變成
+    跟原本版面一致的 "PPh 2% -194.000"，這樣不管這張帳單有幾筆費用明細
+    (進而讓 PPN/PPh 那一列被往下擠或對齊跑掉)，後面逐行解析都不用再為
+    「金額跟名稱被拆開」的情況另外特判。
+    """
+    return re.sub(
+        r"^(-?[\d.]+)\s*\n\s*(PP[Nh]\s+\d+%)\s*$",
+        r"\2 \1",
+        block,
+        flags=re.MULTILINE,
+    )
+
+
 def _galuh_extract_items(text: str) -> List[Dict]:
     block_m = _GALUH_BLOCK_PATTERN.search(text)
     if not block_m:
         return []
+    block = _galuh_rejoin_split_tax_lines(block_m.group(1))
     items: List[Dict] = []
-    for line in block_m.group(1).splitlines():
+    for line in block.splitlines():
         line = line.strip()
         if not line:
             continue
