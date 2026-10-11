@@ -3323,3 +3323,179 @@ register_supplier(
     "APL", "PT. APL LOGISTICS", detect_apl, parse_apl,
     extract_total=_apl_extract_total, extract_grand_total=_apl_extract_grand_total,
 )
+
+
+# ===========================================================================
+# 供應商：PT. GALUH INTI BAHARI (單頁、單張發票，稅額逐筆列在費用明細裡)
+# ===========================================================================
+#
+# 版面特徵：
+#   - "TO PT. HARDASES ABADI INDONESIA No. Invoice : 2601312-KWTGIB" ->
+#     收件公司跟發票號碼同一行，中間用 "No. Invoice :" 分隔。
+#   - "Wonopringgo Tgl. Invoice : 07 Agt 2026" -> 發票日期用印尼文月份縮寫
+#     (Agt=Agustus、Sep=September...)，跟 DWIHARTA 的印尼文全名不同，所以
+#     用這家供應商自己的縮寫對照表 _GALUH_MONTH_ABBR，不沿用 INDO_MONTHS。
+#   - 費用明細表格 "No. KETERANGAN JUMLAH" 之後是逐行費用，格式
+#     "<序號> <費用名稱> <金額>" (金額千分位用句點，例如 "9.400.000")；
+#     這家供應商跟其他供應商不同的地方是：PPN/PPh 稅額**不是整張帳單只有
+#     一個總額的獨立列**，而是逐筆直接列在費用明細裡 (沒有前面的序號)，
+#     例如 "PPN 11% 16.500"、"PPh 2% -191.000" (PPh 是從金額裡「扣除」，
+#     所以是負數)。這兩種稅額行各自獨立成一筆 description=稅額名稱/
+#     amount=None/vat=稅額 的列，不套用其他供應商「VAT 只有一個總額」的
+#     合成列慣例 (那種慣例的 description 規則不適用，這裡本來就有自己的
+#     description)。
+#   - 有些費用名稱後面會黏著一段日期備註 (例如 "Trucking 27 Juli 2026"、
+#     "TRUCKING PER TGL 31 AGUSTUS - 05 SEPTEMBER 2026")，正確答案只要
+#     名稱本身 ("Trucking"/"TRUCKING")，日期備註要用
+#     _galuh_strip_date_suffix() 去掉。
+#   - 帳單本身沒有另外印出「未稅總額」，費用明細加總 (不含稅額列) 直接
+#     加上 PPN/PPh 稅額就等於帳單最下面的 "Total" (已經是含稅後的總額)，
+#     所以只註冊 extract_grand_total，不註冊 extract_total (沒有獨立的未稅
+#     小計可以比對)。
+#   - 收件公司 (consignee) 通常從最上面 "TO <公司名> No. Invoice :" 抓；
+#     但遇到像 ASICS 這張帳單時，帳單本身用簡稱 "PT. POUCHEN ( ASICS )"，
+#     實際報表第二頁 (same PDF 的「REKAPITULASI TAGIHAN...」明細頁) 開頭
+#     印出的才是正確答案要的正式公司全名 "PT. POU CHEN INDONESIA\nNo
+#     :2601512-KWTGIB"，所以優先找「行首是 PT. 開頭、後面接 No : <發票號>
+#     的那一行」，有找到就用那個覆寫，沒有 (單頁帳單通常沒有這一行) 才退
+#     回用最上面 "TO ..." 那一行。
+#   - 這張帳單沒有訂單編號/到貨日/開船日/提單號/主提單號/啟運港/目的港/
+#     材積/船名/貨櫃號/出貨方資訊，留空給 expand_to_rows() 補 N/A。
+
+def detect_galuh(text: str) -> bool:
+    return "GALUH INTI BAHARI" in text.upper()
+
+
+_GALUH_MONTH_ABBR = {
+    "jan": 1, "feb": 2, "mar": 3, "apr": 4, "mei": 5, "jun": 6,
+    "jul": 7, "agt": 8, "sep": 9, "okt": 10, "nov": 11, "des": 12,
+}
+
+
+def _galuh_parse_date(day, month_abbr: Optional[str], year) -> Optional[str]:
+    if not month_abbr:
+        return None
+    month = _GALUH_MONTH_ABBR.get(str(month_abbr).strip().lower()[:3])
+    if not month:
+        return None
+    return _format_date_en(day, month, year)
+
+
+def _galuh_clean_amount(text: Optional[str]) -> Optional[int]:
+    """印尼式數字 '9.400.000' (句點千分位) -> 9400000；PPh 常見是負數
+    '-191.000' -> -191000，int() 本身就支援前面的負號，不用特別處理。
+    """
+    if not text:
+        return None
+    text = text.strip().replace(".", "").replace(",", "")
+    try:
+        return int(text)
+    except ValueError:
+        return None
+
+
+_GALUH_BLOCK_PATTERN = re.compile(
+    r"No\.\s*KETERANGAN\s*JUMLAH\s*\n(.*?)\nTotal\s+[\d.,]+\s*$",
+    re.DOTALL | re.MULTILINE,
+)
+_GALUH_TAX_LINE_PATTERN = re.compile(r"^(?P<desc>PP[Nh]\s+\d+%)\s+(?P<amount>-?[\d.]+)\s*$")
+_GALUH_ITEM_LINE_PATTERN = re.compile(
+    r"^\d+\s+(?P<desc>.+?)\s+(?P<amount>\d{1,3}(?:\.\d{3})*)\s*$"
+)
+_GALUH_MONTH_NAMES = (
+    "Januari|Februari|Maret|April|Mei|Juni|Juli|Agustus|September|"
+    "Oktober|November|Desember"
+)
+
+
+def _galuh_strip_date_suffix(desc: Optional[str]) -> Optional[str]:
+    """去掉費用名稱後面黏著的日期備註，例如 'Trucking 27 Juli 2026' ->
+    'Trucking'、'TRUCKING PER TGL 31 AGUSTUS - 05 SEPTEMBER 2026' ->
+    'TRUCKING'。沒有日期備註的名稱 (例如 'Fiat Dokumen'、'TOTAL BIAYA
+    EKSTERNAL NON PPH 2%') 原樣保留。
+    """
+    if not desc:
+        return desc
+    desc = re.sub(r"\s+(?:PER\s+)?TGL\b.*$", "", desc, flags=re.IGNORECASE)
+    desc = re.sub(
+        rf"\s+\d{{1,2}}\s+(?:{_GALUH_MONTH_NAMES})\s+\d{{4}}.*$",
+        "", desc, flags=re.IGNORECASE,
+    )
+    return desc.strip()
+
+
+def _galuh_extract_items(text: str) -> List[Dict]:
+    block_m = _GALUH_BLOCK_PATTERN.search(text)
+    if not block_m:
+        return []
+    items: List[Dict] = []
+    for line in block_m.group(1).splitlines():
+        line = line.strip()
+        if not line:
+            continue
+        tax_m = _GALUH_TAX_LINE_PATTERN.match(line)
+        if tax_m:
+            items.append({
+                "description": tax_m.group("desc").strip(),
+                "amount": None,
+                "vat": _galuh_clean_amount(tax_m.group("amount")),
+            })
+            continue
+        item_m = _GALUH_ITEM_LINE_PATTERN.match(line)
+        if item_m:
+            items.append({
+                "description": _galuh_strip_date_suffix(item_m.group("desc").strip()),
+                "amount": _galuh_clean_amount(item_m.group("amount")),
+                "vat": None,
+            })
+    return items
+
+
+def _galuh_extract_grand_total(text: str) -> Optional[int]:
+    return _galuh_clean_amount(_search(r"^Total\s+([\d.,]+)\s*$", text))
+
+
+def parse_galuh(text: str) -> Dict:
+    header: Dict[str, Optional[str]] = {}
+
+    header["supplier"] = _search(r"^(PT\.\s*GALUH\s*INTI\s*BAHARI)", text)
+    header["invoice_no"] = _search(r"No\.\s*Invoice\s*:\s*(\S+)", text)
+
+    _galuh_date_m = re.search(r"Tgl\.\s*Invoice\s*:\s*(\d{1,2})\s+(\w+)\s+(\d{4})", text)
+    header["invoice_date"] = (
+        _galuh_parse_date(*_galuh_date_m.groups()) if _galuh_date_m else None
+    )
+
+    # consignee：優先找報表明細頁開頭「PT. 開頭、後面接 No : <發票號>」那
+    # 一行 (比最上面的 "TO ..." 簡稱更正式/更準確)，找不到才退回 "TO ..."。
+    _galuh_rekap_m = re.search(r"^(PT\..+?)\s+No\s*:\s*\S+\s*$", text, re.MULTILINE)
+    if _galuh_rekap_m:
+        header["consignee"] = _galuh_rekap_m.group(1).strip()
+    else:
+        header["consignee"] = _search(r"\bTO\s+(.+?)\s+No\.\s*Invoice", text)
+
+    # 這張帳單沒有訂單編號/到貨日/開船日/提單號/主提單號/啟運港/目的港/
+    # 材積/船名/貨櫃號/出貨方資訊，留空給 expand_to_rows() 補 N/A。
+    header["order_no"] = None
+    header["arrive_date"] = None
+    header["onboard_date"] = None
+    header["bl_no"] = None
+    header["mbl_no"] = None
+    header["port_of_loading"] = None
+    header["port_of_discharge"] = None
+    header["volume"] = None
+    header["vessel"] = None
+    header["container_no"] = None
+    header["shipper"] = None
+
+    items = _galuh_extract_items(text)
+    if not items:
+        items = [{"description": None, "amount": None, "vat": None}]
+
+    return {"header": header, "items": items}
+
+
+register_supplier(
+    "GALUH", "PT. GALUH INTI BAHARI", detect_galuh, parse_galuh,
+    extract_grand_total=_galuh_extract_grand_total,
+)
