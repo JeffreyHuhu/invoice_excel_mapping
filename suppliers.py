@@ -1418,9 +1418,16 @@ def detect_trans(text: str) -> bool:
 # 完整版費用明細行 (費用名稱 + DO No. + DO Date + 部門代碼 + 數量 + 單價 +
 # 總價)，見上方說明。用 fullmatch 逐行比對 (不是在整段文字裡 search)，
 # 避免跟簡化版費用行搶著比對同一行文字。
+#
+# 28 張帳單批次發現：部門代碼有時是「字母+空白+數字+空白+字母」(例如
+# "B 9303 UWV")，有時中間完全沒有空白、黏成一個詞 (例如 "B9239TEK")，
+# 兩種排版都要能吃進去，否則這一行會整個比對不到完整版，退回簡化版規則
+# 時又因為部門代碼含數字、不符合簡化版的「純字母」限制，導致 DO No./DO
+# Date/部門代碼全部被誤併進費用名稱 (desc) 裡。這裡把部門代碼中間的空白
+# 從「一定要有」(\s+) 改成「可有可無」(\s*)，兩種排版都吃得到。
 _TRANS_FULL_ITEM_PATTERN = re.compile(
     r"^(?P<desc>.+?)\s+(?P<do_no>\S+)\s+(?P<do_date>\d{1,2}\s+[A-Za-z]{3}\s+\d{4})\s+"
-    r"(?P<dept>[A-Z]\s+\d+\s+[A-Z]+)\s+(?P<qty>\d+)\s+(?P<unit_price>[\d.,]+)\s+"
+    r"(?P<dept>[A-Z]\s*\d+\s*[A-Z]+)\s+(?P<qty>\d+)\s+(?P<unit_price>[\d.,]+)\s+"
     r"(?P<total>[\d.,]+)$"
 )
 # 簡化版費用明細行 (沒有 DO No./DO Date/部門代碼)：費用名稱 + 數量 + 單價 +
@@ -1534,7 +1541,15 @@ def _trans_extract_items(text: str) -> List[Dict]:
 # 表格「數量+單價+總價」三欄的格式不同，只有一個數字，所以用一個獨立、更
 # 簡單的規則抓，不會跟上面的完整版/簡化版費用行搶著比對同一行。這幾筆費用
 # 沒有對應的 DO No.，Order No. 留 None 讓 expand_to_rows() 補 N/A。
-_TRANS_COST_ITEM_PATTERN = re.compile(r"^(?P<desc>[A-Za-z][A-Za-z ]+?)\s+(?P<amount>[\d.]+)\s*$")
+#
+# 28 張帳單批次發現：同一張帳單如果牽涉兩個以上的貨櫃，「Biaya LOLO」/
+# 「Biaya Penumpukan」這兩種費用會各出現兩筆以上，靠費用名稱後面緊接的
+# 一串參考代號 (例如 "Biaya LOLO 263300806"、"Biaya LOLO JKTG00484400")
+# 來區分是哪個貨櫃的費用；正確答案的 Description 欄位是整段文字(含代號)
+# 一起列出來，不會把代號拆開，所以 desc 的字元集合除了英文字母、空白，也
+# 要能吃進數字/字母混合的代號本身，靠非貪婪比對讓代號優先被併入 desc，
+# 金額欄位 (有千分位小數點、不含空白) 永遠留到最後一段才匹配。
+_TRANS_COST_ITEM_PATTERN = re.compile(r"^(?P<desc>[A-Za-z][A-Za-z0-9 ]*?)\s+(?P<amount>[\d.]+)\s*$")
 
 
 def _trans_extract_cost_items(text: str) -> List[Dict]:
@@ -1567,23 +1582,38 @@ def parse_trans(text: str) -> Dict:
         header["consignee"] = m.group(3).strip()
 
     header["supplier"] = _search(r"^(PT\.\s*TRANS\s*DAYA\s*PRIMA)", text)
-    header["port_of_discharge"] = _search(r"P\.O\.D\s*:\s*(.+?)\s*$", text)
+    # P.O.D 的值永遠是單一字詞 (例如 "USA")，不要用「吃到這一行結尾」的寫
+    # 法；28 張帳單批次裡，牽涉兩個貨櫃的帳單排版會把 "Other Cost ..."
+    # 也擠到同一行 (例如 "P.O.D : USA Other Cost 4.621.763")，吃到行尾會
+    # 把這些多餘文字一起抓進來，只取緊接著冒號後面的第一個詞就好。
+    header["port_of_discharge"] = _search(r"P\.O\.D\s*:\s*(\S+)", text)
 
     # 大部分這種帳單右下角沒有船名/貨櫃資訊 (整頁找不到 "Vessel :"/"Cont No
     # :" 這兩個關鍵字)，留 None 讓 expand_to_rows() 補 N/A；少數有海運貨櫃
     # 的帳單則會印在 Remarks 旁邊一小塊 "Vessel : PHEN BASIN Flight/Voy No.
     # : 125N" + "Cont No : OOCU7801321"，這裡才需要真的抓出來。Vessel 欄位
     # 使用者的正確答案是「船名+航次」接在一起 (跟 KUEHNE NAGEL 同一套規則)。
+    # 28 張帳單批次裡，牽涉兩個貨櫃的帳單排版會把 "VAT (11%) ..." 擠到
+    # "Vessel :" 這一行的尾端 (例如 "Vessel : MERATUS JAYAGIRI VAT (11%)
+    # 1.148.400"，下一行才是 "Flight/Voy No. : 603N")，所以船名那一段要在
+    # 遇到 "VAT" 字樣時就先停止，避免把金額也併進船名。
     _trans_vessel_m = re.search(
-        r"Vessel\s*:\s*(.+?)\s+Flight/Voy No\.\s*:\s*(.+?)(?=\s+VAT\b|\n|$)", text
+        r"Vessel\s*:\s*(.+?)\s+(?:VAT\b.*?\s+)?Flight/Voy No\.\s*:\s*(.+?)(?=\s+VAT\b|\n|$)",
+        text,
     )
     header["vessel"] = (
         f"{_trans_vessel_m.group(1).strip()} {_trans_vessel_m.group(2).strip()}"
         if _trans_vessel_m else None
     )
-    # Cont No 欄位有時後面還接著第二個貨櫃號碼 (另起一行)，正確答案只取
-    # 「Cont No :」後面緊接著的第一個貨櫃號碼，不含後面額外多出來的那個。
-    header["container_no"] = _search(r"Cont No\s*:\s*(.+?)\s+Other Cost", text)
+    # 牽涉兩個貨櫃的帳單會有兩個「Cont No :」(每個貨櫃各自一段 Vessel/
+    # Flight/P.O.D/Cont No 區塊)，正確答案是「每個貨櫃號碼都列出來，用逗號
+    # +空白連接」，不是只取第一個；用 findall 把所有出現過的貨櫃號碼都抓出
+    # 來 (只取冒號後緊接著的第一個詞，不含後面可能擠在同一行的 "Other
+    # Cost ..." 文字)，依出現順序去重後用 ", " 接起來。
+    _trans_container_nos = re.findall(r"Cont No\s*:\s*(\S+)", text)
+    header["container_no"] = (
+        ", ".join(dict.fromkeys(_trans_container_nos)) if _trans_container_nos else None
+    )
 
     # 這種帳單沒有到達日/開船日/提單/主提單/啟運港/材積/Shipper 資訊 (帳單
     # 上完全沒有印這些欄位，不是抓不到，是本來就不適用)，留空給
