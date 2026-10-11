@@ -533,26 +533,47 @@ st.success(
 )
 
 # ---------------------------------------------------------------------------
-# 金額稽核：系統擷取出來的費用明細加總，要跟帳單原文自己寫的「未稅總額」
-# (Total (Excl. VAT) / Sub Total…，依供應商命名不同) 一樣，不一致就跳出
-# 警示，提醒人工複查。沒有稽核結果代表這家供應商還沒實作稽核規則，不算
-# 異常，不顯示任何訊息。
+# 金額稽核，兩項各自獨立 (哪一項有做，取決於這家供應商有沒有實作對應的
+# 擷取規則，見 suppliers.py)：
+# 1. 未稅總額稽核：系統擷取出來的費用明細加總 (不含 VAT)，要跟帳單原文
+#    自己寫的「未稅總額」(Total (Excl. VAT) / Sub Total…) 一樣。
+# 2. 含稅總額稽核：未稅費用加總 + 每筆費用的 VAT 加總，要等於帳單原文
+#    自己寫的「含稅總額」(Total Amount Due / Amount Due / Total…)。
+# 不一致就跳出警示，提醒人工複查。某一項沒有稽核結果 (值是 None) 代表
+# 這家供應商還沒實作那一項稽核規則，不算異常，不顯示該項訊息。
 # ---------------------------------------------------------------------------
 audit_results = st.session_state.get("verify_audit") or []
 for ar in audit_results:
-    if ar["match"]:
-        st.info(
-            f"✅ 金額稽核通過（發票 {ar['invoice_no']}）："
-            f"系統擷取加總 {ar['extracted_sum']:,.0f}，"
-            f"帳單未稅總額 {ar['invoice_total']:,.0f}，兩者一致。"
-        )
-    else:
-        st.error(
-            f"🚨 金額稽核不一致（發票 {ar['invoice_no']}）："
-            f"系統擷取加總 {ar['extracted_sum']:,.0f}，"
-            f"帳單未稅總額 {ar['invoice_total']:,.0f}，"
-            f"差額 {ar['diff']:,.0f}，請人工複查！"
-        )
+    if ar["match"] is not None:
+        if ar["match"]:
+            st.info(
+                f"✅ 未稅總額稽核通過（發票 {ar['invoice_no']}）："
+                f"系統擷取加總 {ar['extracted_sum']:,.0f}，"
+                f"帳單未稅總額 {ar['invoice_total']:,.0f}，兩者一致。"
+            )
+        else:
+            st.error(
+                f"🚨 未稅總額稽核不一致（發票 {ar['invoice_no']}）："
+                f"系統擷取加總 {ar['extracted_sum']:,.0f}，"
+                f"帳單未稅總額 {ar['invoice_total']:,.0f}，"
+                f"差額 {ar['diff']:,.0f}，請人工複查！"
+            )
+    if ar["grand_match"] is not None:
+        if ar["grand_match"]:
+            st.info(
+                f"✅ 含稅總額稽核通過（發票 {ar['invoice_no']}）："
+                f"未稅加總 {ar['extracted_sum']:,.0f} + VAT 加總 "
+                f"{ar['vat_sum']:,.0f}，帳單含稅總額 "
+                f"{ar['grand_total']:,.0f}，兩者一致。"
+            )
+        else:
+            st.error(
+                f"🚨 含稅總額稽核不一致（發票 {ar['invoice_no']}）："
+                f"未稅加總 {ar['extracted_sum']:,.0f} + VAT 加總 "
+                f"{ar['vat_sum']:,.0f}，帳單含稅總額 "
+                f"{ar['grand_total']:,.0f}，差額 {ar['grand_diff']:,.0f}，"
+                f"請人工複查！"
+            )
 
 # ---------------------------------------------------------------------------
 # 依 invoice_no 分組：一般供應商只有一組 (一張帳單一個 invoice_no)，

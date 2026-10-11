@@ -406,11 +406,17 @@ if run_clicked:
                     for r in result["results"]:
                         compare_rows_all.append({"來源檔案": f.name, "供應商": label, **r})
 
-                # 金額稽核：系統擷取出來的費用明細加總，要跟帳單原文自己寫的
-                # 「未稅總額」(Total (Excl. VAT) / Sub Total…) 一樣，不一致
-                # 就記錄下來，等一下在畫面上跳出警示 (見下方顯示區塊)。只有
-                # 「有實作稽核規則」的供應商才會有結果，其餘供應商回傳空列表
-                # (代表『這家供應商還沒辦法自動稽核』，不算異常)。
+                # 金額稽核，兩項各自獨立 (哪一項有做，取決於這家供應商有沒有
+                # 實作對應的擷取規則)：
+                # 1. 未稅總額稽核：系統擷取出來的費用明細加總 (不含 VAT)，要
+                #    跟帳單原文自己寫的「未稅總額」(Total (Excl. VAT) / Sub
+                #    Total…) 一樣。
+                # 2. 含稅總額稽核：未稅費用加總 + 每筆費用的 VAT 加總，要等
+                #    於帳單原文自己寫的「含稅總額」(Total Amount Due /
+                #    Amount Due / Total…)，適用所有有逐筆 VAT 的供應商。
+                # 不一致就記錄下來，等一下在畫面上跳出警示 (見下方顯示區
+                # 塊)。沒有實作對應規則的供應商，相應欄位會是 None，不算
+                # 異常，不會顯示警示。
                 try:
                     audit_results = audit_invoice_totals(
                         result["supplier_key"], tmp_path, result["rows"]
@@ -422,10 +428,18 @@ if run_clicked:
                         "來源檔案": f.name,
                         "供應商": label,
                         "Invoice No": ar["invoice_no"],
-                        "系統擷取加總": ar["extracted_sum"],
+                        "系統擷取加總(未稅)": ar["extracted_sum"],
                         "帳單未稅總額": ar["invoice_total"],
-                        "差額": ar["diff"],
-                        "是否一致": "✅ 一致" if ar["match"] else "❌ 不一致",
+                        "未稅差額": ar["diff"],
+                        "未稅是否一致": (
+                            "✅ 一致" if ar["match"] else "❌ 不一致"
+                        ) if ar["match"] is not None else "-",
+                        "VAT加總": ar["vat_sum"],
+                        "帳單含稅總額": ar["grand_total"],
+                        "含稅差額": ar["grand_diff"],
+                        "含稅是否一致": (
+                            "✅ 一致" if ar["grand_match"] else "❌ 不一致"
+                        ) if ar["grand_match"] is not None else "-",
                     })
 
             except Exception as e:  # noqa: BLE001
@@ -512,20 +526,30 @@ if not has_reference:
 st.dataframe(score_df, use_container_width=True)
 
 # ---------------------------------------------------------------------------
-# 金額稽核：系統擷取出來的費用明細加總，要跟帳單原文自己寫的「未稅總額」
-# (Total (Excl. VAT) / Sub Total…，依供應商命名不同) 一樣，不一致就跳出
-# 警示。只有「已經實作稽核規則」的供應商才會有稽核結果，其餘供應商目前
-# 還沒辦法自動稽核 (不代表有問題，只是還沒支援)。
+# 金額稽核，兩項各自獨立：
+# 1. 未稅總額稽核：系統擷取出來的費用明細加總 (不含 VAT)，要跟帳單原文
+#    自己寫的「未稅總額」(Total (Excl. VAT) / Sub Total…) 一樣。
+# 2. 含稅總額稽核：未稅費用加總 + 每筆費用的 VAT 加總，要等於帳單原文
+#    自己寫的「含稅總額」(Total Amount Due / Amount Due / Total…)。
+# 不一致就跳出警示。只有「已經實作對應稽核規則」的供應商才會有結果，
+# 其餘供應商目前還沒辦法自動稽核 (不代表有問題，只是還沒支援)。
 # ---------------------------------------------------------------------------
 if audit_rows:
     audit_df = pd.DataFrame(audit_rows)
-    mismatches = audit_df[audit_df["是否一致"] == "❌ 不一致"]
-    if not mismatches.empty:
+    net_mismatches = audit_df[audit_df["未稅是否一致"] == "❌ 不一致"]
+    grand_mismatches = audit_df[audit_df["含稅是否一致"] == "❌ 不一致"]
+    if not net_mismatches.empty:
         st.error(
-            f"🚨 金額稽核：有 {len(mismatches)} 張發票的系統擷取加總，"
+            f"🚨 金額稽核：有 {len(net_mismatches)} 張發票的系統擷取加總，"
             "跟帳單本身寫的未稅總額對不起來，請人工複查："
         )
-        st.dataframe(mismatches, use_container_width=True)
+        st.dataframe(net_mismatches, use_container_width=True)
+    if not grand_mismatches.empty:
+        st.error(
+            f"🚨 金額稽核：有 {len(grand_mismatches)} 張發票的「未稅加總 + "
+            "VAT 加總」，跟帳單本身寫的含稅總額對不起來，請人工複查："
+        )
+        st.dataframe(grand_mismatches, use_container_width=True)
     with st.expander(f"🔍 金額稽核明細 (共 {len(audit_df)} 張發票有做這項稽核)"):
         st.dataframe(audit_df, use_container_width=True)
 
