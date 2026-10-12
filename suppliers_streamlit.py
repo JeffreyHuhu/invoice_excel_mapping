@@ -3561,3 +3561,215 @@ register_supplier(
     "GALUH", "PT. GALUH INTI BAHARI", detect_galuh, parse_galuh,
     extract_grand_total=_galuh_extract_grand_total,
 )
+
+
+# ===========================================================================
+# 供應商：PT. TRANS ECOMET GLOBAL (⚠️ multi_page：一份 PDF 塞好幾張各自
+# 獨立的發票，一頁一張，跟 HYPER MEGA/PANCARAN 同一種型態)
+# ===========================================================================
+#
+# 版面特徵：
+#   - 每一頁最上面都會出現收款帳戶那一行「...rekening: PT. TRANS ECOMET
+#     GLOBAL...」，這是最穩定、不會跟其他供應商混淆的關鍵字。
+#   - 這份 PDF 的「冒號」在不同頁會印在不一樣的位置：有的頁面冒號是獨立字元
+#     (正常的 "Shipper : ADIDAS")，有的頁面冒號卻黏在數字/字母中間
+#     (例如 "HB/L No SNC20:260296"、"Negara Asal THAILAND:")，這單純是
+#     PDF 排版的渲染問題，冒號本身從來不是用來切欄位的分隔符號、也不是
+#     值的一部分。解法：parse 一開始就把整頁文字裡所有的 ":" 直接拿掉
+#     (`t = text.replace(":", "")`)，之後全部規則只認「標籤後面接的內容」，
+#     不依賴冒號，兩種渲染方式都會變成同一種乾淨的文字可以共用同一套
+#     regex (例如 "SNC20:260296" 拿掉冒號後就是正確答案要的 "SNC20260296"，
+#     "GAR:UDA" 拿掉冒號後就是 "GARUDA")。
+#   - Shipper 公司名稱偶爾會換行(例如 "CONG TY TNHH KHOA HOC CONG NGHE HUA"
+#     跨到下一行才接 "CHANG VINA" 才結束)，換行的那一段剛好夾在地址第一行
+#     "JL. RAYA SERANG KM.71 DESA" 跟地址第二行 "TAMBAK, KIBIN, SERANG,"
+#     中間，用一個「可選的中間擷取群組」處理即可，見 _ecomet_extract_shipper()。
+#   - Container no. 可能是「單一個 - (沒有貨櫃)」或「好幾個貨櫃號跨好幾行」
+#     (換行方式跟 HYPER MEGA 的 Shipper 欄位類似)，一路抓到下一個已知標籤
+#     "ETD" 那一行為止，見 _ecomet_extract_container()。
+#   - Vessel 欄位：空運帳單用 "Flight" 欄位值；海運帳單用 "Voyage" 欄位值，
+#     Voyage 沒有資料時印成 "- -"，正確答案裡簡化成單一個 "-"。
+#   - Volume (材積) 欄位：正確答案一律是「Nett Weight 的第一個數字 + " KG"」，
+#     不管 PDF 上是不是已經印了 "KG" 單位、也不管後面還有幾個重複的重量值
+#     (多貨櫃的帳單 Nett Weight 會印成 "0 / 0 / 0" 這種多值，答案只取第一個)。
+#   - Port of discharge (目的港) 這份帳單從頭到尾都沒有印出來 (因為收件方
+#     固定是印尼的 PT. NIKOMAS GEMILANG)，正確答案固定是 "INDONESIA"，
+#     這裡直接用常數帶入，不用去 PDF 找一個不存在的欄位。
+#   - 費用明細有兩段獨立編號 (都是從 1 開始)：「No Biaya Jumlah」那一段是
+#     一般費用 (含 PPN，PPN 那一列要進 vat 欄位、不是 amount，跟 GALUH的
+#     PPN/PPh 列處理方式一樣)，「No Reimbursement Keterangan Jumlah」那
+#     一段是代墊費用，部分項目後面會多一個 "ket: ..." 備註 (例如
+#     "Storage ket: RP 1.006.110 Rp 1,116,782.00")，真正要的金額是最後的
+#     "Rp ..."，不是 "ket:" 後面那個印尼文備註數字，描述只取 "ket:" 前面
+#     的文字。
+#   - Order No./Invoice Date 這張帳單完全沒有對應欄位，正確答案固定是
+#     "N/A"，留 None 讓 expand_to_rows() 自動補即可。
+
+def detect_ecomet(text: str) -> bool:
+    return "ECOMET" in text.upper()
+
+
+def _ecomet_clean_amount(text: Optional[str]) -> Optional[int]:
+    if not text:
+        return None
+    text = text.strip().replace(",", "")
+    try:
+        return int(float(text))
+    except ValueError:
+        return None
+
+
+def _ecomet_parse_date(text: Optional[str]) -> Optional[str]:
+    """'26-Apr-26' -> '26 Apr 2026' (2 位數年份一律視為 20XX)。"""
+    if not text:
+        return None
+    m = re.match(r"(\d{1,2})-([A-Za-z]+)-(\d{2,4})", text.strip())
+    if not m:
+        return None
+    day, month_abbr, year = m.groups()
+    month = _MONTH_NAME_TO_NUM.get(month_abbr.strip().upper()[:3])
+    if not month:
+        return None
+    year_i = int(year)
+    if year_i < 100:
+        year_i += 2000
+    return _format_date_en(day, month, year_i)
+
+
+def _ecomet_clean_dash(value: Optional[str]) -> Optional[str]:
+    """Voyage 沒有資料時印成 '- -' 這種多個破折號，正確答案簡化成單一個
+    '-'；其他正常值原樣回傳 (只去頭尾空白)。
+    """
+    if value is None:
+        return None
+    value = value.strip()
+    if re.fullmatch(r"[-\s]+", value):
+        return "-"
+    return value
+
+
+def _ecomet_extract_shipper(flat: str) -> Optional[str]:
+    """Shipper 公司名稱可能跨行 (換行那一段夾在地址第一行跟第二行中間)，
+    見本區塊開頭的版面說明。flat 是把整頁文字的換行都換成空白之後的版本。
+    """
+    m = re.search(
+        r"Shipper\s+(.+?)\s+JL\.\s*RAYA\s*SERANG\s*KM\.?\s*71\s*DESA"
+        r"\s*(.*?)\s*TAMBAK,?\s*KIBIN,?\s*SERANG,?\s*BANTEN\s*Consignee",
+        flat,
+    )
+    if not m:
+        return None
+    main, overflow = m.group(1).strip(), m.group(2).strip()
+    return (main + " " + overflow).strip() if overflow else main
+
+
+def _ecomet_extract_container(t: str) -> Optional[str]:
+    """Container no. 可能單行 (單一個 '-' 或單一個貨櫃號)，也可能好幾個
+    貨櫃號跨好幾行，一路抓到下一個已知標籤 'ETD' 那一行為止。
+    """
+    m = re.search(r"Container\s+(.+?)\s+Qty", t)
+    if not m:
+        return None
+    first = m.group(1)
+    tail_m = re.search(r"Container\s+.+?\n((?:(?!ETD).+\n)*)ETD", t)
+    extra = tail_m.group(1).replace("\n", " ") if tail_m else ""
+    parts = [p.strip() for p in (first + " " + extra).split("/") if p.strip()]
+    if not parts:
+        return None
+    if all(p == "-" for p in parts):
+        return "-"
+    return " / ".join(parts)
+
+
+_ECOMET_ITEM_LINE = re.compile(
+    r"^\d+\s+(?P<desc>.+?)(?:\s+ket\b.*?)?\s+Rp\s+(?P<amount>[\d,]+\.\d{2})$"
+)
+_ECOMET_PPN_LINE = re.compile(
+    r"^(?P<desc>PPN\s+[\d.]+)\s+Rp\s+(?P<amount>[\d,]+\.\d{2})$"
+)
+
+
+def _ecomet_extract_items(t: str) -> List[Dict]:
+    items: List[Dict] = []
+    for raw_line in t.splitlines():
+        line = raw_line.strip()
+        if not line:
+            continue
+        m_ppn = _ECOMET_PPN_LINE.match(line)
+        if m_ppn:
+            items.append({
+                "description": m_ppn.group("desc").strip(),
+                "amount": None,
+                "vat": _ecomet_clean_amount(m_ppn.group("amount")),
+            })
+            continue
+        m_item = _ECOMET_ITEM_LINE.match(line)
+        if m_item:
+            items.append({
+                "description": m_item.group("desc").strip(),
+                "amount": _ecomet_clean_amount(m_item.group("amount")),
+                "vat": None,
+            })
+    return items
+
+
+def parse_ecomet(text: str) -> Dict:
+    """注意：這是 multi_page 供應商，text 是『一頁』的文字 (不是整份 PDF
+    合併後的文字)，呼叫端 (_parse_multi_page_pdf()) 只會對通過
+    detect_ecomet() 的頁面呼叫這個函式。
+
+    一開始先把整頁文字裡的 ':' 全部拿掉，解決這份 PDF 冒號亂跑的排版問題
+    (見本區塊開頭說明)，後面全部規則都在這個「乾淨版」文字 t 上操作。
+    """
+    t = text.replace(":", "")
+    flat = re.sub(r"\s+", " ", t)
+
+    header: Dict[str, Optional[str]] = {}
+
+    header["invoice_no"] = _search(r"No\s+(\S+)\s+Kepada", flat)
+    header["invoice_date"] = None
+
+    header["consignee"] = _search(r"Kepada\s+(.+?)\s+Shipper", flat)
+    header["supplier"] = _search(
+        r"rekening\s+(PT\.\s*TRANS\s*ECOMET\s*GLOBAL)", flat
+    )
+    header["shipper"] = _ecomet_extract_shipper(flat)
+
+    header["order_no"] = None
+
+    m_eta = re.search(
+        r"ETD\s*/\s*ETA\s+(\d{1,2}-[A-Za-z]+-\d{2,4})\s*/\s*(\d{1,2}-[A-Za-z]+-\d{2,4})",
+        flat,
+    )
+    header["onboard_date"] = _ecomet_parse_date(m_eta.group(1)) if m_eta else None
+    header["arrive_date"] = _ecomet_parse_date(m_eta.group(2)) if m_eta else None
+
+    header["bl_no"] = _search(r"HB/L\s*No\s+(\S+)", flat)
+    header["mbl_no"] = _search(r"MB/L\s*No\s+(\S+)", flat)
+    # Negara Asal 跟 Tipe 分別在不同的物理行 (右欄位逐行往下錯開一列)，
+    # 不能用 flat (整頁合併成一行) 去抓到 Tipe 當結尾，國家名稱本身都是
+    # 單一個字 (THAILAND/CIKANDE/ITALIA/VIETNAM/JAPAN)，直接抓下一個空白
+    # 前的單字即可。
+    header["port_of_loading"] = _search(r"Negara\s*Asal\s+(\S+)", flat)
+    header["port_of_discharge"] = "INDONESIA"
+
+    m_weight = re.search(r"Nett\s*Weight\s+([\d.,]+)", flat)
+    header["volume"] = f"{m_weight.group(1)} KG" if m_weight else None
+
+    flight = _search(r"Flight\s+(.+?)\s+Gross", flat)
+    voyage = _search(r"Voyage\s+(.+?)\s+CBM", flat)
+    header["vessel"] = flight if flight else _ecomet_clean_dash(voyage)
+
+    header["container_no"] = _ecomet_extract_container(t)
+
+    items = _ecomet_extract_items(t)
+    if not items:
+        items = [{"description": None, "amount": None, "vat": None}]
+
+    return {"header": header, "items": items}
+
+
+register_supplier(
+    "ECOMET", "PT. TRANS ECOMET GLOBAL", detect_ecomet, parse_ecomet,
+    multi_page=True,
+)
