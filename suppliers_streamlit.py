@@ -25,7 +25,7 @@ import re
 import datetime
 from typing import Dict, List, Optional
 
-from extract_utils import register_supplier
+from extract_utils_streamlit import register_supplier
 
 # 印尼文月份對照表 (DWIHARTA 帳單用印尼文寫月份)
 INDO_MONTHS = {

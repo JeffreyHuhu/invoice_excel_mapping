@@ -28,13 +28,13 @@ learned_configs.json 也提交回 GitHub)。
 特殊供應商：HYPER MEGA 一份 PDF 裡可能塞了好幾張各自獨立的發票 (一頁一
 張，各自的發票號碼/日期/費用明細都不同)，跟其他供應商「不管幾頁都是同
 一張發票」不一樣；這種 multi_page 供應商的比對是用 invoice_no 分組後各
-自跟正確答案表格比對，詳見 extract_utils.py / suppliers.py 裡的說明。
+自跟正確答案表格比對，詳見 extract_utils_streamlit.py / suppliers_streamlit.py 裡的說明。
 
 用法：
     pip install streamlit pdfplumber openpyxl pandas
     streamlit run app.py
 
-擴充：要支援第 21 家供應商，去 suppliers.py 加一組 detect_xxx()/parse_xxx()
+擴充：要支援第 21 家供應商，去 suppliers_streamlit.py 加一組 detect_xxx()/parse_xxx()
 並呼叫 register_supplier() 即可，這支 app.py 完全不用改。
 """
 
@@ -57,8 +57,8 @@ import streamlit as st
 try:
     import pandas as pd
 
-    import suppliers  # noqa: F401  (只是為了觸發所有供應商的 register_supplier())
-    from extract_utils import (
+    import suppliers_streamlit  # noqa: F401  (只是為了觸發所有供應商的 register_supplier())
+    from extract_utils_streamlit import (
         FIELD_CODES,
         DISPLAY_HEADERS,
         NA,
@@ -156,7 +156,7 @@ registered = list_registered_suppliers()
 with st.expander(f"🏷️ 目前系統已支援 {len(registered)} 家供應商的辨識規則"):
     for s in registered:
         st.write(f"- **{s['label']}** (代碼: `{s['key']}`)")
-    st.caption("要新增供應商，請在 suppliers.py 增加一組辨識/擷取規則並註冊，不用改這個網頁程式。")
+    st.caption("要新增供應商，請在 suppliers_streamlit.py 增加一組辨識/擷取規則並註冊，不用改這個網頁程式。")
 
 st.markdown(
     """
@@ -483,7 +483,7 @@ audit_rows = bundle.get("audit_rows", [])
 if unknown_files:
     st.warning(
         "⚠️ 以下檔案無法辨識供應商 (未命中任何已註冊的規則)，欄位皆以 N/A 填入。"
-        "請到 suppliers.py 新增這家供應商的辨識/擷取規則：\n\n"
+        "請到 suppliers_streamlit.py 新增這家供應商的辨識/擷取規則：\n\n"
         + "\n".join(f"- {name}" for name in unknown_files)
     )
 

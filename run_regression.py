@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
 """供應商辨識規則的回歸測試工具。
 
-用途：每次修改 suppliers.py 之後，快速確認「這次改動的供應商」過去所有
-已驗證樣本是否仍然維持 100% 正確率 (避免修好新樣本、卻改壞舊樣本)。
+用途：每次修改 suppliers_streamlit.py 之後，快速確認「這次改動的供應商」
+過去所有已驗證樣本是否仍然維持 100% 正確率 (避免修好新樣本、卻改壞舊樣本)。
 
 樣本存放慣例：test_samples/<SUPPLIER_KEY>/sampleN.pdf + sampleN_ref.xlsx
 (N 從 1 開始)，每次新增/修正一個樣本，記得把 (PDF, 正確答案 Excel) 這一組
@@ -16,8 +16,8 @@ import sys
 import glob
 import os
 
-import suppliers  # noqa: F401  (觸發 register_supplier())
-import extract_utils as eu
+import suppliers_streamlit  # noqa: F401  (觸發 register_supplier())
+import extract_utils_streamlit as eu
 
 
 def run_one(pdf_path: str, ref_path: str, expected_key: str):

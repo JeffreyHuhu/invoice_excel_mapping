@@ -8,8 +8,8 @@ verify_app.py
 專門給人工「逐欄」核對系統擷取出來的資料是否正確，用於：
 
   1. 上傳一份供應商帳單 PDF (不需要正確答案 Excel)。
-  2. 系統自動辨識供應商、擷取欄位 (跟 app.py 用同一套 suppliers.py /
-     extract_utils.py 核心引擎，共用同一套辨識/擷取規則，兩邊不會有
+  2. 系統自動辨識供應商、擷取欄位 (跟 app.py 用同一套 suppliers_streamlit.py /
+     extract_utils_streamlit.py 核心引擎，共用同一套辨識/擷取規則，兩邊不會有
      擷取邏輯不一致的問題)。
   3. 人工逐欄核對：同一張發票的抬頭欄位 (發票日期、發票號碼、供應商名稱...
      等，整張發票只會有一個值) 只顯示一次；費用名稱/金額這種同一張發票
@@ -19,7 +19,7 @@ verify_app.py
   4. 核對完成後，對有標記錯誤欄位的發票按「🚩 回報錯誤」，會把「所有被
      標記為錯誤的欄位 + 使用者填的正確答案」記錄下來；把這份回報記錄拿
      給開發端 (或直接請 Claude 執行 add-invoice-supplier 這套流程) 依照
-     回報內容修正 suppliers.py 裡對應供應商的 parse() 規則，改完之後回到
+     回報內容修正 suppliers_streamlit.py 裡對應供應商的 parse() 規則，改完之後回到
      這個網頁、重新上傳同一份 PDF 再核對一次，確認錯誤欄位已經修正。
 
 跟 app.py 的差異：
@@ -29,7 +29,7 @@ verify_app.py
     拿來當作「正確答案」或「除錯依據」的原始素材。
   - 兩支 App 各自獨立部署 (Streamlit Cloud 各自建一個 App，Main file
     path 分別指向 app.py / verify_app.py)，但共用同一個 GitHub repo、
-    同一套 suppliers.py / extract_utils.py，新增或修正供應商規則時，
+    同一套 suppliers_streamlit.py / extract_utils_streamlit.py，新增或修正供應商規則時，
     兩邊會同時生效，不用分別維護兩份擷取邏輯。
 """
 
@@ -54,8 +54,8 @@ try:
     from openpyxl.styles import Font, PatternFill, Alignment
     from openpyxl.utils import get_column_letter
 
-    import suppliers  # noqa: F401 (觸發所有供應商的 register_supplier())
-    from extract_utils import (
+    import suppliers_streamlit  # noqa: F401 (觸發所有供應商的 register_supplier())
+    from extract_utils_streamlit import (
         NA,
         FIELD_CODES,
         DISPLAY_HEADERS,
@@ -154,7 +154,7 @@ def _record_correct_invoice(supplier_key_: str, supplier_lbl: str, inv_no: str, 
 # ---------------------------------------------------------------------------
 # 「🚩 回報錯誤」記錄：把使用者標記為錯誤的欄位 + 填的正確答案存成一筆一筆
 # 的紀錄 (取代原本要使用者自己下載「回饋記錄 Excel」再傳給開發端的做法)，
-# 之後可以直接下載這份累計記錄，依內容修正 suppliers.py 對應供應商的
+# 之後可以直接下載這份累計記錄，依內容修正 suppliers_streamlit.py 對應供應商的
 # parse() 規則。跟「確認無誤」的正確帳單記錄一樣，這份記錄也只存在 App
 # 執行環境的暫存檔案裡，Reboot/重新部署後會被清空，要長期留存請定期下載。
 # ---------------------------------------------------------------------------
@@ -497,7 +497,7 @@ if run_clicked:
         result = find_best_extraction(tmp_path, supplier_key=supplier_key, reference_rows=None)
         # 金額稽核：系統擷取出來的費用明細加總，要跟帳單原文自己寫的
         # 「未稅總額」(Total (Excl. VAT) / Sub Total…) 一樣，不一致就跳出
-        # 警示 (只有已經實作稽核規則的供應商才會有結果，見 suppliers.py)。
+        # 警示 (只有已經實作稽核規則的供應商才會有結果，見 suppliers_streamlit.py)。
         try:
             audit_results = audit_invoice_totals(
                 result["supplier_key"], tmp_path, result["rows"]
@@ -534,7 +534,7 @@ st.success(
 
 # ---------------------------------------------------------------------------
 # 金額稽核，兩項各自獨立 (哪一項有做，取決於這家供應商有沒有實作對應的
-# 擷取規則，見 suppliers.py)：
+# 擷取規則，見 suppliers_streamlit.py)：
 # 1. 未稅總額稽核：系統擷取出來的費用明細加總 (不含 VAT)，要跟帳單原文
 #    自己寫的「未稅總額」(Total (Excl. VAT) / Sub Total…) 一樣。
 # 2. 含稅總額稽核：未稅費用加總 + 每筆費用的 VAT 加總，要等於帳單原文
