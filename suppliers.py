@@ -1835,6 +1835,39 @@ def _femaria_add_space_after_comma(value: Optional[str]) -> Optional[str]:
     return re.sub(r",(\S)", r", \1", value.strip())
 
 
+def _femaria_clean_placeholder_dash(value: Optional[str]) -> Optional[str]:
+    """'BL/AWB No. : -' 這種欄位值整個就是一個 '-'，代表帳單上沒有填這個
+    資訊 (不是真的提單號碼叫 '-')，回傳 None 讓 expand_to_rows() 補 N/A。
+    """
+    if value is None:
+        return None
+    return None if value.strip() == "-" else value
+
+
+_FEMARIA_VOLUME_PATTERN = re.compile(
+    r"Detail\s*pty\s*/\s*Gross_wt\s*/\s*:\s*(.+?)\s*/\s*\d+\s*KGS",
+    re.IGNORECASE,
+)
+
+
+def _femaria_parse_volume(text: str) -> Optional[str]:
+    """'Detail pty /Gross_wt/ : (1x20 FT) /0 KGS /0Cubic' 只有一組貨櫃
+    資訊時，正確答案只留括號裡面的內容 ('1x20 FT')；但遇到像
+    '(1x20 FT) (3x40 FT) (3x40 HQ) /0 KGS /0Cubic' 這種同一張帳單裝多種
+    櫃型/批次的情況，正確答案要連括號跟全部幾組一起保留
+    ('(1x20 FT) (3x40 FT) (3x40 HQ)')，不能只抓第一組就停。
+    """
+    m = _FEMARIA_VOLUME_PATTERN.search(text)
+    if not m:
+        return None
+    raw = m.group(1).strip()
+    groups = re.findall(r"\([^)]*\)", raw)
+    if len(groups) <= 1:
+        single = re.match(r"^\((.+)\)$", raw)
+        return single.group(1).strip() if single else raw
+    return raw
+
+
 def _femaria_extract_items(text: str) -> List[Dict]:
     """逐行處理，見上面區塊註解說明的「三行拆分費用」重組規則。"""
     items: List[Dict] = []
@@ -1867,6 +1900,7 @@ def _femaria_extract_items(text: str) -> List[Dict]:
             items.append({
                 "description": _femaria_clean_desc(desc),
                 "amount": _femaria_clean_amount(m.group("amount")),
+                "vat": None,
             })
         elif started:
             pending.append(line)
@@ -1886,10 +1920,13 @@ def parse_femaria(text: str) -> Dict:
     header["invoice_date"] = _femaria_parse_date(
         _search(r"Jakarta\s*,\s*(\d{4}-\d{1,2}-\d{1,2})", text)
     )
-    header["volume"] = _search(r"Detail pty.*?:\s*\((.+?)\)", text)
+    header["volume"] = _femaria_parse_volume(text)
     header["vessel"] = _search(r"Vessel\s*/\s*Voyage\s*:\s*(.+?)\s+ATA", text)
-    header["bl_no"] = _search(r"BL/AWB\s+No\.\s*:\s*(\S+)", text)
+    header["bl_no"] = _femaria_clean_placeholder_dash(
+        _search(r"BL/AWB\s+No\.\s*:\s*(\S+)", text)
+    )
     header["mbl_no"] = header["bl_no"]
+    header["shipper"] = _search(r"Shipper\s*:\s*(.+?)\s+SPJK\s*/\s*SPJM\s*Date", text)
 
     # 這種帳單沒有到達日/開船日/啟運港/目的港/貨櫃號碼/Order No.，留空給
     # expand_to_rows() 補 N/A (SPJK/SPJM Date、ATA、Uitslag Date 印出來的都是
@@ -1898,9 +1935,12 @@ def parse_femaria(text: str) -> Dict:
                  "port_of_loading", "port_of_discharge", "container_no"):
         header[code] = None
 
+    # 這家供應商帳單沒有單獨的 VAT 項目、也沒有整張帳單合計的 VAT 總額，
+    # 所以每筆費用明細的 vat 一律是 None，讓 expand_to_rows() 補 N/A，不用
+    # 額外寫擷取規則。
     items = _femaria_extract_items(text)
     if not items:
-        items = [{"description": None, "amount": None}]
+        items = [{"description": None, "amount": None, "vat": None}]
 
     return {"header": header, "items": items}
 
