@@ -39,9 +39,11 @@ from openpyxl.utils import get_column_letter
 
 try:
     import pytesseract
+    from PIL import ImageOps
     _OCR_AVAILABLE = True
 except ImportError:
     pytesseract = None
+    ImageOps = None
     _OCR_AVAILABLE = False
 
 NA = "N/A"  # 抓不到值時，一律填這個 (使用者需求)
@@ -161,6 +163,99 @@ def extract_text_from_pdf(pdf_path: str, **pdfplumber_kwargs) -> str:
     return "\n".join(parts)
 
 
+_OCR_ENHANCED_TEXT_CACHE: Dict[Tuple[str, int], str] = {}
+
+
+def _ocr_page_text_enhanced(pdf_path: str, page_index: int, page) -> str:
+    """跟 _ocr_page_text() 一樣會先偵測/校正旋轉角度，但額外先把圖片轉成
+    灰階 + 自動對比 (PIL ImageOps.autocontrast) 再做 OCR。
+
+    實測這組前處理可以明顯降低數字誤判的機率 (例如 HANDAL 掃描版帳單原本
+    OCR 常把 "14" 誤讀成 "44"，加上這個前處理後正確率明顯提升)。只給
+    force_ocr=True 的供應商用獨立的函式/快取，不影響 _ocr_page_text()
+    原本給『沒有文字層』的一般掃描件供應商 (例如 DHL) 使用的既有行為。
+    """
+    cache_key = (pdf_path, page_index)
+    if cache_key in _OCR_ENHANCED_TEXT_CACHE:
+        return _OCR_ENHANCED_TEXT_CACHE[cache_key]
+
+    text = ""
+    if _OCR_AVAILABLE:
+        try:
+            image = page.to_image(resolution=300).original
+            try:
+                osd = pytesseract.image_to_osd(image)
+                m = re.search(r"Rotate:\s*(\d+)", osd)
+                rotate_by = int(m.group(1)) if m else 0
+            except Exception:
+                rotate_by = 0
+            if rotate_by:
+                image = image.rotate(-rotate_by, expand=True)
+            image = ImageOps.autocontrast(image.convert("L"))
+            text = pytesseract.image_to_string(image) or ""
+        except Exception:
+            text = ""
+
+    _OCR_ENHANCED_TEXT_CACHE[cache_key] = text
+    return text
+
+
+def extract_pages_from_pdf_force_ocr(pdf_path: str) -> List[str]:
+    """跟 extract_pages_from_pdf() 類似，但『不管 pdfplumber 有沒有抓到文字
+    層，每一頁一律強制用 OCR 辨識』，不看文字層內容。
+
+    用途：少數供應商的 PDF 雖然有文字層 (不是空白)，但那個文字層本身就是
+    亂碼 (字型編碼有問題，數字/字母會被讀錯，例如 "3,892,040" 被讀成
+    "3,g92,o4o"，8 被讀成 g、0 被讀成 o)。一般流程 (extract_pages_from_pdf())
+    只在『文字層完全是空白』時才會改用 OCR，遇到這種『有文字層但是亂碼』
+    的狀況不會觸發，會悄悄把錯誤的數字寫進 Excel，不會有任何警告。
+
+    第一次發現這個狀況的供應商是 HANDAL (PT. Handal Mandiri Transindo) 的
+    掃描版帳單。透過 register_supplier(..., force_ocr=True) 讓特定供應商
+    一律呼叫這個函式，不受一般『先試文字層』的邏輯影響；其他供應商不受
+    影響。
+
+    ⚠️ 同一家供應商可能同時有「真正掃描的版型」跟「原生可編輯 PDF 的版型」
+    兩種帳單 (HANDAL 就是這樣：月結單是掃描件，但部分單張發票是乾淨的
+    原生 PDF，完全沒有文字層亂碼問題)。如果整頁都強制 OCR，乾淨版型反而
+    會被 OCR 的版面重新切行方式搞亂 (OCR 看到的是『渲染後的圖片』，欄位
+    斷行方式跟 pdfplumber 原生文字層不一樣，容易把不同欄位的文字黏在一起)。
+    因此這裡逐頁判斷：只有『整頁幾乎被一張大圖片蓋住』(page.images 裡有
+    覆蓋面積 >= 90% 頁面的圖片，也就是真正的掃描頁) 才強制 OCR；沒有這種
+    滿版圖片的頁面 (原生文字 PDF) 一律直接用 pdfplumber 的文字層，不做
+    OCR，避免把乾淨版型的文字搞亂。
+    """
+    pages_text = []
+    with pdfplumber.open(pdf_path) as pdf:
+        for i, page in enumerate(pdf.pages):
+            if _page_is_scanned_image(page):
+                text = _ocr_page_text_enhanced(pdf_path, i, page)
+            else:
+                text = page.extract_text() or ""
+            pages_text.append(text)
+    return pages_text
+
+
+def _page_is_scanned_image(page, coverage_threshold: float = 0.9) -> bool:
+    """判斷這一頁是不是『整頁被一張掃描圖片蓋住』(真正的掃描件)，而不是
+    『原生文字 PDF 單純也有插圖』。用頁面裡最大那張圖片的面積占頁面總面積
+    的比例來判斷，預設 90% 以上才算掃描頁。"""
+    try:
+        page_area = float(page.width) * float(page.height)
+        if page_area <= 0:
+            return False
+        for im in page.images:
+            img_w = float(im.get("x1", 0)) - float(im.get("x0", 0))
+            img_h = float(im.get("y1", 0)) - float(im.get("y0", 0))
+            if img_w <= 0 or img_h <= 0:
+                continue
+            if (img_w * img_h) / page_area >= coverage_threshold:
+                return True
+    except Exception:
+        return False
+    return False
+
+
 def extract_pages_from_pdf(pdf_path: str, **pdfplumber_kwargs) -> List[str]:
     """跟 extract_text_from_pdf() 一樣，但個別回傳『每一頁』的文字 (不合併成
     一個字串)。給 multi_page 供應商 (一份 PDF 裡有好幾張各自獨立的發票，
@@ -274,7 +369,8 @@ def register_supplier(key: str, label: str,
                        multi_page: bool = False,
                        extract_total: Optional[Callable[[str], Optional[float]]] = None,
                        extract_grand_total: Optional[Callable[[str], Optional[float]]] = None,
-                       audit_exclude: Tuple[str, ...] = ()) -> None:
+                       audit_exclude: Tuple[str, ...] = (),
+                       force_ocr: bool = False) -> None:
     """註冊一家供應商。
 
     extract_total (可選)：從『一張發票』的原始文字裡抓出帳單本身寫的
@@ -294,11 +390,18 @@ def register_supplier(key: str, label: str,
     『不是真正費用、不該算進未稅總額加總』的合成列 (例如 YJE_TATA 的
     "DPP" 是額外附加的未稅金額備註列，不是一筆實際費用)，稽核加總時要
     跳過這些列，避免誤判成不一致。
+
+    force_ocr (可選，預設 False)：這家供應商的 PDF 文字層『有內容但是
+    亂碼』(不是空白，一般的『沒有文字層才用 OCR』判斷不會觸發)，設成
+    True 後，不管文字層有沒有內容，一律強制用 OCR 重新辨識每一頁 (見
+    extract_pages_from_pdf_force_ocr())，取代文字層，避免把亂碼數字
+    悄悄寫進 Excel。目前只對 multi_page=True 的供應商生效 (透過
+    _parse_multi_page_pdf())。
     """
     SUPPLIER_REGISTRY[key] = {
         "label": label, "detect": detect_fn, "parse": parse_fn, "multi_page": multi_page,
         "extract_total": extract_total, "extract_grand_total": extract_grand_total,
-        "audit_exclude": audit_exclude,
+        "audit_exclude": audit_exclude, "force_ocr": force_ocr,
     }
 
 
@@ -382,7 +485,10 @@ def _parse_multi_page_pdf(pdf_path: str, key: str, **pdfplumber_kwargs) -> List[
     回傳一筆全 N/A 的列，跟其他供應商『抓不到就整張 N/A』的行為一致。
     """
     entry = SUPPLIER_REGISTRY[key]
-    pages = extract_pages_from_pdf(pdf_path, **pdfplumber_kwargs)
+    if entry.get("force_ocr"):
+        pages = extract_pages_from_pdf_force_ocr(pdf_path)
+    else:
+        pages = extract_pages_from_pdf(pdf_path, **pdfplumber_kwargs)
     rows: List[Dict] = []
     for page_text in pages:
         try:

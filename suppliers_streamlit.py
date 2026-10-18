@@ -3773,3 +3773,282 @@ register_supplier(
     "ECOMET", "PT. TRANS ECOMET GLOBAL", detect_ecomet, parse_ecomet,
     multi_page=True,
 )
+
+
+# ============================================================
+# HANDAL (PT. Handal Mandiri Transindo)
+# ------------------------------------------------------------
+# 兩種 PDF 版型都用同一套 detect/parse：
+#   (a) 掃描檔 (例如 47 頁的月結單，一頁一張發票) - 文字層存在但是亂碼
+#       (OCR 數字誤讀，例如 8→g, 0→o, 1→4)，用 force_ocr=True 強制走
+#       獨立的 OCR pipeline (extract_pages_from_pdf_force_ocr)，不信任
+#       pdfplumber 原生抓到的文字層。
+#   (b) 可編輯 PDF (例如 HG12240926.pdf) - 沒有任何欄位標籤文字，只有
+#       編號+描述+單價+金額的表格列，直接用 pdfplumber 原生文字即可。
+# ============================================================
+
+_HANDAL_NUM = r'\d{1,3}(?:,\d{3})+'  # 要求至少一個千分位逗號 (>=1000)，避免把
+# 描述文字裡本來就有的小數字 (例如 "TRUCKING LAUT 40 (PPH 23)" 裡的 40、23，
+# 或 "CUSTOM CLEARANCE (PART OFF 10)" 裡的 10) 誤判成金額
+_HANDAL_SEP = r'[\s.,;]*'
+
+_HANDAL_NON_ITEM_PREFIXES = (
+    "DESCRIPTION", "QTY", "UNIT PRICE", "AMOUNT", "NO.", "NO ",
+    "VESSEL", "DATE", "INVIOCE", "INVOICE", "NO.BC", "NO. BC",
+    "SHIPPING REMARKS", "KEPADA YTH", "DEBIT NOTE", "E.M.K", "EMKU",
+    "PT. HANDAL", "HANDAL MANDIRI", "FINANCE", "PAYMENT BY",
+    "HARAP DITRANSFER", "BANK", "NO. REK", "KOMPLEK", "TELP",
+    "FOR AND ON BEHALF", "TOTAL", "#", "RIBU RUPIAH", "JUTA",
+    "JL RAYA", "JL.", "KAWASAN INDUSTRI", "SERANG", "TAMBAK",
+    "KAB ", "RAYA SERANG",
+)
+
+_HANDAL_CODE_RE = re.compile(r'\b([A-Z]{4,8}\d{6,10})\b')
+_HANDAL_ORDER_NO_RE = re.compile(r'(?<![A-Z])([A-Z])(\d{5,7})(?!\d)')
+_HANDAL_INVOICE_NO_RE = re.compile(r'\bHG\d{8}\b')
+_HANDAL_INVOICE_DATE_RE = re.compile(r'\b(\d{1,2}\s+[A-Za-z]+\s+\d{4})\b')
+_HANDAL_ROUTE_RE = re.compile(r'([A-Z][A-Z ]*?) *- *([A-Z][A-Z ]*?) *- *(\d{1,2}/\d{1,2}/\d{4})')
+_HANDAL_VOLUME_RE = re.compile(r'\b(\d{1,2}X\d{2,3})\b')
+_HANDAL_CONSIGNEE_RE = re.compile(r'\b([A-Z][A-Z\s]{2,40}\.\s*PT)\b')
+_HANDAL_TOTAL_RE = re.compile(r'(\d{1,3}(?:,\d{3})+)\s*\n+\s*#')
+_HANDAL_GROUPED_NUM_RE = re.compile(r'\d{1,3}(?:,\d{3})+')
+
+
+def _looks_like_handal_item_desc(line: str) -> bool:
+    text = line.strip()
+    if not text or len(text) < 3 or len(text) > 48:
+        return False
+    if not text[0].isalpha() or not text[0].isupper():
+        return False
+    # 真正的費用項目名稱整行都是大寫；只要出現小寫字母，幾乎都是 OCR 把
+    # VESSEL 欄位等雜訊文字誤讀成英數混合的殘留，不是費用項目。
+    if re.search(r'[a-z]', text):
+        return False
+    upper = text.upper()
+    for prefix in _HANDAL_NON_ITEM_PREFIXES:
+        if upper.startswith(prefix):
+            return False
+    if re.search(r'\.\s*PT\b', upper):
+        return False
+    if re.search(r'\d{1,2}/\d{1,2}/\d{4}', text):
+        return False
+    if re.match(r'^[A-Z][A-Z ]*-[A-Z ]+-', upper):
+        return False
+    if (_HANDAL_CODE_RE.search(upper) or _HANDAL_ORDER_NO_RE.search(upper)
+            or _HANDAL_INVOICE_NO_RE.search(upper)):
+        return False
+    # 4 個以上連續數字、但不是千分位逗號分隔格式 -> 很可能是編號/代碼，不是費用名稱
+    stripped_grouped = _HANDAL_GROUPED_NUM_RE.sub('', upper)
+    if re.search(r'\d{4,}', stripped_grouped):
+        return False
+    allowed = re.sub(r'[A-Z0-9 /()=*.,\-]', '', upper)
+    if len(allowed) > 2:
+        return False
+    if len(re.findall(r'[A-Z]', upper)) < 2:
+        return False
+    return True
+
+
+def _handal_amount_to_int(s):
+    if not s:
+        return None
+    s = s.replace(",", "").strip()
+    return int(s) if s.isdigit() else None
+
+
+_HANDAL_MONTHS_EN = {
+    "jan": 1, "january": 1, "feb": 2, "february": 2, "mar": 3, "march": 3,
+    "apr": 4, "april": 4, "may": 5, "jun": 6, "june": 6, "jul": 7, "july": 7,
+    "aug": 8, "august": 8, "sep": 9, "sept": 9, "september": 9,
+    "oct": 10, "october": 10, "nov": 11, "november": 11, "dec": 12, "december": 12,
+}
+
+
+def _handal_parse_date_monthname(s):
+    if not s:
+        return None
+    m = re.match(r'(\d{1,2})\s+([A-Za-z]+)\s+(\d{4})', s.strip())
+    if not m:
+        return None
+    day, month_name, year = m.groups()
+    return _format_date_en_from_month_name(day, month_name, year)
+
+
+def _handal_parse_date_slash(s):
+    if not s:
+        return None
+    m = re.match(r'(\d{1,2})/(\d{1,2})/(\d{4})', s.strip())
+    if not m:
+        return None
+    d, mo, y = m.groups()
+    return _format_date_en(d, mo, y)
+
+
+def _handal_clean_port(s: str) -> str:
+    s = re.sub(r'\s+', ' ', s).strip()
+    s = re.sub(r'^(PT)\s+', '', s)
+    return s
+
+
+_HANDAL_COMBINED_ITEM_RE = re.compile(
+    rf'^(?:\d+\s+)?(?P<desc>[A-Z][A-Za-z0-9 /().=*\-]*?)[\s,]+(?:\d+[\s,]+)?'
+    rf'(?P<unit>{_HANDAL_NUM}){_HANDAL_SEP}(?P<amount>{_HANDAL_NUM})(?!\d)[^\n0-9]*$'
+)
+_HANDAL_PAIR_ONLY_RE = re.compile(
+    rf'^(?P<unit>{_HANDAL_NUM}){_HANDAL_SEP}(?P<amount>{_HANDAL_NUM})(?!\d)[^\n0-9]*$'
+)
+_HANDAL_SINGLE_NUM_RE = re.compile(
+    rf'^(?P<amount>{_HANDAL_NUM})(?!\d)[^\n0-9]*$'
+)
+
+
+def _handal_extract_vessel(text: str, order_no):
+    if order_no:
+        for line in text.splitlines():
+            if order_no in line:
+                before = line.split(order_no)[0]
+                words = re.findall(r'[A-Z0-9]+', before)
+                if words:
+                    candidate = ' '.join(words)
+                    if len(candidate) >= 3:
+                        return candidate
+    lines = text.splitlines()
+    for i, line in enumerate(lines):
+        if 'VESSEL' in line.upper():
+            for nxt in lines[i + 1:i + 3]:
+                words = re.findall(r'[A-Z0-9]+', nxt)
+                if words:
+                    candidate = ' '.join(words)
+                    if len(candidate) >= 3:
+                        return candidate
+    return None
+
+
+def _handal_extract_header(text: str) -> Dict:
+    h: Dict = {}
+
+    m = _HANDAL_CONSIGNEE_RE.search(text)
+    h['consignee'] = re.sub(r'\s+', ' ', m.group(1)).strip() if m else None
+
+    m = _HANDAL_ROUTE_RE.search(text)
+    if m:
+        h['port_of_loading'] = _handal_clean_port(m.group(1))
+        h['port_of_discharge'] = _handal_clean_port(m.group(2))
+        h['onboard_date'] = _handal_parse_date_slash(m.group(3))
+    else:
+        h['port_of_loading'] = h['port_of_discharge'] = h['onboard_date'] = None
+
+    m = _HANDAL_VOLUME_RE.search(text)
+    h['volume'] = m.group(1) if m else None
+
+    m = _HANDAL_CODE_RE.search(text)
+    code = m.group(1) if m else None
+    h['bl_no'] = code
+    h['mbl_no'] = code
+
+    m = _HANDAL_INVOICE_NO_RE.search(text)
+    h['invoice_no'] = m.group(0) if m else None
+
+    m = _HANDAL_INVOICE_DATE_RE.search(text)
+    h['invoice_date'] = _handal_parse_date_monthname(m.group(1)) if m else None
+
+    m = _HANDAL_ORDER_NO_RE.search(text)
+    h['order_no'] = (m.group(1) + m.group(2)) if m else None
+
+    h['vessel'] = _handal_extract_vessel(text, h['order_no'])
+
+    h['supplier'] = "PT. Handal Mandiri Transindo"
+    h['arrive_date'] = None
+    h['container_no'] = None
+    h['shipper'] = None
+
+    return h
+
+
+def _handal_item_region(text: str) -> str:
+    """只取『總金額數字出現以前』的文字範圍來找費用項目，把發票下方的簽名、
+    銀行帳號、電話、地址等雜訊文字整段排除，避免被誤判成費用項目。"""
+    m = _HANDAL_TOTAL_RE.search(text)
+    if m:
+        return text[:m.start()]
+    return text
+
+
+def _handal_extract_items(text: str):
+    region = _handal_item_region(text)
+    lines = [l.strip() for l in region.splitlines()]
+    items = []
+    pending_descs = []
+    pending_numbers = []
+
+    for line in lines:
+        if not line:
+            continue
+
+        m = _HANDAL_COMBINED_ITEM_RE.match(line)
+        if m and _looks_like_handal_item_desc(m.group('desc')):
+            items.append({
+                "description": m.group('desc').strip(),
+                "amount": _handal_amount_to_int(m.group('amount')),
+                "vat": None,
+            })
+            continue
+
+        m2 = _HANDAL_PAIR_ONLY_RE.match(line)
+        if m2:
+            pending_numbers.append(_handal_amount_to_int(m2.group('amount')))
+            continue
+
+        if _looks_like_handal_item_desc(line):
+            pending_descs.append(line)
+            continue
+
+        m3 = _HANDAL_SINGLE_NUM_RE.match(line)
+        if m3:
+            pending_numbers.append(_handal_amount_to_int(m3.group('amount')))
+            continue
+
+    if pending_descs:
+        n = len(pending_descs)
+        if len(pending_numbers) == n:
+            amounts = pending_numbers
+        elif len(pending_numbers) == 2 * n:
+            amounts = [pending_numbers[i * 2 + 1] for i in range(n)]
+        else:
+            amounts = (pending_numbers + [None] * n)[:n]
+        for desc, amount in zip(pending_descs, amounts):
+            items.append({"description": desc, "amount": amount, "vat": None})
+
+    return items
+
+
+def detect_handal(text: str) -> bool:
+    upper = text.upper()
+    if "HANDAL MANDIRI TRANSINDO" in upper or "HANDAL" in upper:
+        return True
+    if (_HANDAL_INVOICE_NO_RE.search(text) and "SEGEL" in upper
+            and "CUSTOM CLEARANCE" in upper):
+        return True
+    return False
+
+
+def parse_handal(text: str) -> Dict:
+    header = _handal_extract_header(text)
+    items = _handal_extract_items(text)
+    if not items:
+        items = [{"description": None, "amount": None, "vat": None}]
+    return {"header": header, "items": items}
+
+
+def _handal_extract_total(text: str):
+    m = _HANDAL_TOTAL_RE.search(text)
+    if not m:
+        return None
+    return _handal_amount_to_int(m.group(1))
+
+
+register_supplier(
+    "HANDAL", "PT. Handal Mandiri Transindo", detect_handal, parse_handal,
+    multi_page=True, force_ocr=True,
+    extract_total=_handal_extract_total,
+)
