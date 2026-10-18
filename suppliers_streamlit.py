@@ -2178,14 +2178,18 @@ def parse_trans(text: str) -> Dict:
     # VAT：跟 KUEHNE NAGEL 一樣，這種帳單無論有幾筆費用明細，VAT 永遠只有
     # 「一個」整張帳單的總稅額 (印在 "VAT (11%) 327.250" 這一行)，不是每筆
     # 費用各自的稅額，所以不塞進某一筆費用明細裡，額外附加一筆「只有 vat、
-    # 沒有 description/amount/order_no」的 item，展開成獨立的一列，Order
-    # No. 留 None 讓 expand_to_rows() 補 N/A (這一列本來就沒有對應的 DO
-    # No.)。
-    vat_raw = _search(r"VAT\s*\(\d+%\)\s*([\d.,]+)", text)
-    vat_amount = _trans_clean_amount(vat_raw)
+    # 沒有 amount/order_no」的 item，展開成獨立的一列，Order No. 留 None
+    # 讓 expand_to_rows() 補 N/A (這一列本來就沒有對應的 DO No.)。
+    #
+    # ⚠️ 2026-10 修正 (使用者提供新版正確答案 OK_VAT.xlsx 明確要求)：這一列
+    # 的 Description/費用名稱欄位不能留空 (之前是 None → 補 N/A)，要填
+    # "VAT (11%)" 這個費用名稱字串，百分比直接照抄 PDF 印的數字 (不要寫死
+    # 11，避免萬一哪張帳單印的稅率不是 11% 時字串對不上)。
+    _trans_vat_m = re.search(r"VAT\s*\((\d+)%\)\s*([\d.,]+)", text)
+    vat_amount = _trans_clean_amount(_trans_vat_m.group(2)) if _trans_vat_m else None
     if vat_amount is not None:
-        items.append({"description": None, "amount": None, "order_no": None,
-                      "vat": vat_amount})
+        items.append({"description": f"VAT ({_trans_vat_m.group(1)}%)",
+                      "amount": None, "order_no": None, "vat": vat_amount})
 
     return {"header": header, "items": items}
 
