@@ -3833,11 +3833,12 @@ def _apl_extract_items(text: str) -> List[Dict]:
         })
     vat = _apl_clean_amount(_search(r"VAT\s*:\s*([\d,]+\.\d{2})", text))
     if vat is not None:
-        # 正確答案的慣例：只有一筆費用明細時 (不會混淆這個稅額是哪一筆
-        # 費用算出來的)，VAT 那一列的 Description 直接沿用那筆費用的描述；
-        # 有兩筆以上費用明細時 (無法判斷稅額對應哪一筆)，VAT 那一列留空。
-        vat_desc = items[0]["description"] if len(items) == 1 else None
-        items.append({"description": vat_desc, "amount": None, "vat": vat})
+        # ⚠️ 2026-10 修正 (使用者提供新版正確答案明確要求)：VAT 那一列的
+        # Description 不分單筆/多筆費用明細，一律固定填 "VAT"(照抄 PDF 上
+        # "VAT : 77,000.00" 這個標籤，PDF 沒有印百分比，跟 TRANS_DAYA_PRIMA
+        # 的 "VAT (11%)" 不同，不要套錯格式)。舊版「只有一筆費用時沿用該筆
+        # description、多筆時留空」的規則已經不符合新正確答案，廢棄。
+        items.append({"description": "VAT", "amount": None, "vat": vat})
     return items
 
 
