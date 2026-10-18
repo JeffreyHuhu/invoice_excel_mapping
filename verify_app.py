@@ -748,7 +748,10 @@ def _build_result_excel(rows_: list, invoice_groups_: list, marks: dict, supplie
     """
     wb = Workbook()
     ws = wb.active
-    ws.title = (supplier_key_ or "未知供應商")[:31]
+    # 分頁名稱固定顯示「工作表」，不要秀供應商 key (例如 "DWIHARTA")——
+    # 使用者反饋這份匯出檔案是要直接拿給人看/當範本用，分頁名稱不需要帶
+    # 供應商資訊 (供應商資訊已經在檔案內容的 SUPPLIER 欄位裡)。
+    ws.title = "工作表"
 
     bold = Font(bold=True)
     header_fill = PatternFill("solid", fgColor="DDEBF7")

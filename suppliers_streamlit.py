@@ -1627,14 +1627,247 @@ def parse_tata_receipt(text: str) -> Dict:
     return {"header": header, "items": items}
 
 
+# ---------------------------------------------------------------------------
+# TATA 的第三種格式：A/F 空運費率明細表 (⚠️ "Kurs 1 USD" 排版，一行一筆貨物)
+# ---------------------------------------------------------------------------
+#
+# 這是同一家 TATA 供應商的「第三種帳單樣式」：空運 (Air Freight) 費率
+# 明細表，整張發票是『一行一筆貨物』的表格，欄位是
+# "NO DATE Shipper Country ATTN HAWB Qty WEIGHT Kurs 1 USD A/F PPn 12% tati"，
+# 跟 parse_tata_classic()（單筆發票、抬頭式欄位 MAWB:/HAWB:/Flight: 等）、
+# parse_tata_receipt()（印尼文稅務收據 NOMOR INVOICE 排版）完全不同：
+#   - 每一行自己帶著 Shipper/HAWB/重量/金額(A/F)/VAT(PPn 12%)，正確答案的
+#     Description 欄位固定填表頭欄位名稱本身的字面 "A/F"，Amount 欄位是
+#     這一行的 A/F 金額、VAT 欄位是這一行的 PPn 12% 金額、Shipper 欄位是
+#     這一行自己的託運人名稱（不是整張發票共用一個，每一列各自覆蓋，用法
+#     跟 PANCARAN/PT. TRANS DAYA PRIMA 的「每筆品項自帶抬頭欄位覆寫」一樣）。
+#     Volume 欄位填這一行的 WEIGHT 換算成 "數字 kgs" 字串 (去除多餘的小數
+#     尾零，例如 '4,00 kgs' -> '4 kgs'、'12,50 kgs' -> '12.5 kgs')。
+#   - ⚠️ 兩欄並排版面陷阱：Shipper/Country 兩個欄位常常其中一個換行，而且
+#     pdfplumber 抽出來的順序是「換行的上半段先印在這一行『前面』、下半段
+#     印在這一行『後面』」(不是單純往下接一行)，例如：
+#       'SINCETECH (FUJIAN) TECHNOLOGY CO'          <- Shipper 上半段 (前)
+#       '3 4/Aug/25 CHINA RZR RONG YJE...'          <- 本行本體 (中間只剩 Country)
+#       'LTD'                                        <- Shipper 下半段 (後)
+#     或是 Country 換行而 Shipper 完整印在本行：
+#       'HONG'                                       <- Country 上半段 (前)
+#       '2 1/Aug/25 BILLION BASE INTL CO LTD RZR...' <- 本行本體 (Shipper 完整)
+#       'KONG'                                        <- Country 下半段 (後)
+#     判斷方式：先用已知國家字樣清單 (_TATA_AF_KNOWN_COUNTRIES) 檢查本行主
+#     體裡「日期跟 ATTN 之間」的文字 (mid)：
+#       (a) mid 整段剛好就是一個已知國家名稱 -> Shipper 是空的，要去抓前後
+#           兩行拼回來 (Country 已經在本行裡了，不用管前後行)。
+#       (b) mid 結尾找不到任何已知國家名稱 -> Shipper 整段就是 mid 本身，
+#           前後兩行是 Country 的換行殘字 (不需要輸出，直接丟棄但要消耗掉
+#           這兩行，避免被鄰居那一筆誤吃)。
+#       (c) mid 結尾剛好是已知國家名稱、前面還有剩餘文字 -> 單行沒有換行，
+#           Shipper 就是去掉國家字樣後的剩餘文字，不要去動前後行。
+#   - ⚠️ 已知的雜訊列陷阱：帳單第一筆資料列有時候會混入一筆完全不合理的
+#     雜訊資料 (日期離譜 (例如 '1/Oct/19'，跟發票本身的月份 2025/08 完全
+#     對不上)、匯率離譜偏低 (例如 'Rp 440'，印尼盾兌美元匯率正常絕對遠高於
+#     1000))，這種列不是真正的貨運項目，是帳單製作過程殘留的錯誤資料，正確
+#     答案把它整筆排除。這裡用「匯率 (Kurs) 數值是否小於 1000」當判斷依據
+#     (比用日期更穩定、不受帳期月份影響)：Kurs < 1000 直接跳過該列，不計入
+#     items。
+#   - 金額 (A/F) 是印尼式千分位、無小數 ('1.716.000' -> 1716000)；VAT
+#     (PPn 12%) 是印尼式千分位 + 逗號小數 ('167.475,7' -> 167475.7)。
+#   - SUPPLIER 固定抓發票最下方 "Nama :" 那一行 (跟 parse_tata_classic() 一
+#     樣的慣例，但這份帳單的 "Nama :" 後面沒有 "PT." 的句點，是 "PT " 沒有
+#     句點，所以不能照抄 classic 版的 regex，要放寬成不要求句點)。
+#   - CONSIGNEE 抓 "To :" 那一行，但帳單上寫的是
+#     "PT POU CHEN INDONESIA ( ASICS)"，正確答案只要 "PT POU CHEN
+#     INDONESIA"，後面的括號備註 "( ASICS)" 要去掉。
+#   - ⚠️ 稽核機制特別說明：這張帳單印刷的小計 "A/F"/"TOTAL AMOUNT" 跟系統
+#     擷取到的品項加總兩邊核對起來，常態性地會差 1~3 塊錢 (帳單原文自己的
+#     小計看起來是用未顯示的小數位四捨五入組出來的，不是系統擷取錯誤)，
+#     超出系統 ±1 的稽核容許誤差，所以這個格式故意不實作
+#     extract_total/extract_grand_total，让稽核機制視為「不適用」而不是
+#     顯示假警報的「不一致」。
+#   - Order No./Arrive Date/on board date/B/L NO./MBL NO./啟運港/目的港/
+#     船名/貨櫃號碼這張帳單都沒有對應資訊，留 None 給 expand_to_rows() 補
+#     N/A。
+
+def detect_tata_af(text: str) -> bool:
+    """用表頭唯一的 'Kurs 1 USD' 字樣辨識，不會跟 classic/receipt 兩種
+    TATA 格式或 YJE 衝突。"""
+    return "KURS 1 USD" in text.upper()
+
+
+_TATA_AF_ITEM_LINE_RE = re.compile(
+    r"^(?P<no>\d+)\s+(?P<date>\d{1,2}/[A-Za-z]{3}/\d{2})\s+(?P<mid>.*?)\s+"
+    r"(?P<attn>[A-Z]+\s+RONG)\s+(?P<hawb>\S+)\s+(?P<qty>\d+)\s*PKGS\s+"
+    r"(?P<weight>[\d,]+)\s*kgs\s+Rp\s+(?P<kurs>[\d.]+)\s+(?P<amount>[\d.]+)\s+"
+    r"(?P<vat>[\d.,]+)\s*$"
+)
+
+# 已知的國家字樣清單 (多字的排在前面，優先比對)：目前樣本只出現這三種，
+# 之後遇到新國家字樣再加進來即可。
+_TATA_AF_KNOWN_COUNTRIES = ["HONG KONG", "CHINA", "VIETNAM"]
+
+# 本行主體以外、不該被誤當成 Shipper/Country 換行殘字的行首字樣 (帳單下方
+# 小計/備註/銀行資訊區塊)。
+_TATA_AF_SKIP_LINE_PREFIXES = (
+    "A/F", "DPP", "VAT", "TOTAL", "Terbilang", "Note", "REVISI",
+    "PER ALL", "PAYBLE", "BANK", "Branch", "Address", "Swift", "Account", "Nama",
+)
+
+
+def _tata_af_strip_country_suffix(mid: str):
+    """mid 結尾若是已知國家名稱，回傳 (去掉國家字樣後的剩餘文字, 國家字樣)；
+    完全找不到就回傳 (mid 原樣去空白, None)。"""
+    stripped = mid.strip()
+    upper = stripped.upper()
+    for country in _TATA_AF_KNOWN_COUNTRIES:
+        if upper == country:
+            return "", country
+        if upper.endswith(" " + country):
+            return stripped[: -(len(country) + 1)].strip(), country
+    return stripped, None
+
+
+def _tata_af_clean_amount(text: Optional[str]) -> Optional[int]:
+    """印尼式千分位、無小數 '1.716.000' -> 1716000。"""
+    if not text:
+        return None
+    text = text.strip().replace(".", "")
+    return int(text) if text.isdigit() else None
+
+
+def _tata_af_clean_vat(text: Optional[str]) -> Optional[float]:
+    """印尼式千分位 + 逗號小數 '167.475,7' -> 167475.7。"""
+    if not text:
+        return None
+    text = text.strip().replace(".", "").replace(",", ".")
+    try:
+        return float(text)
+    except ValueError:
+        return None
+
+
+def _tata_af_clean_kurs(text: Optional[str]) -> Optional[int]:
+    if not text:
+        return None
+    text = text.strip().replace(".", "").replace(",", "")
+    return int(text) if text.isdigit() else None
+
+
+def _tata_af_format_weight(text: Optional[str]) -> Optional[str]:
+    """'12,50' -> '12.5 kgs'；'4,00' -> '4 kgs' (去除多餘小數尾零)。"""
+    if not text:
+        return None
+    text = text.strip().replace(",", ".")
+    try:
+        value = float(text)
+    except ValueError:
+        return None
+    return f"{value:g} kgs"
+
+
+def _tata_af_take_adjacent(lines, idx, item_line_idx_set, consumed) -> str:
+    """嘗試把 idx 這一行當成換行殘字『消耗掉』：不是本體行、沒被消耗過、
+    非空、不是帳單下方小計/備註區塊的開頭字樣，才會真的被使用並標記消耗；
+    否則回傳空字串 (不使用，也不消耗)。"""
+    if idx < 0 or idx >= len(lines):
+        return ""
+    if idx in item_line_idx_set or idx in consumed:
+        return ""
+    line = lines[idx].strip()
+    if not line or line.startswith(_TATA_AF_SKIP_LINE_PREFIXES):
+        return ""
+    consumed.add(idx)
+    return line
+
+
+def _tata_af_extract_items(text: str) -> List[Dict]:
+    lines = text.split("\n")
+    item_line_idx = [
+        i for i, line in enumerate(lines)
+        if _TATA_AF_ITEM_LINE_RE.match(line.strip())
+    ]
+    item_line_idx_set = set(item_line_idx)
+    consumed = set()
+    items: List[Dict] = []
+
+    for i in item_line_idx:
+        m = _TATA_AF_ITEM_LINE_RE.match(lines[i].strip())
+        mid = m.group("mid")
+        shipper_leftover, country = _tata_af_strip_country_suffix(mid)
+        shipper = shipper_leftover
+
+        if country is not None and shipper_leftover == "":
+            # mid 整段就是國家名稱：Shipper 要從上下兩行的換行殘字拼回來
+            before_line = _tata_af_take_adjacent(lines, i - 1, item_line_idx_set, consumed)
+            after_line = _tata_af_take_adjacent(lines, i + 1, item_line_idx_set, consumed)
+            shipper = f"{before_line} {after_line}".strip()
+        elif country is None:
+            # mid 完全沒有國家字樣：Shipper 就是整段 mid，上下兩行是 Country
+            # 的換行殘字，消耗掉但不使用 (Country 本身不是輸出欄位)
+            _tata_af_take_adjacent(lines, i - 1, item_line_idx_set, consumed)
+            _tata_af_take_adjacent(lines, i + 1, item_line_idx_set, consumed)
+        # else: mid 結尾就有完整的國家名稱、前面還有剩餘文字 -> 單行沒換
+        # 行，shipper 已經是正確值，不要去動前後行。
+
+        kurs = _tata_af_clean_kurs(m.group("kurs"))
+        if kurs is not None and kurs < 1000:
+            # 已知陷阱：匯率離譜偏低的雜訊列 (見上方區塊註解)，直接跳過。
+            continue
+
+        items.append({
+            "description": "A/F",
+            "amount": _tata_af_clean_amount(m.group("amount")),
+            "vat": _tata_af_clean_vat(m.group("vat")),
+            "volume": _tata_af_format_weight(m.group("weight")),
+            "shipper": shipper or None,
+        })
+
+    return items
+
+
+def parse_tata_af(text: str) -> Dict:
+    """注意：這是 multi_page 供應商，text 是『一頁』的文字。"""
+    header: Dict[str, Optional[str]] = {}
+
+    header["invoice_no"] = _search(r"No\.\s*:\s*(\S+)", text)
+
+    date_m = re.search(r"Inv\s*Date\s*:\s*(\d{1,2})/(\d{1,2})/(\d{4})", text)
+    header["invoice_date"] = (
+        _format_date_en(date_m.group(1), date_m.group(2), date_m.group(3))
+        if date_m else None
+    )
+
+    # "Nama :" 後面這份帳單沒有句點 ("PT " 不是 "PT.")，跟 classic 格式的
+    # 寫法不同，不要求句點。
+    header["supplier"] = _search(r"Nama\s*:\s*(.+)$", text)
+
+    consignee_raw = _search(r"\bTo\s*:\s*(.+)$", text)
+    if consignee_raw:
+        consignee_raw = re.sub(r"\s*\([^)]*\)\s*$", "", consignee_raw).strip()
+    header["consignee"] = consignee_raw or None
+
+    for code in (
+        "order_no", "arrive_date", "onboard_date", "bl_no", "mbl_no",
+        "port_of_loading", "port_of_discharge", "vessel", "container_no",
+        "volume", "shipper",
+    ):
+        header[code] = None
+
+    items = _tata_af_extract_items(text)
+    if not items:
+        items = [{"description": None, "amount": None}]
+
+    return {"header": header, "items": items}
+
+
 def detect_tata(text: str) -> bool:
-    return detect_tata_classic(text) or detect_tata_receipt(text)
+    return detect_tata_classic(text) or detect_tata_receipt(text) or detect_tata_af(text)
 
 
 def parse_tata(text: str) -> Dict:
     """依內容判斷屬於哪一種 TATA 帳單格式，分派給對應的 parse 函式。"""
     if detect_tata_receipt(text):
         return parse_tata_receipt(text)
+    if detect_tata_af(text):
+        return parse_tata_af(text)
     return parse_tata_classic(text)
 
 
