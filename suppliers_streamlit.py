@@ -1363,6 +1363,32 @@ def _tata_clean_amount(text: Optional[str]) -> Optional[int]:
     return int(text) if text.isdigit() else None
 
 
+# Shipper 欄位有時候名稱太長會換行，但因為帳單是雙欄排版 (左欄是收件人
+# Address 繼續行、右欄才是 Shipper 繼續行)，pdfplumber 抓文字時兩欄會被
+# 併成同一行：換行後那一行通常是左欄的地址續字 "BARAT" (印尼文「西爪哇」
+# 的後半，JAWA BARAT = 西爪哇省)，但如果 Shipper 名稱也換行，就會變成
+# "BARAT BRANCH" 這種「地址續字 + Shipper 續字」黏在同一行——這裡把
+# "BARAT" 這個已知的地址續字去掉，剩下的部分 (如果有) 才是 Shipper 的
+# 換行續字，要接回 Shipper 名稱後面。
+_TATA_SHIPPER_RE = re.compile(
+    r"\bShipper\s*:\s*(?P<main>.+?)\s*\n(?P<next_line>[^\n]*)\n", re.MULTILINE
+)
+_TATA_SHIPPER_WRAP_RE = re.compile(r"^BARAT\b\s*(?P<cont>.*)$", re.IGNORECASE)
+
+
+def _tata_extract_shipper(text: str) -> Optional[str]:
+    m = _TATA_SHIPPER_RE.search(text)
+    if not m:
+        return None
+    shipper = m.group("main").strip()
+    wrap_m = _TATA_SHIPPER_WRAP_RE.match(m.group("next_line").strip())
+    if wrap_m:
+        cont = wrap_m.group("cont").strip()
+        if cont:
+            shipper = f"{shipper} {cont}"
+    return shipper or None
+
+
 def _tata_parse_date(text: Optional[str]) -> Optional[str]:
     """'2026-08-24' -> '24.08.2026'，跟其他供應商一樣統一成 'DD.MM.YYYY'
     (正確答案 Excel 這幾欄是 Excel 日期格式)。
@@ -1427,7 +1453,7 @@ def parse_tata_classic(text: str) -> Dict:
     header["vessel"] = _search(rf"\bFlight\s*:\s*(.+?){_TATA_STOP}", text)
     header["volume"] = _search(rf"\bQTY\s*:\s*(.+?){_TATA_STOP}", text)
     header["port_of_loading"] = _search(rf"\bORIGIN\s*:\s*(.+?){_TATA_STOP}", text)
-    header["shipper"] = _search(rf"\bShipper\s*:\s*(.+?){_TATA_STOP}", text)
+    header["shipper"] = _tata_extract_shipper(text)
 
     # 注意：不能用 r"\bDate\s*:\s*..." 這種寬鬆寫法，因為同一頁最上方
     # "INV Date :2026-08-24 15:55:13" 也符合這個樣式 (字面上 "Date :" 前面
