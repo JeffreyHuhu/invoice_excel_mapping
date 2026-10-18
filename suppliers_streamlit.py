@@ -814,7 +814,11 @@ def parse_indoprostime_transport(text: str) -> Dict:
 #     缺漏後續會自動補 N/A。
 
 def detect_maersk(text: str) -> bool:
-    return "MAERSK" in text.upper()
+    """注意：不能只看 'MAERSK' 這個字，因為其他供應商(例如 PANCARAN)的帳單
+    裡 VESSEL NAME 欄位常常就是船名含 'MAERSK' (例如 'JOSEPHINE MAERSK')，
+    這跟 PT Maersk Logistics Indonesia 這家供應商本身無關，會誤判。改用更
+    具體的 'MAERSK LOGISTICS' 字樣判斷。"""
+    return "MAERSK LOGISTICS" in text.upper()
 
 
 _MAERSK_LABEL_WORDS = [
@@ -2701,16 +2705,23 @@ def detect_pancaran(text: str) -> bool:
     return "PANCARAN SRIKANDI LOGISTIK" in text.upper()
 
 
+# 這家供應商的 VAT 是「每一筆品項自己的一欄」，不是像 TATA 那種另外獨立
+# 一筆 PPN 列：同一張發票裡有些品項有印出 VAT 金額 (帶小數點，例如
+# "27,500.00")、有些完全沒印 (留空)，所以 VAT 要接在 Amount 後面當成
+# 「可選」的尾段來抓，抓不到就是 None (不是 0)。
 _PANCARAN_ITEM_PATTERN = re.compile(
-    r"^\d+\s+(?P<desc>.+?)\s+\d+\s+[\d,]+\s+(?P<amount>[\d,]+)$"
+    r"^\d+\s+(?P<desc>.+?)\s+\d+\s+[\d,]+\s+(?P<amount>[\d,]+)"
+    r"(?:\s+(?P<vat>[\d,]+\.\d+))?$"
 )
 
 
 def _pancaran_clean_amount(text: Optional[str]) -> Optional[int]:
-    """'75,660,000' (逗號千分位、無小數) -> 75660000。"""
+    """'75,660,000' (逗號千分位、無小數) -> 75660000；
+    VAT 欄位偶爾帶 '.00' 小數 (例如 '27,500.00') 一樣去掉小數部分取整數。"""
     if not text:
         return None
     text = text.strip().replace(",", "")
+    text = text.split(".")[0]
     return int(text) if text.isdigit() else None
 
 
@@ -2759,8 +2770,46 @@ def _pancaran_extract_items(text: str) -> List[Dict]:
         items.append({
             "description": m.group("desc").strip(),
             "amount": _pancaran_clean_amount(m.group("amount")),
+            "vat": _pancaran_clean_amount(m.group("vat")) if m.group("vat") else None,
         })
     return items
+
+
+def _pancaran_extract_grand_total(text: str) -> Optional[int]:
+    """'GRAND TOTAL 8,913,458' 本身就是含稅總額 (= Sub Total + V A T)。"""
+    return _pancaran_clean_amount(_search(r"GRAND\s+TOTAL\s+([\d,]+)", text))
+
+
+# REFERENCE NO. 那一行 (跟它的續行) 右邊其實還擠著 "Qty :" 欄位的值
+# (雙欄排版被 pdfplumber 併成同一行)：
+#   "REFERENCE NO. : 94079840 EXPOR - 1x40HC"
+#        -> Order No. = "94079840"，Qty(=Volume) = "EXPOR - 1x40HC"
+#   "REFERENCE NO. : PYI-...167 LCL - 13x40HC LCL - 2xBOXCDDLCL -"
+#   "/171/175/176/178/180/181/182 1xBOXFUSO"
+#        -> Order No. 兩行合併，Volume 兩行合併
+# 正確答案範本裡，"EXPOR -"/"IMPOR -" 這種單純的出口/進口標記會被拿掉，
+# 只留真正的材積內容 (例如 "EXPOR - 1x40HC" -> "1x40HC")；但其他像
+# "LCL - 13x40HC" 這種不是出口/進口標記的字樣則照原樣保留。
+_PANCARAN_EXPOR_IMPOR_PREFIX_RE = re.compile(r"^(?:EXPOR|IMPOR)\s*-\s*", re.IGNORECASE)
+
+
+def _pancaran_extract_volume(text: str) -> Optional[str]:
+    lines = text.split("\n")
+    for i, line in enumerate(lines):
+        m = re.search(r"REFERENCE\s+NO\.\s*:\s*(\S+)\s+(.+)$", line)
+        if not m:
+            continue
+        parts = [m.group(2).strip()]
+        if i + 1 < len(lines):
+            nxt = lines[i + 1].strip()
+            if nxt.startswith("/"):
+                m2 = re.match(r"\S+\s+(.+)$", nxt)
+                if m2:
+                    parts.append(m2.group(1).strip())
+        value = "\n".join(p for p in parts if p)
+        value = _PANCARAN_EXPOR_IMPOR_PREFIX_RE.sub("", value)
+        return value or None
+    return None
 
 
 def parse_pancaran(text: str) -> Dict:
@@ -2774,16 +2823,31 @@ def parse_pancaran(text: str) -> Dict:
     )
     header["order_no"] = _pancaran_extract_order_no(text)
     header["container_no"] = _pancaran_extract_container_no(text)
+    header["bl_no"] = _search(r"JOB\s+NO\.\s*:\s*(\S+)", text)
+    header["volume"] = _pancaran_extract_volume(text)
+    header["shipper"] = _search(r"(?m)^SHIPPER\s*:\s*(.+?)(?:;|\s*$)", text)
 
-    # 這種帳單沒有到達日/開船日/提單號碼/主提單號碼/啟運港/目的港/材積/
-    # 船名，留空給 expand_to_rows() 補 N/A。
-    for code in ("arrive_date", "onboard_date", "bl_no", "mbl_no",
-                 "port_of_loading", "port_of_discharge", "volume", "vessel"):
+    pol_pod = _search(r"(?m)^POL\s*/\s*POD\s*:\s*(.+)$", text)
+    if pol_pod and "/" in pol_pod:
+        pol, pod = pol_pod.split("/", 1)
+        header["port_of_loading"] = pol.strip() or None
+        header["port_of_discharge"] = pod.strip() or None
+    else:
+        header["port_of_loading"] = pol_pod
+        header["port_of_discharge"] = None
+
+    vessel = _search(r"(?m)^VESSEL\s+NAME\s*:\s*(.+)$", text)
+    if vessel and re.fullmatch(r"[.\s/]+", vessel):
+        vessel = None
+    header["vessel"] = vessel
+
+    # 這種帳單沒有到達日/開船日/主提單號碼，留空給 expand_to_rows() 補 N/A。
+    for code in ("arrive_date", "onboard_date", "mbl_no"):
         header[code] = None
 
     items = _pancaran_extract_items(text)
     if not items:
-        items = [{"description": None, "amount": None}]
+        items = [{"description": None, "amount": None, "vat": None}]
 
     return {"header": header, "items": items}
 
@@ -2792,6 +2856,7 @@ register_supplier(
     "PANCARAN", "PT. PANCARAN SRIKANDI LOGISTIK",
     detect_pancaran, parse_pancaran,
     extract_total=_pancaran_extract_total,
+    extract_grand_total=_pancaran_extract_grand_total,
 )
 
 
