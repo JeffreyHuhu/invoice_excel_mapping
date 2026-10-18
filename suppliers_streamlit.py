@@ -520,21 +520,84 @@ def parse_kuehne_nagel(text: str) -> Dict:
 # 合併後的文字。
 
 def detect_indoprostime(text: str) -> bool:
-    return "PROSTIME" in text.upper()
+    """只認 'INDO PROSTIME EXPRESS'，不要用單純 'PROSTIME' 當關鍵字——
+    PT. Indo Prostime Transport (另一家公司，另外註冊成
+    detect_indoprostime_transport()/parse_indoprostime_transport()) 也會
+    一樣含有 'PROSTIME' 字樣，太寬鬆的判斷式會把兩家公司的帳單搞混。"""
+    return "INDO PROSTIME EXPRESS" in text.upper()
 
 
 _INDO_LABEL_WORDS = [
     r"A/C\s*No\.?", r"A/C\s*name", r"Swift\s*code", r"Bank",
     r"Number", r"Date", r"Order\s*No\.?", r"Currency\s*/\s*Rate",
     r"MAWB", r"HAWB", r"QUANTITY", r"SHIPPER", r"GROSS\s*/\s*KG",
-    r"CNEE", r"CHARGE\s*/\s*KG", r"ORIGIN", r"FLIGHT", r"FREIGHT",
-    r"PKGS", r"D\s*E\s*S\s*C\s*R\s*I\s*P\s*T\s*I\s*O\s*N", r"AMOUNT",
-    r"Total", r"Cheque",
+    r"CNEE", r"CONSIGNEE", r"CHARGE\s*/\s*KG", r"ORIGIN", r"FLIGHT", r"FREIGHT",
+    r"PKGS", r"PIB\s*/\s*BC", r"D\s*E\s*S\s*C\s*R\s*I\s*P\s*T\s*I\s*O\s*N", r"AMOUNT",
+    r"Total", r"Cheque", r"ROLL",
 ]
 _INDO_NEXT = "(?:" + "|".join(_INDO_LABEL_WORDS) + ")"
 # 注意：這裡不像 DWIHARTA/KN 要求 "\s{2,}"，因為並排欄位只隔一個空白；
 # 只要「後面接著任何空白 + 下一個已知欄位關鍵字」就停止擷取。
 _INDO_STOP = rf"(?=\s+{_INDO_NEXT}\b|\n|$)"
+# SHIPPER 欄位有時會跟右欄下一個欄位標籤完全黏在一起、中間沒有空白
+# (例如 "SHIPPER : SHANGHAI EASEMENT ELECTRIC CO., LTDGROSS /KG : 0.50"，
+# "LTD" 跟 "GROSS" 中間沒有空白)，一般 _INDO_STOP 要求「下一個標籤前面
+# 一定要有空白」在這裡會抓過頭，所以 SHIPPER 專用這個放寬版 (允許零個
+# 空白) 的停止條件。
+_INDO_STOP_LOOSE = rf"(?=\s*{_INDO_NEXT}\b|\n|$)"
+
+_INDO_MONTH_ABBR_UPPER = [
+    "JAN", "FEB", "MAR", "APR", "MAY", "JUN",
+    "JUL", "AUG", "SEP", "OCT", "NOV", "DEC",
+]
+
+
+def _indo_format_date(day, month, year) -> Optional[str]:
+    """這個供應商家族 (INDOPROSTIME EXPRESS/TRANSPORT) 的正確答案範本把
+    日期欄位存成純文字 'YYYY-MON-DD' (例如 '2026-JUN-11')，不是真正的
+    Excel 日期型態儲存格，所以 normalize_value() 不會幫忙轉換，日期格式
+    要在這裡直接組成一樣的字串才會比對相符，跟其他供應商統一用的
+    'DD Mon YYYY' (_format_date_en()) 不同，不要共用。"""
+    try:
+        d, m, y = int(day), int(month), int(year)
+    except (TypeError, ValueError):
+        return None
+    if not 1 <= m <= 12:
+        return None
+    return f"{y}-{_INDO_MONTH_ABBR_UPPER[m - 1]}-{d:02d}"
+
+
+_INDO_TOP_CONSIGNEE_RE = re.compile(r'^(.+?)\s+Number\s*:\s*\d+', re.MULTILINE)
+
+
+def _indo_extract_top_consignee(text: str) -> Optional[str]:
+    """抬頭收件人名稱印在發票最上方、"Number :" 前面那一行 (不是
+    "CNEE :"/"CONSIGNEE :" 那個欄位標籤行)，例如
+    'POU YUEN INDONESIA,.PT. Number : 089261' -> 'POU YUEN INDONESIA,.PT.'。
+    """
+    m = _INDO_TOP_CONSIGNEE_RE.search(text)
+    return m.group(1).strip() if m else None
+
+
+def _indo_format_volume(raw: Optional[str]) -> Optional[str]:
+    """'0.50'/'1.60'/'44.00' -> '0.5 KG'/'1.6 KG'/'44 KG' (去掉多餘的零，
+    補上單位 KG，跟正確答案範本的寫法一致)。"""
+    if not raw:
+        return None
+    try:
+        num = float(raw.strip())
+    except ValueError:
+        return None
+    return f"{num:g} KG"
+
+
+def _indo_extract_vessel_code(raw_flight: Optional[str]) -> Optional[str]:
+    """FLIGHT 欄位原始值 (例如 'GA 863/09062026'、'VJ0855/05-08-2026') 只取
+    "/" 前面的航班代碼部分當 Vessel，日期部分另外由
+    _indo_parse_flight_date()/_ipt_parse_flight_date() 轉成開船日。"""
+    if not raw_flight:
+        return None
+    return raw_flight.split("/")[0].strip()
 
 
 def _indo_add_space_after_pt(value: Optional[str]) -> Optional[str]:
@@ -547,18 +610,23 @@ def _indo_add_space_after_pt(value: Optional[str]) -> Optional[str]:
     return re.sub(r"^(PT\.)(?=\S)", r"\1 ", value.strip())
 
 
-def _indo_parse_flight_date(vessel_value: Optional[str]) -> Optional[str]:
-    """從 FLIGHT 欄位尾碼反推日期，例如 'CX 777/01092026' -> '01 Sep 2026'
-    (尾碼 8 碼數字是 DDMMYYYY)。抓不到就回傳 None，讓 expand_to_rows()
-    補 N/A。
+def _indo_parse_flight_date(raw_flight: Optional[str]) -> Optional[str]:
+    """從 FLIGHT 欄位原始值反推開船日，支援兩種常見寫法：
+    - 'CX 777/01092026' (尾碼 8 碼數字無分隔，DDMMYYYY)
+    - 'VJ0855/05-08-2026' (尾碼用 - 分隔，DD-MM-YYYY)
+    回傳跟 Arrive Date 共用的 'YYYY-MON-DD' 格式 (_indo_format_date())，
+    抓不到就回傳 None，讓 expand_to_rows() 補 N/A。
     """
-    if not vessel_value:
+    if not raw_flight:
         return None
-    m = re.search(r"(\d{2})(\d{2})(\d{4})\s*$", vessel_value.strip())
+    raw_flight = raw_flight.strip()
+    m = re.search(r"(\d{1,2})-(\d{1,2})-(\d{4})\s*$", raw_flight)
+    if not m:
+        m = re.search(r"(\d{2})(\d{2})(\d{4})\s*$", raw_flight)
     if not m:
         return None
     day, month, year = m.groups()
-    return _format_date_en(day, month, year)
+    return _indo_format_date(day, month, year)
 
 
 def _indo_clean_amount(text: Optional[str]) -> Optional[int]:
@@ -571,34 +639,71 @@ def _indo_clean_amount(text: Optional[str]) -> Optional[int]:
 
 # 費用明細行，例如：
 #   "FREIGHT CHARGE (USD 23.54) (REIMBURSEMENT) 416,729"
-# 格式：全大寫的費用名稱 + 一個或兩個備註用括號 + 最後的金額。要求描述文字
-# 全大寫 (不能有小寫字母)，是為了避免誤抓到版面上其他也帶括號跟數字的雜訊
-# 行 (例如帳單最上方的 "Phone (021) 6268280")。
-_INDO_CHARGE_LINE_PATTERN = re.compile(
-    r"^(?P<desc>[A-Z][A-Z /]+?)\s*\(.+?\)(?:\s*\(.+?\))?\s+(?P<amount>[\d,]+)\s*$",
+#   "HANDLING (PPH 23) T) 650,000"   <- "T)" 是版面上一個核取方塊符號被
+#                                       讀成的雜訊殘留，不是真正的文字
+#   "STORAGE (INV NO : 26 0158969) 427,137"
+# 這裡不限制描述文字只能是純大寫 (PT. Indo Prostime Transport 的费用名稱
+# 後面可能帶 "(PPH 23)" 這種備註，描述本身仍全大寫，但為了同時兼容未來
+# 可能出現的大小寫混雜備註，放寬成「任何非空白字元開頭、非 Total/VAT 行」)。
+# 一律先完整抓到「最後一個金額數字」前的所有文字當描述，再用
+# _indo_clean_item_desc() 去掉已知的雜訊/備註尾碼。
+_INDO_ITEM_LINE_RE = re.compile(
+    r"^(?!Total\b)(?!V\.?A\.?T\.?\s)(?P<desc>\S.*?)\s+(?P<amount>[\d,]+)\s*$",
     re.MULTILINE,
 )
-# 備援：少數帳單可能沒有括號備註，只有「全大寫費用名稱 + 金額」，這裡再抓
-# 一次，但要排除 "Total ..." 這種小計行 (不是實際費用明細)。
-_INDO_SIMPLE_CHARGE_LINE_PATTERN = re.compile(
-    r"^(?!Total\b)(?P<desc>[A-Z][A-Z /]+?)\s+(?P<amount>[\d,]+)\s*$",
-    re.MULTILINE,
+# V.A.T. 另起一列印出 (例如 "V.A.T. 34,769")，正確答案範本把這一列當成
+# 獨立一筆品項：description 固定寫 "VAT"、amount 留空、金額改填在 vat 欄位
+# (不是把 VAT 金額當成第五筆品項的 amount)。
+_INDO_VAT_LINE_RE = re.compile(r"^V\.?A\.?T\.?\s+(?P<vat>[\d,]+)\s*$", re.MULTILINE)
+# 费用明細只會出現在 "D E S C R I P T I O N AMOUNT" 這個表頭之後、
+# "Total" 小計行之前這一段範圍內；只在這個範圍內掃描品項，才不會把帳單
+# 上其他「文字 + 一串數字」的雜訊行 (地址裡的郵遞區號、電話分機、發票號碼
+# 那一行) 誤判成費用項目 (跟 HANDAL 供應商的 _handal_item_region() 同樣
+# 的防呆手法)。
+_INDO_ITEM_REGION_START_RE = re.compile(
+    r"D\s*E\s*S\s*C\s*R\s*I\s*P\s*T\s*I\s*O\s*N\s+AMOUNT.*?\n", re.IGNORECASE,
 )
+_INDO_ITEM_REGION_END_RE = re.compile(r"^Total\b", re.MULTILINE)
+
+
+def _indo_item_region(text: str) -> str:
+    start_m = _INDO_ITEM_REGION_START_RE.search(text)
+    start = start_m.end() if start_m else 0
+    end_m = _INDO_ITEM_REGION_END_RE.search(text, start)
+    end = end_m.start() if end_m else len(text)
+    return text[start:end]
+
+
+def _indo_clean_item_desc(desc: str) -> str:
+    desc = desc.strip()
+    # PT. Indo Prostime Express 帳單裡，"(REIMBURSEMENT)" 這個備註不計入
+    # 正確答案的描述文字，要去掉 (只去尾碼，不影響描述中間的其他括號備註，
+    # 例如 "(USD 8.15)" 要保留)。
+    desc = re.sub(r"\s*\(REIMBURSEMENT\)\s*$", "", desc, flags=re.IGNORECASE)
+    # PT. Indo Prostime Transport 帳單裡，"(PPH 23)" 後面偶爾會黏一個
+    # 版面核取符號雜訊 "T)"，要去掉；"(PPH 23)" 本身要保留。
+    desc = re.sub(r"\s*T\)\s*$", "", desc)
+    return desc.strip()
 
 
 def _indo_extract_charge_items(text: str) -> List[Dict]:
+    region = _indo_item_region(text)
     items = []
-    for m in _INDO_CHARGE_LINE_PATTERN.finditer(text):
+    for m in _INDO_ITEM_LINE_RE.finditer(region):
         items.append({
-            "description": m.group("desc").strip(),
+            "description": _indo_clean_item_desc(m.group("desc")),
             "amount": _indo_clean_amount(m.group("amount")),
+            "vat": None,
+        })
+    vat_m = _INDO_VAT_LINE_RE.search(region)
+    if vat_m:
+        items.append({
+            "description": "VAT",
+            "amount": None,
+            "vat": _indo_clean_amount(vat_m.group("vat")),
         })
     if not items:
-        for m in _INDO_SIMPLE_CHARGE_LINE_PATTERN.finditer(text):
-            items.append({
-                "description": m.group("desc").strip(),
-                "amount": _indo_clean_amount(m.group("amount")),
-            })
+        items = [{"description": None, "amount": None, "vat": None}]
     return items
 
 
@@ -608,28 +713,82 @@ def parse_indoprostime(text: str) -> Dict:
     header["invoice_no"] = _search(r"Number\s*:\s*(\d+)", text)
     _indo_inv_date_m = re.search(r"Date\s*:\s*(\d{1,2})/(\d{1,2})/(\d{4})", text)
     header["invoice_date"] = (
-        _format_date_en(*_indo_inv_date_m.groups()) if _indo_inv_date_m else None
+        _indo_format_date(*_indo_inv_date_m.groups()) if _indo_inv_date_m else None
     )
-    header["supplier"] = _search(rf"A/C\s*name\s*:\s*(.+?){_INDO_STOP}", text)
-    header["consignee"] = _indo_add_space_after_pt(
-        _search(rf"\bCNEE\s*:\s*(.+?){_INDO_STOP}", text)
-    )
+    header["supplier"] = "PT. INDO PROSTIME EXPRESS"
+    header["consignee"] = _indo_extract_top_consignee(text)
     header["order_no"] = _search(rf"Order\s*No\.?\s*:\s*(.+?){_INDO_STOP}", text)
     header["bl_no"] = _search(rf"\bHAWB\s*:\s*(.+?){_INDO_STOP}", text)
     header["mbl_no"] = _search(rf"\bMAWB\s*:\s*(.+?){_INDO_STOP}", text)
     header["port_of_loading"] = _search(rf"\bORIGIN\s*:\s*(.+?){_INDO_STOP}", text)
-    header["vessel"] = _search(rf"\bFLIGHT\s*:\s*(.+?){_INDO_STOP}", text)
-    header["volume"] = _search(rf"GROSS\s*/\s*KG\s*:\s*(.+?){_INDO_STOP}", text)
-    header["onboard_date"] = _indo_parse_flight_date(header.get("vessel"))
+    header["shipper"] = _search(rf"\bSHIPPER\s*:\s*(.+?){_INDO_STOP_LOOSE}", text)
+    _raw_flight = _search(rf"\bFLIGHT\s*:\s*(.+?){_INDO_STOP}", text)
+    header["vessel"] = _indo_extract_vessel_code(_raw_flight)
+    header["volume"] = _indo_format_volume(
+        _search(rf"GROSS\s*/\s*KG\s*:\s*(.+?){_INDO_STOP}", text)
+    )
+    header["onboard_date"] = _indo_parse_flight_date(_raw_flight)
+    header["arrive_date"] = header["onboard_date"]
 
-    # 這種空運帳單沒有到達日/目的港/貨櫃資訊，留空給 expand_to_rows() 補 N/A
-    header["arrive_date"] = None
-    header["port_of_discharge"] = None
+    # 這種空運帳單目的港固定是雅加達 (這家供應商只處理進口到雅加達的空運
+    # 帳單)，帳單本文沒有單獨印出「目的港」欄位，所以固定填 Jakarta，不是
+    # 從文字擷取出來的。
+    header["port_of_discharge"] = "Jakarta"
     header["container_no"] = None
 
     items = _indo_extract_charge_items(text)
-    if not items:
-        items = [{"description": None, "amount": None}]
+
+    return {"header": header, "items": items}
+
+
+# ---------------------------------------------------------------------------
+# PT. Indo Prostime Transport (跟上面 PT. Indo Prostime Express 是「同一套
+# 版面排版、不同公司」的姊妹帳單——兩家公司名稱都含有 "PROSTIME"，所以
+# detect_fn 一定要分別比對完整公司名稱 "INDO PROSTIME EXPRESS" /
+# "INDO PROSTIME TRANSPORT"，不能只看 "PROSTIME" 不然會互相誤判。
+#
+# 跟 EXPRESS 版面的差異：
+#   - Bank Information 區塊沒有 "A/C name :" 這一行 (改成固定寫死供應商
+#     名稱，不用擷取)。
+#   - 收件人欄位標籤是 "CONSIGNEE :"，不是 EXPRESS 的 "CNEE :"。
+#   - FLIGHT 欄位尾碼日期用 "-" 分隔 (例如 "VJ0855/05-08-2026")，不是
+#     EXPRESS 的無分隔 8 碼數字——共用 _indo_parse_flight_date() 已經兩種
+#     格式都支援。
+#   - 費用明細常見 "(PPH 23)" 備註後面黏一個版面核取符號雜訊 "T)"，以及
+#     可能額外有一行獨立的 "V.A.T. 金額" (有些帳單有 VAT、有些沒有)——
+#     共用 _indo_extract_charge_items() 已經處理這兩種情況。
+# ---------------------------------------------------------------------------
+
+def detect_indoprostime_transport(text: str) -> bool:
+    return "INDO PROSTIME TRANSPORT" in text.upper()
+
+
+def parse_indoprostime_transport(text: str) -> Dict:
+    header: Dict[str, Optional[str]] = {}
+
+    header["invoice_no"] = _search(r"Number\s*:\s*(\d+)", text)
+    _indo_inv_date_m = re.search(r"Date\s*:\s*(\d{1,2})/(\d{1,2})/(\d{4})", text)
+    header["invoice_date"] = (
+        _indo_format_date(*_indo_inv_date_m.groups()) if _indo_inv_date_m else None
+    )
+    header["supplier"] = "PT. INDO PROSTIME TRANSPORT"
+    header["consignee"] = _indo_extract_top_consignee(text)
+    header["order_no"] = _search(rf"Order\s*No\.?\s*:\s*(.+?){_INDO_STOP}", text)
+    header["bl_no"] = _search(rf"\bHAWB\s*:\s*(.+?){_INDO_STOP}", text)
+    header["mbl_no"] = _search(rf"\bMAWB\s*:\s*(.+?){_INDO_STOP}", text)
+    header["port_of_loading"] = _search(rf"\bORIGIN\s*:\s*(.+?){_INDO_STOP}", text)
+    header["shipper"] = _search(rf"\bSHIPPER\s*:\s*(.+?){_INDO_STOP_LOOSE}", text)
+    _raw_flight = _search(rf"\bFLIGHT\s*:\s*(.+?){_INDO_STOP}", text)
+    header["vessel"] = _indo_extract_vessel_code(_raw_flight)
+    header["volume"] = _indo_format_volume(
+        _search(rf"GROSS\s*/\s*KG\s*:\s*(.+?){_INDO_STOP}", text)
+    )
+    header["onboard_date"] = _indo_parse_flight_date(_raw_flight)
+    header["arrive_date"] = header["onboard_date"]
+    header["port_of_discharge"] = "Jakarta"
+    header["container_no"] = None
+
+    items = _indo_extract_charge_items(text)
 
     return {"header": header, "items": items}
 
@@ -2167,8 +2326,12 @@ def _kn_extract_grand_total(text: str) -> Optional[int]:
     return _kn_clean_amount_comma_thousands(_search(r"INVOICE\s+TOTAL\s+IDR\s+([\d,]+)", text))
 
 
-def _indo_extract_total(text: str) -> Optional[int]:
-    """注意：INDOPROSTIME 是 multi_page 供應商，text 是『一頁』的文字。"""
+def _indo_extract_grand_total(text: str) -> Optional[int]:
+    """注意：INDOPROSTIME (EXPRESS/TRANSPORT) 都是 multi_page 供應商，text
+    是『一頁』的文字。帳單上印的 "Total" 是含稅總額 (如果這張帳單有
+    V.A.T. 的話，已經把 VAT 加進去了)，所以要註冊成 extract_grand_total
+    (跟『擷取到的費用明細加總 + VAT 加總』互相稽核)，不是 extract_total
+    (未稅總額)——這家供應商帳單本文沒有單獨印出未稅小計。"""
     return _indo_clean_amount(_search(r"^Total\s+([\d,]+)\s*$", text))
 
 
@@ -2298,7 +2461,12 @@ register_supplier(
 )
 register_supplier(
     "INDOPROSTIME", "PT. INDO PROSTIME EXPRESS", detect_indoprostime, parse_indoprostime,
-    multi_page=True, extract_total=_indo_extract_total,
+    multi_page=True, extract_grand_total=_indo_extract_grand_total,
+)
+register_supplier(
+    "INDOPROSTIME_TRANSPORT", "PT. INDO PROSTIME TRANSPORT",
+    detect_indoprostime_transport, parse_indoprostime_transport,
+    multi_page=True, extract_grand_total=_indo_extract_grand_total,
 )
 register_supplier(
     "MAERSK", "PT MAERSK LOGISTICS INDONESIA", detect_maersk, parse_maersk,
