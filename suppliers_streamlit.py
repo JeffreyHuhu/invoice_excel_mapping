@@ -1260,6 +1260,27 @@ def _yje_extract_items(text: str) -> List[Dict]:
     return items
 
 
+_YJE_MONTH_ABBR_UPPER = [
+    "JAN", "FEB", "MAR", "APR", "MAY", "JUN",
+    "JUL", "AUG", "SEP", "OCT", "NOV", "DEC",
+]
+
+
+def _yje_format_date(day, month_name, year) -> Optional[str]:
+    """YJE 帳單正確答案範本的日期欄位是純文字 'YYYY-MON-DD' (例如
+    '2026-JUL-31')，不是真正的 Excel 日期型態儲存格，跟其他供應商共用的
+    'DD Mon YYYY' (_format_date_en_from_month_name()) 不一樣，不要共用。
+    """
+    month_i = _MONTH_NAME_TO_NUM.get(str(month_name).strip().upper()[:3])
+    if month_i is None:
+        return None
+    try:
+        d, y = int(day), int(year)
+    except (TypeError, ValueError):
+        return None
+    return f"{y}-{_YJE_MONTH_ABBR_UPPER[month_i - 1]}-{d:02d}"
+
+
 def parse_yje(text: str) -> Dict:
     """注意：這是 multi_page 供應商，text 是『一頁』的文字。"""
     header: Dict[str, Optional[str]] = {}
@@ -1267,7 +1288,7 @@ def parse_yje(text: str) -> Dict:
     header["invoice_no"] = _search(r"Inv\.?\s*No\s*[:：]\s*(\S+)", text)
     _yje_inv_m = re.search(r"Inv\s*Date\s*[:：]\s*(\d{4})-([A-Za-z]{3,})-(\d{1,2})", text)
     header["invoice_date"] = (
-        _format_date_en_from_month_name(
+        _yje_format_date(
             _yje_inv_m.group(3), _yje_inv_m.group(2), _yje_inv_m.group(1)
         )
         if _yje_inv_m
@@ -1364,7 +1385,13 @@ _TATA_ITEM_PATTERN = re.compile(
     r"^\d+\s+(?P<desc>[A-Z][A-Z ]*?)(?:\s+(?=[A-Z0-9]*\d)[A-Z0-9]+)?\s+Rp\s+(?P<amount>[\d,]+)\s*$",
     re.MULTILINE,
 )
-_TATA_DPP_PATTERN = re.compile(r"^DPP\s+Rp\s+(?P<amount>[\d,]+)\s*$", re.MULTILINE)
+# "PPN 12%" 這一行是加值稅 (正確答案範本新增 VAT 欄位後，這一筆要變成
+# description="PPN 12%"、amount 留空、金額改填 vat 欄位，不是普通第五筆
+# 品項的 amount)。注意：這裡取代了舊版的 "DPP" 列——DPP (稽核用的課稅
+# 基礎，有時候不等於 SUB-TOTAL，是 HANDLING FEE 另外乘上 11/12 算出來的
+# 中間值) 新版正確答案範本已經不要求輸出，只保留真正印在帳單上的 PPN
+# 金額。
+_TATA_PPN_PATTERN = re.compile(r"^(?P<desc>PPN\s*\d+%)\s+Rp\s+(?P<vat>[\d,]+)\s*$", re.MULTILINE)
 
 
 def _tata_extract_items(text: str) -> List[Dict]:
@@ -1373,10 +1400,15 @@ def _tata_extract_items(text: str) -> List[Dict]:
         items.append({
             "description": m.group("desc").strip(),
             "amount": _tata_clean_amount(m.group("amount")),
+            "vat": None,
         })
-    dpp_m = _TATA_DPP_PATTERN.search(text)
-    if dpp_m:
-        items.append({"description": "DPP", "amount": _tata_clean_amount(dpp_m.group("amount"))})
+    ppn_m = _TATA_PPN_PATTERN.search(text)
+    if ppn_m:
+        items.append({
+            "description": ppn_m.group("desc").strip(),
+            "amount": None,
+            "vat": _tata_clean_amount(ppn_m.group("vat")),
+        })
     return items
 
 
@@ -2366,6 +2398,22 @@ def _yje_tata_extract_total(text: str) -> Optional[int]:
     return None
 
 
+def _yje_tata_extract_grand_total(text: str) -> Optional[int]:
+    """TATA 稅務發票 (classic 格式) 本身印的 "TOTAL" 已經是含稅總額 (=
+    SUB-TOTAL + PPN)，用來做『擷取到的費用明細加總 + VAT 加總 = 含稅
+    總額』的稽核 (見 extract_utils.audit_invoice_totals())。用「行首就是
+    TOTAL」限定，不能只找 "TOTAL" 字樣，否則會跟前面 "SUB-TOTAL ..." 那
+    一行搶到 (那一行不是以 "TOTAL" 開頭，是 "SUB-TOTAL" 開頭，一般不會
+    誤配，這裡額外加 ^ 錨點更保險)；YJE 英文費率表跟 TATA 稅務收據目前
+    還沒有對應的含稅總額規則，抓不到就回傳 None (不稽核，不是「不
+    一致」)。
+    """
+    m = _search(r"^TOTAL\s+Rp\s+([\d,]+)\s*$", text)
+    if m:
+        return _tata_clean_amount(m)
+    return None
+
+
 def _trans_extract_total(text: str) -> Optional[int]:
     """注意：TRANS_DAYA_PRIMA 是 multi_page 供應商，text 是『一頁』的文字。
 
@@ -2479,7 +2527,8 @@ register_supplier(
 register_supplier(
     "YJE_TATA", "YJE (ShenZhen) International Logistics / PT TATA HARMONI SARANATAMA",
     detect_yje_or_tata, parse_yje_or_tata, multi_page=True,
-    extract_total=_yje_tata_extract_total, audit_exclude=("DPP",),
+    extract_total=_yje_tata_extract_total,
+    extract_grand_total=_yje_tata_extract_grand_total,
 )
 register_supplier(
     "TRANS_DAYA_PRIMA", "PT. TRANS DAYA PRIMA", detect_trans, parse_trans,
