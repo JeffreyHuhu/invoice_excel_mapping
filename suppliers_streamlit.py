@@ -4653,3 +4653,157 @@ register_supplier(
     multi_page=True, force_ocr=True,
     extract_total=_handal_extract_total,
 )
+
+
+# ---------------------------------------------------------------------------
+# 供應商 21：PT. PUTRA SEJAHTERA SENTOSA
+# ---------------------------------------------------------------------------
+# multi_page：一份 PDF 裡塞了好幾張各自獨立的發票，一頁一張 (每頁都有自己
+# 的 Invoice No./Date，跟 HYPER MEGA/YJE_TATA 同一種型態)。
+#
+# 這家供應商有 PPN (加值稅，1,1% 的印花稅率寫法) 跟 PPH (預扣所得稅) 兩種
+# 稅金欄位，各自獨立一列 (VAT 呈現方式分類第 2 種「獨立一列稅金」，見
+# add-invoice-supplier skill)，描述照抄 PDF 原文標籤 (例如 "PPN 1,1 %"、
+# "PPH 2%"，百分比用 regex 動態抓出來，不要寫死)：
+#   - "PPN x %"：一般加值稅，要『加』進含稅總額 (GRAND TOTAL = DPP + PPN)。
+#   - "PPH x%"：預扣所得稅，是由付款方代扣、要從含稅總額『扣』掉才等於
+#     實付金額 (TOTAL YANG DIBAYAR = GRAND TOTAL - PPH)，不是加總的稅金，
+#     所以用 register_supplier() 的 deduction_prefixes=("PPH",) 標記，稽核
+#     含稅總額時才不會被誤算進去 (見 extract_utils_streamlit.py 的
+#     audit_invoice_totals() 說明)。
+#
+# 三段式金額查核機制 (使用者明確要求)：
+#   1. DPP (未稅小計) + PPN = GRAND TOTAL           -> extract_total/extract_grand_total
+#   2. GRAND TOTAL - PPH 2% = TOTAL YANG DIBAYAR     -> extract_final_total + deduction_prefixes
+# ---------------------------------------------------------------------------
+
+def detect_putra_sejahtera_sentosa(text: str) -> bool:
+    return "PUTRA SEJAHTERA SENTOSA" in text.upper()
+
+
+def _pss_clean_amount(text: Optional[str]) -> Optional[int]:
+    if not text:
+        return None
+    cleaned = text.replace(",", "").strip()
+    return int(cleaned) if cleaned.isdigit() else None
+
+
+def _pss_format_date(day, month, year) -> Optional[str]:
+    """正確答案 Excel 的 INVOICE DATE 欄位是純文字 'DD/MM/YYYY'
+    (不是 Excel 日期型別，跟大多數供應商統一轉成的 'DD Mon YYYY' 不同)，
+    所以這家供應商要輸出一樣的純文字格式才會比對相符，不要套用共用的
+    _format_date_en()。"""
+    try:
+        day_i, month_i, year_i = int(day), int(month), int(year)
+    except (TypeError, ValueError):
+        return None
+    return f"{day_i:02d}/{month_i:02d}/{year_i}"
+
+
+_PSS_DESC_PAREN_SPACE_RE = re.compile(r"\s+\)")
+
+
+def _pss_clean_description(desc: Optional[str]) -> Optional[str]:
+    """部分頁面排版在右括號前多一個空白 (例如 'ADIDAS ADCI )' vs
+    'ADIDAS ADCI)')，正確答案一律沒有這個空白，統一清掉。"""
+    if not desc:
+        return desc
+    return _PSS_DESC_PAREN_SPACE_RE.sub(")", desc)
+
+
+def parse_putra_sejahtera_sentosa(text: str) -> Dict:
+    """注意：這是 multi_page 供應商，text 是『一頁』的文字 (每頁各自是一張
+    獨立發票)，呼叫端 (_parse_multi_page_pdf()) 只會對通過
+    detect_putra_sejahtera_sentosa() 的頁面呼叫這個函式。
+    """
+    header: Dict[str, Optional[str]] = {
+        "order_no": None, "arrive_date": None, "onboard_date": None,
+        "bl_no": None, "mbl_no": None, "port_of_loading": None,
+        "port_of_discharge": None, "volume": None, "vessel": None,
+        "container_no": None, "shipper": None,
+    }
+
+    header["invoice_no"] = _search(r"Invoice\s*No\.?\s*:\s*(\S+)", text)
+
+    date_m = re.search(r"\bDate\s*:\s*(\d{1,2})/(\d{1,2})/(\d{4})", text)
+    header["invoice_date"] = (
+        _pss_format_date(date_m.group(1), date_m.group(2), date_m.group(3))
+        if date_m else None
+    )
+
+    header["supplier"] = _search(r"(?i)^\s*(PT\.\s*PUTRA SEJAHTERA SENTOSA)", text)
+    # 抬頭的 "TO : PT. XXX (ADIDAS ADCI) Invoice No. : ..." 後面括號裡的
+    # 品牌/專案註記不是集團公司名稱的一部分，正確答案 Excel 裡的
+    # CONSIGNEE 欄位不含這個括號，擷取時要在遇到 "(" 或 "Invoice No" 就停。
+    header["consignee"] = _search(
+        r"\bTO\s*:\s*(.+?)(?:\s*\(|\s+Invoice\s*No)", text
+    )
+
+    items: List[Dict] = []
+
+    desc_m = re.search(r"(JASA TRANSPORTASI\s*\([^\n]*?\))", text)
+    amount_m = re.search(r"TOTAL BIAYA TRUCKING\s+([\d,]+)", text)
+    if desc_m or amount_m:
+        items.append({
+            "description": (
+                _pss_clean_description(desc_m.group(1).strip()) if desc_m else None
+            ),
+            "amount": _pss_clean_amount(amount_m.group(1)) if amount_m else None,
+            "vat": None,
+        })
+
+    # PPN (加值稅)：描述照抄 PDF 原文的 "PPN x %" 標籤，百分比動態抓出來。
+    ppn_m = re.search(r"\bPPN\s+(\d[\d,]*\s*%)\s+([\d,]+)", text)
+    if ppn_m:
+        items.append({
+            "description": f"PPN {ppn_m.group(1).strip()}",
+            "amount": None,
+            "vat": _pss_clean_amount(ppn_m.group(2)),
+        })
+
+    # PPH (預扣所得稅)：描述照抄 PDF 原文的 "PPH x%" 標籤。這一筆的 vat
+    # 在稽核含稅總額時會被 deduction_prefixes=("PPH",) 排除、改去稽核
+    # 「實付金額」(GRAND TOTAL - PPH)，不是加進 GRAND TOTAL 的稅金。
+    pph_m = re.search(r"\bPPH\s+(\d[\d,]*\s*%)\s+([\d,]+)", text)
+    if pph_m:
+        items.append({
+            "description": f"PPH {pph_m.group(1).strip()}",
+            "amount": None,
+            "vat": _pss_clean_amount(pph_m.group(2)),
+        })
+
+    if not items:
+        items = [{"description": None, "amount": None, "vat": None}]
+
+    return {"header": header, "items": items}
+
+
+def _pss_extract_dpp(text: str) -> Optional[int]:
+    """未稅小計 (DPP = Dasar Pengenaan Pajak)，稽核第 1 段：
+    DPP + PPN = GRAND TOTAL 用。"""
+    m = re.search(r"\bDPP\s+([\d,]+)", text)
+    return _pss_clean_amount(m.group(1)) if m else None
+
+
+def _pss_extract_grand_total(text: str) -> Optional[int]:
+    """含稅總額，稽核第 1 段 (DPP + PPN = GRAND TOTAL) 用。"""
+    m = re.search(r"GRAND TOTAL\s+([\d,]+)", text)
+    return _pss_clean_amount(m.group(1)) if m else None
+
+
+def _pss_extract_total_paid(text: str) -> Optional[int]:
+    """實付金額 (TOTAL YANG DIBAYAR)，稽核第 2 段：
+    GRAND TOTAL - PPH = TOTAL YANG DIBAYAR 用。"""
+    m = re.search(r"TOTAL YANG DIBAYAR\s+([\d,]+)", text)
+    return _pss_clean_amount(m.group(1)) if m else None
+
+
+register_supplier(
+    "PUTRA_SEJAHTERA_SENTOSA", "PT. Putra Sejahtera Sentosa",
+    detect_putra_sejahtera_sentosa, parse_putra_sejahtera_sentosa,
+    multi_page=True,
+    extract_total=_pss_extract_dpp,
+    extract_grand_total=_pss_extract_grand_total,
+    extract_final_total=_pss_extract_total_paid,
+    deduction_prefixes=("PPH",),
+)

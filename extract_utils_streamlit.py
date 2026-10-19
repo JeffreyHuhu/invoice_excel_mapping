@@ -369,22 +369,41 @@ def register_supplier(key: str, label: str,
                        multi_page: bool = False,
                        extract_total: Optional[Callable[[str], Optional[float]]] = None,
                        extract_grand_total: Optional[Callable[[str], Optional[float]]] = None,
+                       extract_final_total: Optional[Callable[[str], Optional[float]]] = None,
+                       deduction_prefixes: Tuple[str, ...] = (),
                        audit_exclude: Tuple[str, ...] = (),
                        force_ocr: bool = False) -> None:
     """註冊一家供應商。
 
     extract_total (可選)：從『一張發票』的原始文字裡抓出帳單本身寫的
-    『未稅總額』(Total (Excl. VAT) / Sub Total / SUBTOTAL / Net value…，
-    依供應商命名不同)，用來跟系統擷取到的費用明細加總互相稽核 (見
+    『未稅總額』(Total (Excl. VAT) / Sub Total / SUBTOTAL / Net value… /
+    DPP，依供應商命名不同)，用來跟系統擷取到的費用明細加總互相稽核 (見
     audit_invoice_totals())。沒有實作 (預設 None) 的供應商就不做這項稽核，
     不會被當成「不一致」。
 
     extract_grand_total (可選)：從『一張發票』的原始文字裡抓出帳單本身寫的
-    『含稅總額』(Total Amount Due / Amount Due / Total…，依供應商命名不同)。
-    有實作的話，audit_invoice_totals() 會多做第二項稽核：系統擷取到的費用
-    明細加總 (未稅) + 每筆費用的 VAT 加總，應該要等於這個含稅總額；不一致
-    就標示出來。這一項跟 extract_total 互相獨立，各自沒有實作的供應商就
-    不做那一項稽核 (不算「不一致」，只是『還沒支援』)。
+    『含稅總額』(Total Amount Due / Amount Due / Total / GRAND TOTAL…，依
+    供應商命名不同)。有實作的話，audit_invoice_totals() 會多做第二項稽核：
+    系統擷取到的費用明細加總 (未稅) + 每筆費用的 VAT 加總 (排除
+    deduction_prefixes 指定的扣除項，見下)，應該要等於這個含稅總額；不
+    一致就標示出來。這一項跟 extract_total 互相獨立，各自沒有實作的供應商
+    就不做那一項稽核 (不算「不一致」，只是『還沒支援』)。
+
+    extract_final_total (可選)：從『一張發票』的原始文字裡抓出帳單本身寫的
+    『實際支付金額』(例如印尼供應商常見的 "TOTAL YANG DIBAYAR"，代表含稅
+    總額再扣掉代扣稅之後真正要付的錢)。有實作的話，audit_invoice_totals()
+    會多做第三項稽核：含稅總額 (未稅加總 + 非扣除類 VAT 加總) 再減掉
+    deduction_prefixes 指定的扣除類 VAT 加總，應該要等於這個實付金額；
+    不一致就標示出來。這一項也跟前兩項互相獨立。
+
+    deduction_prefixes (可選)：這家供應商『每筆費用自帶 VAT 欄』或『獨立
+    一列稅金』裡，哪些 description 開頭字樣代表的不是要『加』進含稅總額
+    的稅金 (例如一般的 VAT/PPN)，而是要從含稅總額『扣』掉的代扣稅/預扣稅
+    (例如印尼的 PPH 2% 這種由付款方預扣、不是加在帳單金額上的稅)。比對時
+    用 description 正規化後 (大寫) 是否以這裡列出的字樣開頭來判斷，不要求
+    完全相等 (因為稅率常常隨發票不同，例如 "PPH 2%"/"PPH 1%")。預設空
+    tuple 代表這家供應商沒有這種『扣除類』VAT，所有逐筆 VAT 都算加總
+    (維持舊行為不變)。
 
     audit_exclude (可選)：這家供應商的 items 裡，有哪些 description 是
     『不是真正費用、不該算進未稅總額加總』的合成列 (例如 YJE_TATA 的
@@ -401,6 +420,7 @@ def register_supplier(key: str, label: str,
     SUPPLIER_REGISTRY[key] = {
         "label": label, "detect": detect_fn, "parse": parse_fn, "multi_page": multi_page,
         "extract_total": extract_total, "extract_grand_total": extract_grand_total,
+        "extract_final_total": extract_final_total, "deduction_prefixes": deduction_prefixes,
         "audit_exclude": audit_exclude, "force_ocr": force_ocr,
     }
 
@@ -786,21 +806,27 @@ def audit_invoice_totals(
     rows: List[Dict],
     **pdfplumber_kwargs,
 ) -> List[Dict]:
-    """稽核『系統擷取出來的費用總額』是否跟帳單本身寫的總額一致，有兩項
+    """稽核『系統擷取出來的費用總額』是否跟帳單本身寫的總額一致，有三項
     各自獨立的稽核 (哪一項有做，取決於這家供應商有沒有實作對應的擷取
     規則，見 register_supplier())：
 
     1. 未稅總額稽核 (需要 extract_total)：系統擷取到的費用明細加總 (不含
-       VAT) 要跟帳單本身寫的『未稅總額』(Total (Excl. VAT) / Sub Total…，
-       依供應商命名不同) 一致。
+       VAT) 要跟帳單本身寫的『未稅總額』(Total (Excl. VAT) / Sub Total /
+       DPP…，依供應商命名不同) 一致。
     2. 含稅總額稽核 (需要 extract_grand_total)：未稅費用加總 + 每筆費用
-       的 VAT 加總，要等於帳單本身寫的『含稅總額』(Total Amount Due /
-       Amount Due / Total…，依供應商命名不同)。這一項不要求供應商一定要
-       有逐筆 VAT (沒有 VAT 欄位的供應商，VAT 加總自然是 0)。
+       的『加總類』VAT 加總 (排除 deduction_prefixes 指定的扣除類稅金，
+       見下)，要等於帳單本身寫的『含稅總額』(Total Amount Due / Amount
+       Due / Total / GRAND TOTAL…，依供應商命名不同)。這一項不要求供應商
+       一定要有逐筆 VAT (沒有 VAT 欄位的供應商，VAT 加總自然是 0)。
+    3. 實付金額稽核 (需要 extract_final_total)：含稅總額 (第 2 項的計算
+       結果) 再減掉 deduction_prefixes 指定的『扣除類』VAT 加總 (例如
+       印尼供應商常見的 PPH 代扣稅)，要等於帳單本身寫的『實付金額』
+       (例如 "TOTAL YANG DIBAYAR")。沒有扣除類稅金的供應商，扣除加總
+       自然是 0 (等同『含稅總額 = 實付金額』)。
 
-    兩項稽核互相獨立：只實作其中一項的供應商，只會做那一項；兩項都沒實作
-    的供應商回傳空列表，代表『這家供應商還沒辦法自動稽核』，不是「一致」
-    也不是「不一致」，呼叫端不應顯示警示。
+    三項稽核互相獨立：只實作其中幾項的供應商，只會做對應的那幾項；一項都
+    沒實作的供應商回傳空列表，代表『這家供應商還沒辦法自動稽核』，不是
+    「一致」也不是「不一致」，呼叫端不應顯示警示。
 
     回傳一份清單，每張發票 (multi_page 供應商一份 PDF 可能有好幾張) 各一筆
     (視有實作哪些規則，以下欄位可能是 None，代表『這項稽核不適用』)：
@@ -810,13 +836,22 @@ def audit_invoice_totals(
       invoice_total   帳單原文抓到的未稅總額 (第 1 項稽核用)
       diff            extracted_sum - invoice_total
       match           第 1 項稽核是否一致 (容許 ±1 的四捨五入誤差)
-      vat_sum         系統擷取到的 VAT 加總 (第 2 項稽核用)
+      vat_sum         系統擷取到的『加總類』VAT 加總 (第 2 項稽核用，不含
+                       deduction_prefixes 指定的扣除類稅金)
       grand_total     帳單原文抓到的含稅總額 (第 2 項稽核用)
       grand_diff      (extracted_sum + vat_sum) - grand_total
       grand_match     第 2 項稽核是否一致 (容許 ±1 的四捨五入誤差)
+      deduction_sum   系統擷取到的『扣除類』VAT 加總 (第 3 項稽核用，例如
+                       PPH 代扣稅，deduction_prefixes 沒設定的供應商固定是
+                       0，None 表示沒有足夠資訊可以計算)
+      final_total     帳單原文抓到的實付金額 (第 3 項稽核用)
+      extracted_final (extracted_sum + vat_sum) - deduction_sum
+      final_diff      extracted_final - final_total
+      final_match     第 3 項稽核是否一致 (容許 ±1 的四捨五入誤差)
 
     呼叫端 (app.py / verify_app.py) 只需要對 match=False / grand_match=False
-    的項目顯示警示；對應欄位是 None 時代表這項稽核不適用，不要顯示警示。
+    / final_match=False 的項目顯示警示；對應欄位是 None 時代表這項稽核
+    不適用，不要顯示警示。
     """
     entry = SUPPLIER_REGISTRY.get(supplier_key) if supplier_key else None
     if not entry:
@@ -824,10 +859,13 @@ def audit_invoice_totals(
 
     extract_total_fn = entry.get("extract_total")
     extract_grand_total_fn = entry.get("extract_grand_total")
-    if not extract_total_fn and not extract_grand_total_fn:
+    extract_final_total_fn = entry.get("extract_final_total")
+    if not extract_total_fn and not extract_grand_total_fn and not extract_final_total_fn:
         return []
 
     exclude_descs = {normalize_value(d) for d in entry.get("audit_exclude", ())}
+    deduction_prefixes = tuple(p.upper() for p in entry.get("deduction_prefixes", ()))
+    need_vat_split = bool(extract_grand_total_fn or extract_final_total_fn)
 
     def _sum_rows(group_rows: List[Dict]) -> float:
         total = 0.0
@@ -839,17 +877,39 @@ def audit_invoice_totals(
                 total += amt
         return total
 
-    def _sum_vat(group_rows: List[Dict]) -> float:
-        total = 0.0
+    def _sum_vat_add_and_deduct(group_rows: List[Dict]):
+        """把每筆費用的 VAT 分成『加總類』(一般 VAT/PPN，計入含稅總額) 跟
+        『扣除類』(deduction_prefixes 指定的代扣稅，例如 PPH，從含稅總額
+        扣掉才等於實付金額) 兩份加總。沒有設定 deduction_prefixes 的
+        供應商，所有 VAT 都算加總類，等同舊版行為 (vat_sum = 全部 VAT
+        加總、deduction_sum = 0)，不影響既有供應商的稽核結果。
+        """
+        add_total = 0.0
+        deduct_total = 0.0
         for r in group_rows:
             vat = r.get("vat")
-            if isinstance(vat, (int, float)) and not isinstance(vat, bool):
-                total += vat
-        return total
+            if not isinstance(vat, (int, float)) or isinstance(vat, bool):
+                continue
+            desc_norm = normalize_value(r.get("description") or "").upper()
+            if deduction_prefixes and any(desc_norm.startswith(p) for p in deduction_prefixes):
+                deduct_total += vat
+            else:
+                add_total += vat
+        return add_total, deduct_total
 
-    def _build_result(group_rows: List[Dict], invoice_total, grand_total) -> Dict:
+    def _build_result(group_rows: List[Dict], invoice_total, grand_total, final_total) -> Dict:
         extracted_sum = _sum_rows(group_rows)
-        vat_sum = _sum_vat(group_rows) if extract_grand_total_fn else None
+        vat_sum = deduction_sum = None
+        if need_vat_split:
+            vat_sum, deduction_sum = _sum_vat_add_and_deduct(group_rows)
+        extracted_grand = (
+            extracted_sum + vat_sum if vat_sum is not None else None
+        )
+        extracted_final = (
+            extracted_grand - deduction_sum
+            if extracted_grand is not None and deduction_sum is not None
+            and extract_final_total_fn else None
+        )
         result = {
             "invoice_no": group_rows[0].get("invoice_no", NA),
             "extracted_sum": extracted_sum,
@@ -859,12 +919,23 @@ def audit_invoice_totals(
             "vat_sum": vat_sum,
             "grand_total": grand_total,
             "grand_diff": (
-                (extracted_sum + vat_sum) - grand_total
-                if vat_sum is not None and grand_total is not None else None
+                extracted_grand - grand_total
+                if extracted_grand is not None and grand_total is not None else None
             ),
             "grand_match": (
-                abs((extracted_sum + vat_sum) - grand_total) <= 1
-                if vat_sum is not None and grand_total is not None else None
+                abs(extracted_grand - grand_total) <= 1
+                if extracted_grand is not None and grand_total is not None else None
+            ),
+            "deduction_sum": deduction_sum,
+            "final_total": final_total,
+            "extracted_final": extracted_final,
+            "final_diff": (
+                extracted_final - final_total
+                if extracted_final is not None and final_total is not None else None
+            ),
+            "final_match": (
+                abs(extracted_final - final_total) <= 1
+                if extracted_final is not None and final_total is not None else None
             ),
         }
         return result
@@ -883,6 +954,7 @@ def audit_invoice_totals(
 
         totals_found: Dict[str, float] = {}
         grand_totals_found: Dict[str, float] = {}
+        final_totals_found: Dict[str, float] = {}
         for page_text in pages:
             # 大部分供應商的『未稅總額』就印在發票抬頭頁本身 (detect_fn 認得
             # 的那一頁)；但少數供應商 (例如 DSV) 是「一張發票的資料跨好幾頁」
@@ -920,18 +992,34 @@ def audit_invoice_totals(
                         if str(inv_raw).upper() in page_upper:
                             grand_totals_found[inv_key] = grand_total
                             break
+            if extract_final_total_fn:
+                try:
+                    final_total = extract_final_total_fn(page_text)
+                except Exception:
+                    final_total = None
+                if final_total is not None:
+                    if page_upper is None:
+                        page_upper = page_text.upper()
+                    for inv_key, inv_raw in raw_invoice_no.items():
+                        if inv_key in final_totals_found or not inv_raw:
+                            continue
+                        if str(inv_raw).upper() in page_upper:
+                            final_totals_found[inv_key] = final_total
+                            break
 
-        for inv_key in set(totals_found) | set(grand_totals_found):
+        for inv_key in set(totals_found) | set(grand_totals_found) | set(final_totals_found):
             group_rows = groups.get(inv_key) or []
             if not group_rows:
                 continue
             results.append(_build_result(
-                group_rows, totals_found.get(inv_key), grand_totals_found.get(inv_key)
+                group_rows, totals_found.get(inv_key), grand_totals_found.get(inv_key),
+                final_totals_found.get(inv_key),
             ))
     else:
         text = extract_text_from_pdf(pdf_path, **pdfplumber_kwargs)
         invoice_total = None
         grand_total = None
+        final_total = None
         if extract_total_fn:
             try:
                 invoice_total = extract_total_fn(text)
@@ -942,9 +1030,30 @@ def audit_invoice_totals(
                 grand_total = extract_grand_total_fn(text)
             except Exception:
                 grand_total = None
-        if (invoice_total is not None or grand_total is not None) and rows:
-            results.append(_build_result(rows, invoice_total, grand_total))
+        if extract_final_total_fn:
+            try:
+                final_total = extract_final_total_fn(text)
+            except Exception:
+                final_total = None
+        if (invoice_total is not None or grand_total is not None or final_total is not None) and rows:
+            results.append(_build_result(rows, invoice_total, grand_total, final_total))
     return results
+
+
+def mismatched_invoice_numbers(audit_results: List[Dict]) -> set:
+    """從 audit_invoice_totals() 的結果裡，挑出『任何一項稽核不一致』的
+    發票號碼 (正規化後的字串)，給輸出 Excel 時標紅字用 (見 build_excel()
+    的 red_invoice_nos 參數、verify_app.py 的 _build_result_excel())。
+    三項稽核 (未稅/含稅/實付) 只要有一項明確判定為不一致 (False，不是
+    None／不適用) 就算這張發票有問題。
+    """
+    bad: set = set()
+    for ar in audit_results:
+        if ar.get("match") is False or ar.get("grand_match") is False or ar.get("final_match") is False:
+            inv_no = ar.get("invoice_no")
+            if inv_no not in (None, NA):
+                bad.add(normalize_value(inv_no))
+    return bad
 
 
 # ---------------------------------------------------------------------------
@@ -1140,10 +1249,20 @@ def read_reference_excel(source) -> pd.DataFrame:
     return pd.DataFrame(records, columns=FIELD_CODES)
 
 
-def build_excel(all_rows: List[Dict[str, object]]) -> bytes:
+def build_excel(
+    all_rows: List[Dict[str, object]],
+    red_invoice_nos: Optional[set] = None,
+) -> bytes:
     """輸出成統一格式的 Excel：A欄是辨識到的供應商名稱，B欄起是標準欄位，
     表頭在第1列，資料從第2列開始。不管來源是哪個供應商都放在同一張表，
     方便一次彙整多家供應商、多份帳單的轉檔結果。
+
+    red_invoice_nos (可選)：金額查核機制 (見 audit_invoice_totals()/
+    mismatched_invoice_numbers()) 判定『不一致』的發票號碼集合 (正規化後
+    的字串)。這是使用者明確要求的通用規則 (不限特定供應商)：只要這張
+    發票的查核結果不符，輸出 Excel 裡屬於這張發票的所有列，整列文字都
+    改成紅字，方便人工一眼看出哪些發票需要複查。沒有查核結果 (None 或
+    沒做查核) 的供應商不受影響，維持原本黑字。
     """
     wb = Workbook()
     ws = wb.active
@@ -1152,6 +1271,8 @@ def build_excel(all_rows: List[Dict[str, object]]) -> bytes:
     bold = Font(bold=True)
     header_fill = PatternFill("solid", fgColor="DDEBF7")
     wrap_center = Alignment(wrap_text=True, vertical="center", horizontal="center")
+    red_font = Font(color="FFFF0000")
+    red_bold_font = Font(color="FFFF0000", bold=True)
 
     ws.cell(row=1, column=1, value="供應商").font = bold
     ws.cell(row=1, column=1).fill = header_fill
@@ -1164,10 +1285,16 @@ def build_excel(all_rows: List[Dict[str, object]]) -> bytes:
         cell.alignment = wrap_center
         ws.column_dimensions[get_column_letter(idx)].width = 20
 
+    red_invoice_nos = red_invoice_nos or set()
     for r, row in enumerate(all_rows, start=2):
-        ws.cell(row=r, column=1, value=row.get("__supplier_label", NA))
+        is_mismatch = normalize_value(row.get("invoice_no")) in red_invoice_nos
+        cell_a = ws.cell(row=r, column=1, value=row.get("__supplier_label", NA))
+        if is_mismatch:
+            cell_a.font = red_bold_font
         for idx, code in enumerate(FIELD_CODES, start=2):
-            ws.cell(row=r, column=idx, value=row.get(code, NA))
+            cell = ws.cell(row=r, column=idx, value=row.get(code, NA))
+            if is_mismatch:
+                cell.font = red_font
 
     buf = io.BytesIO()
     wb.save(buf)

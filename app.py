@@ -75,6 +75,7 @@ try:
         list_registered_suppliers,
         is_multi_page_supplier,
         audit_invoice_totals,
+        mismatched_invoice_numbers,
     )
 except ImportError as e:
     st.set_page_config(page_title="供應商帳單對比系統 - 啟動失敗", layout="wide")
@@ -336,6 +337,7 @@ if run_clicked:
 
     all_export_rows, score_rows, compare_rows_all, attempts_log, unknown_files = [], [], [], [], []
     audit_rows = []
+    all_audit_results = []
 
     with st.spinner(
         f"解析中 (每份 PDF 先辨識供應商，正確率未滿 100% 時最多重試 "
@@ -440,7 +442,14 @@ if run_clicked:
                         "含稅是否一致": (
                             "✅ 一致" if ar["grand_match"] else "❌ 不一致"
                         ) if ar["grand_match"] is not None else "-",
+                        "扣除類稅金加總(如PPH)": ar["deduction_sum"],
+                        "帳單實付金額": ar["final_total"],
+                        "實付差額": ar["final_diff"],
+                        "實付是否一致": (
+                            "✅ 一致" if ar["final_match"] else "❌ 不一致"
+                        ) if ar["final_match"] is not None else "-",
                     })
+                all_audit_results.extend(audit_results)
 
             except Exception as e:  # noqa: BLE001
                 st.error(f"❌ {f.name}：解析失敗 ({e})")
@@ -456,6 +465,7 @@ if run_clicked:
         "attempts_log": attempts_log,
         "unknown_files": unknown_files,
         "audit_rows": audit_rows,
+        "all_audit_results": all_audit_results,
     }
     st.session_state["last_signature"] = current_signature
 
@@ -479,6 +489,7 @@ compare_rows_all = bundle["compare_rows_all"]
 attempts_log = bundle["attempts_log"]
 unknown_files = bundle["unknown_files"]
 audit_rows = bundle.get("audit_rows", [])
+all_audit_results = bundle.get("all_audit_results", [])
 
 if unknown_files:
     st.warning(
@@ -550,6 +561,16 @@ if audit_rows:
             "VAT 加總」，跟帳單本身寫的含稅總額對不起來，請人工複查："
         )
         st.dataframe(grand_mismatches, use_container_width=True)
+    final_mismatches = audit_df[audit_df["實付是否一致"] == "❌ 不一致"]
+    if not final_mismatches.empty:
+        st.error(
+            f"🚨 金額稽核：有 {len(final_mismatches)} 張發票的「含稅總額 - "
+            "扣除類稅金 (如 PPH)」，跟帳單本身寫的實付金額對不起來，請人工複查："
+        )
+        st.dataframe(final_mismatches, use_container_width=True)
+    st.caption(
+        "⬇️ 下載 Excel 時，以上任何一項查核不一致的發票，整列文字會自動標成紅字。"
+    )
     with st.expander(f"🔍 金額稽核明細 (共 {len(audit_df)} 張發票有做這項稽核)"):
         st.dataframe(audit_df, use_container_width=True)
 
@@ -685,7 +706,8 @@ for _, r in edited_df.iterrows():
     row["__supplier_label"] = r["供應商"]
     export_rows.append(row)
 
-excel_bytes = build_excel(export_rows)
+red_invoice_nos = mismatched_invoice_numbers(all_audit_results)
+excel_bytes = build_excel(export_rows, red_invoice_nos=red_invoice_nos)
 st.download_button(
     "⬇️ 下載 Excel (彙整所有供應商的轉檔結果)",
     data=excel_bytes,

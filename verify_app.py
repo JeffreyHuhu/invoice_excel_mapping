@@ -41,6 +41,7 @@ import os
 import tempfile
 import zipfile
 from collections import Counter
+from typing import Optional
 
 import streamlit as st
 
@@ -65,6 +66,8 @@ try:
         supplier_label,
         list_registered_suppliers,
         audit_invoice_totals,
+        mismatched_invoice_numbers,
+        normalize_value,
     )
 except ImportError as e:
     st.set_page_config(page_title="供應商帳單辨識擷取系統 - 啟動失敗", layout="wide")
@@ -574,6 +577,20 @@ for ar in audit_results:
                 f"{ar['grand_total']:,.0f}，差額 {ar['grand_diff']:,.0f}，"
                 f"請人工複查！"
             )
+    if ar["final_match"] is not None:
+        if ar["final_match"]:
+            st.info(
+                f"✅ 實付金額稽核通過（發票 {ar['invoice_no']}）："
+                f"含稅總額扣除扣除類稅金 (如 PPH) 後 {ar['extracted_final']:,.0f}，"
+                f"帳單實付金額 {ar['final_total']:,.0f}，兩者一致。"
+            )
+        else:
+            st.error(
+                f"🚨 實付金額稽核不一致（發票 {ar['invoice_no']}）："
+                f"含稅總額扣除扣除類稅金 (如 PPH) 後 {ar['extracted_final']:,.0f}，"
+                f"帳單實付金額 {ar['final_total']:,.0f}，差額 {ar['final_diff']:,.0f}，"
+                f"請人工複查！"
+            )
 
 # ---------------------------------------------------------------------------
 # 依 invoice_no 分組：一般供應商只有一組 (一張帳單一個 invoice_no)，
@@ -740,11 +757,19 @@ def _resolve_final_value(code: str, row_idx: int, inv_no: str, row: dict, marks:
     return row.get(code, NA)
 
 
-def _build_result_excel(rows_: list, invoice_groups_: list, marks: dict, supplier_key_: str) -> bytes:
+def _build_result_excel(
+    rows_: list, invoice_groups_: list, marks: dict, supplier_key_: str,
+    red_invoice_nos: Optional[set] = None,
+) -> bytes:
     """把人工核對後的「最終」資料 (擷取值，被標記錯誤的欄位改用人工輸入
     的正確答案) 輸出成跟使用者提供的 Excel 範本一樣的格式：表頭在第1列、
     從 A 欄開始依標準欄位順序排列，一張工作表對應這份帳單的供應商，
     可以直接拿來當作這家供應商之後的「正確答案 Excel」使用。
+
+    red_invoice_nos (可選)：金額查核機制 (見 audit_invoice_totals()/
+    mismatched_invoice_numbers()) 判定『不一致』的發票號碼集合 (正規化後
+    的字串)。這是使用者明確要求的通用規則 (不限特定供應商)：這張發票的
+    所有列整列文字改成紅字，方便人工一眼看出哪些發票的金額需要複查。
     """
     wb = Workbook()
     ws = wb.active
@@ -756,6 +781,7 @@ def _build_result_excel(rows_: list, invoice_groups_: list, marks: dict, supplie
     bold = Font(bold=True)
     header_fill = PatternFill("solid", fgColor="DDEBF7")
     wrap_center = Alignment(wrap_text=True, vertical="center", horizontal="center")
+    red_font = Font(color="FFFF0000")
 
     for idx, code in enumerate(FIELD_CODES, start=1):
         cell = ws.cell(row=1, column=idx, value=DISPLAY_HEADERS[code])
@@ -764,8 +790,10 @@ def _build_result_excel(rows_: list, invoice_groups_: list, marks: dict, supplie
         cell.alignment = wrap_center
         ws.column_dimensions[get_column_letter(idx)].width = 20
 
+    red_invoice_nos = red_invoice_nos or set()
     r = 2
     for inv_no, idxs in invoice_groups_:
+        is_mismatch = normalize_value(inv_no) in red_invoice_nos
         for row_idx in idxs:
             row_ = rows_[row_idx]
             for idx, code in enumerate(FIELD_CODES, start=1):
@@ -775,6 +803,8 @@ def _build_result_excel(rows_: list, invoice_groups_: list, marks: dict, supplie
                 # 不變，還是可以在 Excel 裡直接拿來做加總等計算)。
                 if code == "amount" and isinstance(value, (int, float)):
                     cell.number_format = "#,##0"
+                if is_mismatch:
+                    cell.font = red_font
             r += 1
 
     buf = io.BytesIO()
@@ -785,7 +815,10 @@ def _build_result_excel(rows_: list, invoice_groups_: list, marks: dict, supplie
 # 「確認無誤」已經改成在上面每張發票各自確認 (依供應商＋發票號碼記入
 # 累計正確帳單統計)，這裡的匯出不需要等確認，任何時候都可以直接匯出
 # 「目前」核對後的結果。
-result_bytes = _build_result_excel(rows, invoice_groups, st.session_state, detected_key)
+result_bytes = _build_result_excel(
+    rows, invoice_groups, st.session_state, detected_key,
+    red_invoice_nos=mismatched_invoice_numbers(audit_results),
+)
 # 按鈕實際插進最上方標題列的 export_col 那個欄位物件裡，視覺上會顯示在
 # 右上方、跟「重新查核」按鈕並排，而不是顯示在程式碼所在的這個位置。
 with export_col:
