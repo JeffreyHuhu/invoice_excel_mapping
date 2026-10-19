@@ -1282,7 +1282,11 @@ def build_excel(
     """
     wb = Workbook()
     ws = wb.active
-    ws.title = "帳單彙整"
+    # 分頁名稱統一固定寫死 "工作表"（使用者明確要求的全系統通用原則，不限
+    # 特定供應商）：不要用供應商名稱或其他描述性字樣，避免像本機執行工具
+    # 曾經發生的錯誤 (沿用內嵌範本殘留的 "DWIHARTA" 分頁名稱，導致任何
+    # 供應商轉出來的 Excel 分頁名稱都錯誤顯示成 "DWIHARTA")。
+    ws.title = "工作表"
 
     bold = Font(bold=True)
     header_fill = PatternFill("solid", fgColor="DDEBF7")
