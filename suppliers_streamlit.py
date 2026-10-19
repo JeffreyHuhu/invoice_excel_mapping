@@ -1596,6 +1596,43 @@ def _tata_receipt_extract_items(text: str) -> List[Dict]:
     return items
 
 
+#   "SHIP : CHAEI YANG VN CO LTD\nNO,BC: ..." (單獨一行，名稱後面直接換行)，
+#   或 "SHIP:BAIKSAN CO.,LTD. Bayar Diterima\nKOREA Sisa Tagihan: ..." (沒有
+#   空格、而且因為跟右欄的「Bayar Diterima」排版擠在同一行，名稱後面要在
+#   遇到 "Bayar" 這個右欄標籤字樣時就停止，不要吃到右欄文字；下一行的國家
+#   名稱 "KOREA" 是收件地點，不屬於 Shipper，不要抓)。
+# ⚠️ 右欄緊鄰的標籤字樣不只 "Bayar"：有些帳單版面是 "SHIP:xxx Total
+# 9.269.986" (右欄印的是 "Total" 不是 "Bayar")，兩種都要能停止擷取，不要
+# 把右欄文字併進 Shipper 名稱裡。
+_TATA_RECEIPT_SHIP_PATTERN = r"SHIP\s*:\s*(.+?)(?:\s+(?:Bayar|Total)\b|\s*\n)"
+
+# Volume/材積：帳單上沒有專屬標籤，是獨立一行印著「數量代碼/重量KG(S)」的
+# 格式 (例如 "7PK/26KGS"、"1PK/17KGS"、"7BG/132KGS"、"3CTN/109KG"、
+# "7PKG/117KG"——單位有時候是 "KG" 沒有尾巴的 "S"，兩種都要吃)，這一行在
+# 版面上的上下位置會因為有沒有船名/航班資訊而不同 (有時緊接在 "11.0%:"
+# 之後、有時緊接在 "Total:" 之後)，所以不用位置判斷，直接用格式本身 (數字
+# +英文代碼+ "/" + 數字 + "KG"/"KGS"，獨佔一整行) 掃描整份文字找。
+_TATA_RECEIPT_VOLUME_RE = re.compile(r"(?m)^(\d+[A-Za-z]+/\d+\s*[Kk][Gg][Ss]?)\s*$")
+
+# PPN 稅金行：跟 parse_tata_classic() 的 "PPN 12% Rp xxx" 格式不同，這種
+# 帳單印成 "PPN 12% 12.645" (沒有 "Rp" 前綴，金額是印尼式千分位、無小數)，
+# 而且這一行印在費用明細表格 ("KETERANGAN...JUMLAH" 到 "Subtotal" 之間)
+# 外面 (緊接在 Subtotal 後面)，所以不能跟 _tata_receipt_extract_items() 共用
+# 同一個擷取範圍，要另外對整份文字單獨搜尋。百分比動態抓出來組字串 (不要
+# 寫死 12%，避免哪張帳單稅率不同時字串對不上，跟 TRANS_DAYA_PRIMA/APL 的
+# VAT 費用名稱慣例一致)。
+#
+# ⚠️ 版面陷阱：有些帳單因為沒有另一行獨立印「11.0%:」這個利率小標籤 (跟
+# Volume 那一行搶同一個位置)，導致這個小標籤被擠到 PPN 這一行裡面、夾在
+# 百分比跟金額中間，變成 "PPN 12% 11.0% 331.458" 這種三個數字的格式，真正
+# 的金額是「最後」那個數字，不是中間那個 "11.0" (那只是利率小標籤被誤排
+# 進來，不是金額)。用一個可有可無的 "NN.N%" 群組吃掉這個小標籤，確保金額
+# 一定抓到行尾真正的數字。
+_TATA_RECEIPT_PPN_RE = re.compile(
+    r"(?m)^PPN\s*(?P<pct>\d+)%\s+(?:\d+\.\d+%\s+)?(?P<vat>[\d.]+)\s*$"
+)
+
+
 def parse_tata_receipt(text: str) -> Dict:
     """注意：這是 multi_page 供應商，text 是『一頁』的文字。"""
     header: Dict[str, Optional[str]] = {}
@@ -1606,23 +1643,41 @@ def parse_tata_receipt(text: str) -> Dict:
     )
     header["supplier"] = "PT TATA HARMONI SARANATAMA"
     header["consignee"] = _search(r"PELANGGAN\s*\n(.+?)\s+DETAIL\s*PEMBAYARAN", text)
-    header["bl_no"] = _search(r"\bHAWB\s*:\s*(\S+)", text)
-    header["mbl_no"] = _search(r"\bMAWB\s*:\s*(\S+)", text)
+    # ⚠️ 2026-10 修正：MAWB:/HAWB: 後面的值可能帶空格 (例如 "738-5567 8873")，
+    # 原本用 \S+ 只抓到第一個空白前的片段，改成抓到整行結尾才不會截斷。
+    header["bl_no"] = _search(r"\bHAWB\s*:\s*(.+?)\n", text)
+    header["mbl_no"] = _search(r"\bMAWB\s*:\s*(.+?)\n", text)
     header["vessel"] = _search(r"FLT\s*/\s*DT\s*:\s*([^/\n]+)/", text)
+    # ⚠️ 2026-10 新增：這次使用者提供的新樣本帳單上其實有印 Shipper (SHIP :)
+    # 跟材積 (獨立一行的 qty/weight)，舊版完全沒有擷取、一律留空；這兩個
+    # 欄位整張發票只有一個值，不分品項 (不像 TATA A/F 格式逐行各自不同)。
+    header["shipper"] = _search(_TATA_RECEIPT_SHIP_PATTERN, text)
+    _volume_m = _TATA_RECEIPT_VOLUME_RE.search(text)
+    header["volume"] = _volume_m.group(1).strip() if _volume_m else None
 
-    # 這種帳單沒有 Order No./到達日/開船日/裝卸貨港/材積/貨櫃資訊，留空給
+    # 這種帳單沒有 Order No./到達日/開船日/裝卸貨港/貨櫃資訊，留空給
     # expand_to_rows() 補 N/A
     header["order_no"] = None
     header["arrive_date"] = None
     header["onboard_date"] = None
     header["port_of_loading"] = None
     header["port_of_discharge"] = None
-    header["volume"] = None
     header["container_no"] = None
 
     items = _tata_receipt_extract_items(text)
     if not items:
         items = [{"description": None, "amount": None}]
+
+    # PPN 稅金：整張帳單只有一個稅額 (不是逐筆品項各自的稅額)，獨立附加
+    # 成一筆「只有 description/vat」的 item，展開成獨立一列，Order No. 等
+    # 其他抬頭欄位留 None 讓 expand_to_rows() 補 N/A。
+    _ppn_m = _TATA_RECEIPT_PPN_RE.search(text)
+    if _ppn_m:
+        items.append({
+            "description": f"PPN {_ppn_m.group('pct')}%",
+            "amount": None,
+            "vat": _tata_receipt_clean_amount(_ppn_m.group("vat")),
+        })
 
     return {"header": header, "items": items}
 
