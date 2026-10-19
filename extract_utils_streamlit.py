@@ -583,6 +583,22 @@ def normalize_value(value) -> str:
         num = float(no_comma)
         return f"{num:.6f}".rstrip("0").rstrip(".")
 
+    # 有些供應商的正確答案 Excel 日期欄位是純文字 "DD/MM/YYYY"（不是 Excel
+    # 日期型別儲存格），但同一家供應商不同月份的帳單，使用者準備正確答案
+    # 時有時候又存成真正的 Excel 日期型別（上面的 datetime 分支會轉成
+    # "DD Mon YYYY"）。兩種情況都要能跟系統擷取出來的日期值比對成功，所以
+    # 純文字的 "DD/MM/YYYY" 也統一轉成跟 datetime 分支一樣的 "DD Mon YYYY"
+    # 格式，不要只是單純大寫比較文字。
+    slash_date_m = re.fullmatch(r"(\d{1,2})/(\d{1,2})/(\d{4})", text)
+    if slash_date_m:
+        try:
+            day_i, month_i, year_i = (int(g) for g in slash_date_m.groups())
+            parsed = datetime.date(year_i, month_i, day_i)
+        except ValueError:
+            parsed = None
+        if parsed is not None:
+            return parsed.strftime("%d %b %Y").upper()
+
     text = text.upper()
     text = re.sub(r"\s+", " ", text)
     return text.rstrip(",")

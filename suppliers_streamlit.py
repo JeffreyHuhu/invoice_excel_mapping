@@ -4700,15 +4700,13 @@ def _pss_format_date(day, month, year) -> Optional[str]:
     return f"{day_i:02d}/{month_i:02d}/{year_i}"
 
 
-_PSS_DESC_PAREN_SPACE_RE = re.compile(r"\s+\)")
-
-
 def _pss_clean_description(desc: Optional[str]) -> Optional[str]:
-    """部分頁面排版在右括號前多一個空白 (例如 'ADIDAS ADCI )' vs
-    'ADIDAS ADCI)')，正確答案一律沒有這個空白，統一清掉。"""
-    if not desc:
-        return desc
-    return _PSS_DESC_PAREN_SPACE_RE.sub(")", desc)
+    """右括號前的空白 (例如 'ADIDAS )' vs 'ADIDAS)') 不要統一清掉——
+    不同月份的正確答案 Excel 對這個空白的要求不一致，有時跟 PDF 原文
+    一樣有空白、有時沒有，沒有通用規則可以判斷，所以照抄 PDF 原文最準。
+    這個函式保留只是為了未來若發現某一批帳單真的需要清理空白時可以用。
+    """
+    return desc
 
 
 def parse_putra_sejahtera_sentosa(text: str) -> Dict:
@@ -4752,6 +4750,19 @@ def parse_putra_sejahtera_sentosa(text: str) -> Dict:
             "vat": None,
         })
 
+    # 代墊/報銷費用 (Non DPP 的部分，不列入 PPN 計稅基礎)：有些月份的
+    # 帳單會多一筆 "TOTAL BIAYA REIMBURSEMENT"，金額是 0 時代表這張帳單
+    # 沒有這筆費用，正確答案 Excel 也不會有這一列，所以只在金額 > 0 時
+    # 才加進 items。
+    reimb_m = re.search(r"TOTAL BIAYA REIMBURSEMENT\s+([\d,]+)", text)
+    reimb_amount = _pss_clean_amount(reimb_m.group(1)) if reimb_m else None
+    if reimb_amount:
+        items.append({
+            "description": "TOTAL BIAYA REIMBURSEMENT",
+            "amount": reimb_amount,
+            "vat": None,
+        })
+
     # PPN (加值稅)：描述照抄 PDF 原文的 "PPN x %" 標籤，百分比動態抓出來。
     ppn_m = re.search(r"\bPPN\s+(\d[\d,]*\s*%)\s+([\d,]+)", text)
     if ppn_m:
@@ -4779,10 +4790,23 @@ def parse_putra_sejahtera_sentosa(text: str) -> Dict:
 
 
 def _pss_extract_dpp(text: str) -> Optional[int]:
-    """未稅小計 (DPP = Dasar Pengenaan Pajak)，稽核第 1 段：
-    DPP + PPN = GRAND TOTAL 用。"""
-    m = re.search(r"\bDPP\s+([\d,]+)", text)
-    return _pss_clean_amount(m.group(1)) if m else None
+    """未稅總額，稽核第 1 段 (未稅總額 + PPN = GRAND TOTAL) 用。
+
+    DPP (Dasar Pengenaan Pajak) 是「需要課 PPN 稅的那一部分」未稅金額，
+    對應 items 裡的 TOTAL BIAYA TRUCKING；如果這張帳單還有一筆
+    "Non DPP"（不課稅的代墊/報銷費用，對應 TOTAL BIAYA REIMBURSEMENT），
+    兩者加起來才是完整的「未稅總額」，才會等於 items 裡 amount 的加總
+    (TRUCKING + REIMBURSEMENT)。沒有 Non DPP 那筆費用時，Non DPP 本身
+    就是 0，加總等於 DPP 本身，不影響舊有行為。"""
+    dpp_m = re.search(r"\bDPP\s+([\d,]+)", text)
+    if not dpp_m:
+        return None
+    dpp = _pss_clean_amount(dpp_m.group(1))
+    if dpp is None:
+        return None
+    non_dpp_m = re.search(r"\bNon DPP\s+([\d,]+)", text)
+    non_dpp = _pss_clean_amount(non_dpp_m.group(1)) if non_dpp_m else None
+    return dpp + (non_dpp or 0)
 
 
 def _pss_extract_grand_total(text: str) -> Optional[int]:
