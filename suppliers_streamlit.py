@@ -1738,9 +1738,18 @@ def parse_tata_receipt(text: str) -> Dict:
 #     超出系統 ±1 的稽核容許誤差，所以這個格式故意不實作
 #     extract_total/extract_grand_total，让稽核機制視為「不適用」而不是
 #     顯示假警報的「不一致」。
-#   - Order No./Arrive Date/on board date/B/L NO./MBL NO./啟運港/目的港/
-#     船名/貨櫃號碼這張帳單都沒有對應資訊，留 None 給 expand_to_rows() 補
-#     N/A。
+#   - ⚠️ 2026-10 補充：ON BOARD DATE/B/L NO./啟運港 其實每一筆品項各自有自
+#     己的值 (就是每行自己的 DATE/HAWB/Country 欄位)，不是整張發票共用、也
+#     不是真的沒有 —— 這點最初的樣本 (sample7) 剛好只有一張發票、沒機會注意
+#     到跟 Order No./Arrive Date/MBL NO./目的港/船名/貨櫃號碼這些「真的沒有
+#     對應資訊」的欄位混在一起看待。所以 onboard_date 要用品項自己的 DATE
+#     欄位 (例如 '31/Jul/25' -> '31 Jul 2025')、bl_no 用品項自己的 HAWB 欄位
+#     (例如 'YJE123808864')、port_of_loading 用品項自己的 Country 欄位 (例如
+#     'CHINA'/'HONG KONG'/'VIETNAM'/'TAIWAN')，在每筆 item dict 裡用
+#     HEADER_FIELD_CODES 覆寫的慣例各自帶上這三個 key (見
+#     _tata_af_extract_items())，不要固定留 None。Order No./MBL NO./目的港/
+#     船名/貨櫃號碼這幾個欄位帳單上真的沒有對應資訊，維持留 None 給
+#     expand_to_rows() 補 N/A。
 
 def detect_tata_af(text: str) -> bool:
     """用表頭唯一的 'Kurs 1 USD' 字樣辨識，不會跟 classic/receipt 兩種
@@ -1749,15 +1758,21 @@ def detect_tata_af(text: str) -> bool:
 
 
 _TATA_AF_ITEM_LINE_RE = re.compile(
-    r"^(?P<no>\d+)\s+(?P<date>\d{1,2}/[A-Za-z]{3}/\d{2})\s+(?P<mid>.*?)\s+"
+    r"^(?P<no>\d+)\s+(?P<date>\d{1,2}/[A-Za-z]{3}/\d{2})\s+(?P<mid>.*?)\s*"
     r"(?P<attn>[A-Z]+\s+RONG)\s+(?P<hawb>\S+)\s+(?P<qty>\d+)\s*PKGS\s+"
     r"(?P<weight>[\d,]+)\s*kgs\s+Rp\s+(?P<kurs>[\d.]+)\s+(?P<amount>[\d.]+)\s+"
     r"(?P<vat>[\d.,]+)\s*$"
 )
+# ⚠️ 2026-10 補充：mid 跟 attn 之間原本要求至少一個空白 (\s+)，但有些品項
+# 整個 Shipper/Country 都被拆到前後兩行、本行本體剩下 "DATE RZR RONG ..."
+# 這種「日期跟 ATTN 之間只剩一個空白」的極端情況 (例如 HC25013192 第 3 筆
+# "3 28/Jul/25 RZR RONG YJE123807268 ...")，要求至少一個空白會讓這整行配不
+# 上 regex、整筆品項直接憑空消失 (比錯誤拆欄更嚴重)。改成 \s* 讓 mid 可以
+# 為空字串時兩個分隔空白共用同一個空白字元，不會因此漏掉整筆資料。
 
-# 已知的國家字樣清單 (多字的排在前面，優先比對)：目前樣本只出現這三種，
+# 已知的國家字樣清單 (多字的排在前面，優先比對)：目前樣本出現這四種，
 # 之後遇到新國家字樣再加進來即可。
-_TATA_AF_KNOWN_COUNTRIES = ["HONG KONG", "CHINA", "VIETNAM"]
+_TATA_AF_KNOWN_COUNTRIES = ["HONG KONG", "CHINA", "VIETNAM", "TAIWAN"]
 
 # 本行主體以外、不該被誤當成 Shipper/Country 換行殘字的行首字樣 (帳單下方
 # 小計/備註/銀行資訊區塊)。
@@ -1777,6 +1792,34 @@ def _tata_af_strip_country_suffix(mid: str):
             return "", country
         if upper.endswith(" " + country):
             return stripped[: -(len(country) + 1)].strip(), country
+    return stripped, None
+
+
+# "HONG KONG" 換行時常被拆成「HONG」「KONG」兩個單字分居前後兩行 (見下面
+# _tata_af_split_wrapped_line())，這兩個單字本身不是任何其他已知國家字樣的
+# 前/後綴，不會跟 CHINA/VIETNAM/TAIWAN 誤判。
+_TATA_AF_COUNTRY_WORD_FRAGMENTS = {"HONG", "KONG"}
+
+
+def _tata_af_split_wrapped_line(line: str):
+    """把一行『換行殘字』(Shipper 續行或 Country 續行，或兩者黏在同一行)
+    拆成 (這一行裡屬於 Shipper 的部分, 這一行裡屬於 Country 的部分或
+    None)。例如 'HONGKONG HONGYANG WEAVING HONG' -> ('HONGKONG HONGYANG
+    WEAVING', 'HONG')；純粹的 'KONG' -> ('', 'KONG')；完全沒有國家字樣的
+    'STRING CO LIMITED KONG' 裡的 'KONG' 一樣會被拆開 -> ('STRING CO
+    LIMITED', 'KONG')。"""
+    stripped = line.strip()
+    if not stripped:
+        return "", None
+    upper = stripped.upper()
+    for country in _TATA_AF_KNOWN_COUNTRIES:
+        if upper == country:
+            return "", country
+        if upper.endswith(" " + country):
+            return stripped[: -(len(country) + 1)].strip(), country
+    tokens = stripped.split()
+    if tokens and tokens[-1].upper() in _TATA_AF_COUNTRY_WORD_FRAGMENTS:
+        return " ".join(tokens[:-1]).strip(), tokens[-1].upper()
     return stripped, None
 
 
@@ -1804,6 +1847,19 @@ def _tata_af_clean_kurs(text: Optional[str]) -> Optional[int]:
         return None
     text = text.strip().replace(".", "").replace(",", "")
     return int(text) if text.isdigit() else None
+
+
+def _tata_af_parse_item_date(text: Optional[str]) -> Optional[str]:
+    """每一筆品項自己帶的 DATE 欄位 ('31/Jul/25' -> 'DD/Mon/YY') 轉成統一的
+    'DD Mon YYYY' 格式，對應到這筆品項覆寫用的 onboard_date。兩位數年份一律
+    視為 20XX (目前樣本都落在 2025 年附近)。"""
+    if not text:
+        return None
+    m = re.match(r"^(\d{1,2})/([A-Za-z]{3})/(\d{2})$", text.strip())
+    if not m:
+        return None
+    day, month_name, yy = m.group(1), m.group(2), m.group(3)
+    return _format_date_en_from_month_name(day, month_name, 2000 + int(yy))
 
 
 def _tata_af_format_weight(text: Optional[str]) -> Optional[str]:
@@ -1849,16 +1905,27 @@ def _tata_af_extract_items(text: str) -> List[Dict]:
         shipper_leftover, country = _tata_af_strip_country_suffix(mid)
         shipper = shipper_leftover
 
-        if country is not None and shipper_leftover == "":
-            # mid 整段就是國家名稱：Shipper 要從上下兩行的換行殘字拼回來
-            before_line = _tata_af_take_adjacent(lines, i - 1, item_line_idx_set, consumed)
-            after_line = _tata_af_take_adjacent(lines, i + 1, item_line_idx_set, consumed)
-            shipper = f"{before_line} {after_line}".strip()
-        elif country is None:
-            # mid 完全沒有國家字樣：Shipper 就是整段 mid，上下兩行是 Country
-            # 的換行殘字，消耗掉但不使用 (Country 本身不是輸出欄位)
-            _tata_af_take_adjacent(lines, i - 1, item_line_idx_set, consumed)
-            _tata_af_take_adjacent(lines, i + 1, item_line_idx_set, consumed)
+        if country is None or (country is not None and shipper_leftover == ""):
+            # 這一行本體沒辦法同時確定完整的 Shipper 跟 Country (mid 完全
+            # 沒有國家字樣、或 mid 整段就是國家名稱本身)：去抓前後兩行的
+            # 換行殘字，每一行都可能同時混著 Shipper 續字 + Country 續字
+            # (例如 'HONGKONG HONGYANG WEAVING HONG'：前半是 Shipper 公司
+            # 名稱本身帶 'HONGKONG' 字樣、後半 'HONG' 其實是 'HONG KONG'
+            # 這個國家被拆到兩行的其中一半)，不能直接整行當 Shipper 或整行
+            # 當 Country，要先用 _tata_af_split_wrapped_line() 各自拆開再
+            # 分別歸類、重新組合。
+            before_raw = _tata_af_take_adjacent(lines, i - 1, item_line_idx_set, consumed)
+            after_raw = _tata_af_take_adjacent(lines, i + 1, item_line_idx_set, consumed)
+            before_shipper, before_country = _tata_af_split_wrapped_line(before_raw)
+            after_shipper, after_country = _tata_af_split_wrapped_line(after_raw)
+            shipper = " ".join(
+                part for part in (before_shipper, shipper_leftover, after_shipper) if part
+            ).strip()
+            if country is None:
+                # mid 本身没有國家字樣時才需要用前後行拼出來的 Country 片段；
+                # 若 mid 整段就是完整國家名稱 (country 已知)，維持原值不覆寫。
+                country_fragments = [c for c in (before_country, after_country) if c]
+                country = " ".join(country_fragments) if country_fragments else None
         # else: mid 結尾就有完整的國家名稱、前面還有剩餘文字 -> 單行沒換
         # 行，shipper 已經是正確值，不要去動前後行。
 
@@ -1873,6 +1940,12 @@ def _tata_af_extract_items(text: str) -> List[Dict]:
             "vat": _tata_af_clean_vat(m.group("vat")),
             "volume": _tata_af_format_weight(m.group("weight")),
             "shipper": shipper or None,
+            # 每筆品項自帶的 DATE/HAWB/Country 欄位，覆寫整張發票共用的抬頭
+            # 值 (這張帳單沒有單一共用的 onboard_date/bl_no/port_of_loading，
+            # 每一筆貨運各自不同)。
+            "onboard_date": _tata_af_parse_item_date(m.group("date")),
+            "bl_no": m.group("hawb") or None,
+            "port_of_loading": country,
         })
 
     return items
