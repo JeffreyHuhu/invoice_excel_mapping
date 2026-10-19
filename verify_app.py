@@ -68,6 +68,9 @@ try:
         audit_invoice_totals,
         mismatched_invoice_numbers,
         normalize_value,
+        DATE_FIELD_CODES,
+        DATE_DISPLAY_NUMBER_FORMAT,
+        _coerce_to_date,
     )
 except ImportError as e:
     st.set_page_config(page_title="供應商帳單辨識擷取系統 - 啟動失敗", layout="wide")
@@ -803,6 +806,15 @@ def _build_result_excel(
                 # 不變，還是可以在 Excel 裡直接拿來做加總等計算)。
                 if code == "amount" and isinstance(value, (int, float)):
                     cell.number_format = "#,##0"
+                # 日期欄位一律寫成真正的 Excel 日期型別儲存格 (使用者明確
+                # 要求的全系統原則)，顯示格式統一是 "Aug-10-2026" 這種
+                # "英文月縮寫-日-年"；轉不出日期 (N/A、格式不認得) 就維持
+                # 原樣輸出，不強制。
+                if code in DATE_FIELD_CODES:
+                    date_value = _coerce_to_date(value)
+                    if date_value is not None:
+                        cell.value = date_value
+                        cell.number_format = DATE_DISPLAY_NUMBER_FORMAT
                 if is_mismatch:
                     cell.font = red_font
             r += 1

@@ -73,6 +73,17 @@ FIELD_CODES: List[str] = [
     "container_no", "shipper",
 ]
 
+# 標準欄位裡「值的語意是日期」的欄位（不管哪個供應商，parse_xxx() 吐出來
+# 的字串格式可能不一樣，但這三欄的值都代表一個日期）。使用者要求：轉檔
+# 結果 Excel 裡這幾欄一律要是「真正的 Excel 日期儲存格」(不是純文字)，
+# 顯示成 "Aug-10-2026" 這種「英文月縮寫-日-年」格式，見 _coerce_to_date()/
+# DATE_DISPLAY_NUMBER_FORMAT。
+DATE_FIELD_CODES: Tuple[str, ...] = ("invoice_date", "arrive_date", "onboard_date")
+
+# Excel 自訂數字格式字串：mmm=英文月份縮寫 (Jan/Feb/…)、dd=兩位數日、
+# yyyy=四位數年，用減號分隔，對應使用者要求的顯示方式 "Aug-10-2026"。
+DATE_DISPLAY_NUMBER_FORMAT = "mmm-dd-yyyy"
+
 DISPLAY_HEADERS: Dict[str, str] = {
     "invoice_date":      "INVOICE DATE\n發票日期",
     "invoice_no":        "INVOICE NO\n發票號碼",
@@ -549,6 +560,81 @@ def parse_invoice_pdf(pdf_path: str, supplier_key: Optional[str] = None,
 # ---------------------------------------------------------------------------
 # 5. 比對評分：擷取結果 vs 正確答案
 # ---------------------------------------------------------------------------
+
+# 全系統目前只有這三種日期字串格式會被 parse_xxx() 吐出來（見
+# suppliers_streamlit.py 裡各家 _xxx_format_date()/_xxx_parse_date() 最終
+# 的回傳格式）：
+#   1. "DD Mon YYYY"（例如 "08 Apr 2025"）：絕大多數供應商共用的
+#      _format_date_en()/_format_date_en_from_month_name()。
+#   2. "YYYY-MON-DD"（例如 "2026-JUN-11"）：INDOPROSTIME 系列專用的
+#      _indo_format_date()。
+#   3. "DD/MM/YYYY"（例如 "08/04/2025"）：PUTRA_SEJAHTERA_SENTOSA 專用的
+#      _pss_format_date()。
+# _coerce_to_date() 把這三種格式統一解析成真正的 datetime.date，供輸出
+# Excel 時寫成日期型別儲存格用；往後若有供應商新增第 4 種格式，在這裡
+# 多加一個 regex 分支即可，不用改任何供應商自己的 parse_xxx()。
+_DATE_FMT_DD_MON_YYYY = re.compile(
+    r"^(\d{1,2})\s+([A-Za-z]{3})\s+(\d{4})$"
+)
+_DATE_FMT_YYYY_MON_DD = re.compile(
+    r"^(\d{4})-([A-Za-z]{3})-(\d{1,2})$"
+)
+_DATE_FMT_DD_SLASH_MM_SLASH_YYYY = re.compile(
+    r"^(\d{1,2})/(\d{1,2})/(\d{4})$"
+)
+_DATE_MONTH_ABBR_TO_NUM = {
+    "JAN": 1, "FEB": 2, "MAR": 3, "APR": 4, "MAY": 5, "JUN": 6,
+    "JUL": 7, "AUG": 8, "SEP": 9, "OCT": 10, "NOV": 11, "DEC": 12,
+}
+
+
+def _coerce_to_date(value) -> Optional[datetime.date]:
+    """把擷取結果裡「語意是日期」的值轉成真正的 datetime.date，轉不出來
+    (None、"N/A"、空字串、格式不認得) 就回傳 None，呼叫端視為「這欄不是
+    日期，照原樣輸出」，不要讓這個函式拋例外中斷整個輸出流程。
+    """
+    if isinstance(value, datetime.datetime):
+        return value.date()
+    if isinstance(value, datetime.date):
+        return value
+    if not isinstance(value, str):
+        return None
+    text = value.strip()
+    if not text or _is_na(text):
+        return None
+
+    m = _DATE_FMT_DD_MON_YYYY.match(text)
+    if m:
+        day_s, month_abbr, year_s = m.groups()
+        month = _DATE_MONTH_ABBR_TO_NUM.get(month_abbr.upper())
+        if month:
+            try:
+                return datetime.date(int(year_s), month, int(day_s))
+            except ValueError:
+                return None
+        return None
+
+    m = _DATE_FMT_YYYY_MON_DD.match(text)
+    if m:
+        year_s, month_abbr, day_s = m.groups()
+        month = _DATE_MONTH_ABBR_TO_NUM.get(month_abbr.upper())
+        if month:
+            try:
+                return datetime.date(int(year_s), month, int(day_s))
+            except ValueError:
+                return None
+        return None
+
+    m = _DATE_FMT_DD_SLASH_MM_SLASH_YYYY.match(text)
+    if m:
+        day_s, month_s, year_s = m.groups()
+        try:
+            return datetime.date(int(year_s), int(month_s), int(day_s))
+        except ValueError:
+            return None
+
+    return None
+
 
 def normalize_value(value) -> str:
     """統一轉成好比對的字串：去除空白/大小寫差異，日期物件轉成固定格式，
@@ -1312,7 +1398,13 @@ def build_excel(
         if is_mismatch:
             cell_a.font = red_bold_font
         for idx, code in enumerate(FIELD_CODES, start=2):
-            cell = ws.cell(row=r, column=idx, value=row.get(code, NA))
+            raw_value = row.get(code, NA)
+            cell = ws.cell(row=r, column=idx, value=raw_value)
+            if code in DATE_FIELD_CODES:
+                date_value = _coerce_to_date(raw_value)
+                if date_value is not None:
+                    cell.value = date_value
+                    cell.number_format = DATE_DISPLAY_NUMBER_FORMAT
             if is_mismatch:
                 cell.font = red_font
 
