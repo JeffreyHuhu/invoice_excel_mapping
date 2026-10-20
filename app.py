@@ -76,7 +76,23 @@ try:
         is_multi_page_supplier,
         audit_invoice_totals,
         mismatched_invoice_numbers,
+        quality_score,
     )
+    from validation_streamlit import (
+        validate_extraction,
+        worst_level,
+        build_exception_rows,
+        build_exceptions_excel,
+        add_exceptions_sheet,
+    )
+    from fallback_streamlit import (
+        SOURCE_RULES,
+        SOURCE_LLM,
+        llm_available,
+        llm_supplier_name,
+        run_fallbacks,
+    )
+    from logger_streamlit import get_logger
 except ImportError as e:
     st.set_page_config(page_title="供應商帳單對比系統 - 啟動失敗", layout="wide")
     st.error(
@@ -294,6 +310,27 @@ with col_ref:
     )
     st.caption("沒有上傳的話，會改用『資料完整度』(欄位是否成功抓到值，而非 N/A) 作為代理指標。")
 
+# LLM 備援 (選用)：API 金鑰可放在 Streamlit secrets 或環境變數 ANTHROPIC_API_KEY。
+# 啟用後，規則擷取信心不足的發票文字會傳送到 Anthropic API，所以預設關閉，
+# 由使用者每次自行勾選。
+try:
+    if "ANTHROPIC_API_KEY" in st.secrets and not os.environ.get("ANTHROPIC_API_KEY"):
+        os.environ["ANTHROPIC_API_KEY"] = st.secrets["ANTHROPIC_API_KEY"]
+except Exception:  # noqa: BLE001  (沒有 secrets.toml 時 st.secrets 會拋例外)
+    pass
+_llm_ready = llm_available()
+use_llm = st.checkbox(
+    "🤖 啟用 LLM 備援擷取 (Claude)：規則擷取信心不足的發票，改用 LLM 結構化擷取",
+    value=False,
+    disabled=not _llm_ready,
+    help=(
+        "勾選後，驗證未通過 (信心等級「低」) 的發票，其 PDF 文字 (掃描檔則為 PDF 檔案本身) 會傳送到 Anthropic API "
+        "做結構化擷取；LLM 擷取結果一律列入異常清單，需人工複查。"
+        if _llm_ready else
+        "需要安裝 anthropic 套件，並在 Streamlit secrets 或環境變數設定 ANTHROPIC_API_KEY。"
+    ),
+)
+
 if not uploaded_pdfs:
     st.info("請先上傳至少一份 PDF 帳單。")
     st.stop()
@@ -338,6 +375,8 @@ if run_clicked:
     all_export_rows, score_rows, compare_rows_all, attempts_log, unknown_files = [], [], [], [], []
     audit_rows = []
     all_audit_results = []
+    exception_rows, fallback_log = [], []
+    logger = get_logger()
 
     with st.spinner(
         f"解析中 (每份 PDF 先辨識供應商，正確率未滿 100% 時最多重試 "
@@ -350,8 +389,6 @@ if run_clicked:
             try:
                 quick_text = extract_text_from_pdf(tmp_path)
                 supplier_key = detect_supplier(quick_text)
-                if supplier_key is None:
-                    unknown_files.append(f.name)
 
                 is_multi = is_multi_page_supplier(supplier_key)
 
@@ -376,7 +413,43 @@ if run_clicked:
                     tmp_path, supplier_key=supplier_key, reference_rows=reference_rows
                 )
 
+                # 金額稽核 (說明見下方 audit_rows)，驗證層跟備援機制都會用到
+                try:
+                    audit_results = audit_invoice_totals(
+                        result["supplier_key"], tmp_path, result["rows"]
+                    )
+                except Exception:  # noqa: BLE001
+                    logger.exception("%s：金額稽核失敗", f.name)
+                    audit_results = []
+
+                # 驗證層：不需要正確答案，用帳單本身該成立的規則檢查擷取結果
+                validations = validate_extraction(
+                    result["rows"], result["supplier_key"], audit_results
+                )
+                source = SOURCE_RULES
+                # 信心「低」時啟動備援擷取。有對應的正確答案時是在測試規則
+                # 本身，不用備援結果取代，以免正確率失真。
+                if reference_rows is None:
+                    fb = run_fallbacks(
+                        tmp_path, f.name, result["supplier_key"], result["rows"],
+                        audit_results, validations, quick_text, use_llm=use_llm,
+                    )
+                    source = fb["source"]
+                    if source != SOURCE_RULES:
+                        result["rows"] = fb["rows"]
+                        result["supplier_key"] = fb["supplier_key"]
+                        result["score"] = quality_score(fb["rows"])
+                    audit_results, validations = fb["audit_results"], fb["validations"]
+                    if fb["notes"]:
+                        fallback_log.append({"來源檔案": f.name, "備援過程": "；".join(fb["notes"])})
+
+                if result["supplier_key"] is None and source != SOURCE_LLM:
+                    unknown_files.append(f.name)
+
                 label = supplier_label(result["supplier_key"])
+                if source == SOURCE_LLM:
+                    label = f"{llm_supplier_name(result['rows']) or '未知供應商'} (LLM 擷取)"
+                exception_rows.extend(build_exception_rows(f.name, label, source, validations))
                 for row in result["rows"]:
                     row["__supplier_label"] = label
                 all_export_rows.extend(result["rows"])
@@ -399,6 +472,8 @@ if run_clicked:
                     "採用設定": result["config"] or "預設",
                     "套用學習記憶": "✅ 是" if result.get("learned_applied") else "-",
                     "比對基準": "正確答案 Excel" if reference_rows is not None else "資料完整度自我檢查",
+                    "信心等級": worst_level(validations),
+                    "擷取來源": source,
                 })
                 attempts_log.append({
                     "檔案": f.name, "供應商": label, "嘗試紀錄": result["attempts"],
@@ -418,13 +493,7 @@ if run_clicked:
                 #    Amount Due / Total…)，適用所有有逐筆 VAT 的供應商。
                 # 不一致就記錄下來，等一下在畫面上跳出警示 (見下方顯示區
                 # 塊)。沒有實作對應規則的供應商，相應欄位會是 None，不算
-                # 異常，不會顯示警示。
-                try:
-                    audit_results = audit_invoice_totals(
-                        result["supplier_key"], tmp_path, result["rows"]
-                    )
-                except Exception:
-                    audit_results = []
+                # 異常，不會顯示警示。(audit_results 已在上方驗證層之前算好)
                 for ar in audit_results:
                     audit_rows.append({
                         "來源檔案": f.name,
@@ -452,7 +521,14 @@ if run_clicked:
                 all_audit_results.extend(audit_results)
 
             except Exception as e:  # noqa: BLE001
+                logger.exception("%s：解析失敗", f.name)
                 st.error(f"❌ {f.name}：解析失敗 ({e})")
+                exception_rows.append({
+                    "來源檔案": f.name, "供應商": NA, "Invoice No": NA,
+                    "信心等級": "低", "信心度": "0%", "擷取來源": NA,
+                    "嚴重度": "ERROR", "欄位": NA, "檢查項目": "PARSE_FAILED",
+                    "說明": f"PDF 解析失敗 (可能格式不符或檔案損壞)：{e}",
+                })
             finally:
                 os.remove(tmp_path)
 
@@ -466,6 +542,8 @@ if run_clicked:
         "unknown_files": unknown_files,
         "audit_rows": audit_rows,
         "all_audit_results": all_audit_results,
+        "exception_rows": exception_rows,
+        "fallback_log": fallback_log,
     }
     st.session_state["last_signature"] = current_signature
 
@@ -490,6 +568,8 @@ attempts_log = bundle["attempts_log"]
 unknown_files = bundle["unknown_files"]
 audit_rows = bundle.get("audit_rows", [])
 all_audit_results = bundle.get("all_audit_results", [])
+exception_rows = bundle.get("exception_rows", [])
+fallback_log = bundle.get("fallback_log", [])
 
 if unknown_files:
     st.warning(
@@ -499,6 +579,10 @@ if unknown_files:
     )
 
 if not all_export_rows:
+    # 全部檔案都解析失敗時，仍要顯示異常清單 (失敗原因)
+    if exception_rows:
+        st.subheader("🚩 異常清單 (Exceptions)")
+        st.dataframe(pd.DataFrame(exception_rows), use_container_width=True)
     st.stop()
 
 # ---------------------------------------------------------------------------
@@ -535,6 +619,31 @@ if not has_reference:
     )
 
 st.dataframe(score_df, use_container_width=True)
+
+# ---------------------------------------------------------------------------
+# 異常清單 (Exceptions)：驗證層判定信心等級「中/低」的發票、解析失敗的檔案
+# ---------------------------------------------------------------------------
+st.subheader("🚩 異常清單 (Exceptions)")
+if exception_rows:
+    exc_df = pd.DataFrame(exception_rows)
+    n_low = exc_df.loc[exc_df["信心等級"] == "低", ["來源檔案", "Invoice No"]].drop_duplicates().shape[0]
+    n_mid = exc_df.loc[exc_df["信心等級"] == "中", ["來源檔案", "Invoice No"]].drop_duplicates().shape[0]
+    st.warning(
+        f"驗證層發現 {n_low} 張低信心、{n_mid} 張中信心的發票，請優先複查以下項目 "
+        "(ERROR=幾乎確定抓錯，WARN=可疑)："
+    )
+    st.dataframe(exc_df, use_container_width=True)
+    st.download_button(
+        "⬇️ 下載異常清單",
+        data=build_exceptions_excel(exception_rows),
+        file_name=f"異常清單_{datetime.date.today().isoformat()}.xlsx",
+        mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+    )
+else:
+    st.success("✅ 驗證層沒有發現異常：所有發票的信心等級皆為「高」。")
+if fallback_log:
+    with st.expander(f"🛟 備援擷取紀錄 (共 {len(fallback_log)} 份 PDF 觸發備援)"):
+        st.dataframe(pd.DataFrame(fallback_log), use_container_width=True)
 
 # ---------------------------------------------------------------------------
 # 金額稽核，兩項各自獨立：
@@ -707,7 +816,10 @@ for _, r in edited_df.iterrows():
     export_rows.append(row)
 
 red_invoice_nos = mismatched_invoice_numbers(all_audit_results)
-excel_bytes = build_excel(export_rows, red_invoice_nos=red_invoice_nos)
+# 第二個分頁「Exceptions」是驗證層的異常清單 (依據擷取當下的值，不含上方表格的手動修改)
+excel_bytes = add_exceptions_sheet(
+    build_excel(export_rows, red_invoice_nos=red_invoice_nos), exception_rows
+)
 st.download_button(
     "⬇️ 下載 Excel (彙整所有供應商的轉檔結果)",
     data=excel_bytes,
