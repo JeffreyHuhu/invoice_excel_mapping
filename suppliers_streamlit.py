@@ -23,7 +23,7 @@ register_supplier() 呼叫順序的後面，因為 detect_supplier() 是依序�
 
 import re
 import datetime
-from typing import Dict, List, Optional
+from typing import Dict, List, Optional, Tuple
 
 from extract_utils_streamlit import register_supplier
 
@@ -804,14 +804,18 @@ def parse_indoprostime_transport(text: str) -> Dict:
 #   CONSIGNEE      "Sold to :"
 #   Description/AMOUNT/VAT  "Description of Charges" 表格，每筆費用下一行
 #                  緊接著自己的 "VAT xxx"
+#   Order No.      "Commercial Invoice No:" (可能有多個號碼、以逗號分隔且跨行)
 #   Arrive Date / on board date   "ETA:" / "ETD:"
 #   B/L NO.        "FCR" 後面的號碼
-#   MBL NO.        跟 INVOICE NO 同一個號碼 ("Original" 下方)
 #   Port of Loading / discharge   "POL:" / "POD:"
-#   Volume         "Volume :"
+#   Volume         該 FCR 費用的 M3 數量；抓不到才用 "Volume :" 總材積
 #   Shipper        "SHPR:"
-#   Order No.、Vessel、Container no. 帳單沒有，留給 expand_to_rows() 補 N/A。
-#   ("Commercial Invoice No:" 不對應任何欄位，不要再當成 Order No.)
+#   MBL NO.、Vessel、Container no. 帳單沒有，留給 expand_to_rows() 補 N/A。
+#
+# 一張發票可能包含好幾票貨 (FCR)：每個 "FCR xxx" 開頭的區塊各有自己的
+# Sold to/POL/POD/ETD/ETA/SHPR 與費用表格，區塊以費用表格最後一行的區塊
+# 小計 (單獨一個數字) 結束。各區塊的運輸欄位寫進該區塊每筆 item，覆蓋整張
+# 發票共用的抬頭值 (expand_to_rows() 支援 item 帶抬頭欄位)。
 #
 # 版面特徵：POL/POD/ETD/ETA/SHPR... 左右並排、只隔一個空白 (跟 INDOPROSTIME
 # 同款排版)，用「遇到下一個已知欄位關鍵字就停止」的策略處理。
@@ -884,52 +888,85 @@ def _maersk_clean_amount(text: Optional[str]) -> Optional[int]:
 #   "2 Origin Terminal Handling 4.094 M3 361,055"
 #   "Charge"                                     -> 續行，併回上一筆名稱
 #   "VAT 39,716"
-# 用逐行掃描處理「名稱可能多一行續行」這種不固定的情況。
+#   未達最低計費量時，金額不在項次那一行，而是另起一行：
+#   "9 CFS Receiving Charge 0.850 M3"
+#   "VAT 25,830"
+#   "Min. Quantity Price 2,348.19 234,819"       -> 最後一個數字才是金額
+# 用逐行掃描處理這些不固定的情況。
 _MAERSK_ITEM_START_PATTERN = re.compile(
-    r"^(?P<num>\d+)\s+(?P<desc>.+?)\s+(?P<qty>\d+(?:\.\d+)?)\s+(?P<uom>[A-Za-z0-9]+)\s+"
-    r"(?P<amount>[\d,]+)\s*$"
+    r"^(?P<num>\d+)\s+(?P<desc>.+?)\s+(?P<qty>\d+(?:\.\d+)?)\s+"
+    r"(?P<uom>[A-Za-z][A-Za-z0-9]*)(?:\s+(?P<amount>[\d,]+))?\s*$"
 )
 _MAERSK_VAT_LINE_PATTERN = re.compile(r"^VAT\s+([\d,]+)\s*$")
+_MAERSK_MIN_PRICE_PATTERN = re.compile(r"^Min\.?\s*Quantity\s*Price\b.*?([\d,]+)\s*$")
+# 費用表格最後的區塊小計：整行只有一個數字
+_MAERSK_TABLE_END_PATTERN = re.compile(r"^[\d,]+$")
 
 
-def _maersk_extract_items(text: str) -> List[Dict]:
-    m = re.search(
-        r"ItemDescription of Charges.*?Total\(IDR\)\s*\n(.*?)\nTotal Packages",
-        text, re.DOTALL,
-    )
+def _maersk_extract_items(block: str) -> Tuple[List[Dict], Optional[str]]:
+    """擷取一個 FCR 區塊的費用明細，回傳 (items, 該區塊 M3 數量)。"""
+    m = re.search(r"ItemDescription of Charges[^\n]*\n(.*)", block, re.DOTALL)
     if not m:
-        return []
-    lines = [ln.strip() for ln in m.group(1).split("\n") if ln.strip()]
+        return [], None
+    lines = []
+    for ln in m.group(1).split("\n"):
+        ln = ln.strip()
+        if _MAERSK_TABLE_END_PATTERN.match(ln):
+            break
+        if ln:
+            lines.append(ln)
 
     items: List[Dict] = []
+    volume = None
     i = 0
     while i < len(lines):
         start_m = _MAERSK_ITEM_START_PATTERN.match(lines[i])
         if not start_m:
             i += 1
             continue
+        if volume is None and start_m.group("uom").upper() == "M3":
+            volume = start_m.group("qty")
         desc_parts = [start_m.group("desc").strip()]
         amount = _maersk_clean_amount(start_m.group("amount"))
-        i += 1
         vat = None
-        # 往下找這一筆的 VAT 那一行；中間如果還有非 VAT、非下一筆項次開頭
-        # 的文字，代表是費用名稱被自動換行拆出來的續行，併回描述裡。
-        while i < len(lines):
+        i += 1
+        # 到下一筆項次開頭之前：VAT 行、最低計費金額行，其餘是名稱續行
+        while i < len(lines) and not _MAERSK_ITEM_START_PATTERN.match(lines[i]):
             vat_m = _MAERSK_VAT_LINE_PATTERN.match(lines[i])
+            min_m = _MAERSK_MIN_PRICE_PATTERN.match(lines[i])
             if vat_m:
                 vat = _maersk_clean_amount(vat_m.group(1))
-                i += 1
-                break
-            if _MAERSK_ITEM_START_PATTERN.match(lines[i]):
-                break  # 下一筆已經開始，這筆沒有抓到 VAT (防禦性處理)
-            desc_parts.append(lines[i])
+            elif min_m and amount is None:
+                amount = _maersk_clean_amount(min_m.group(1))
+            elif vat is None:
+                desc_parts.append(lines[i])
             i += 1
         items.append({
             "description": " ".join(desc_parts).strip(),
             "amount": amount,
             "vat": vat,
         })
-    return items
+    return items, volume
+
+
+def _maersk_split_fcr_blocks(text: str) -> List[str]:
+    """依 "FCR xxx" 行切出每一票貨的區塊 (第一個 FCR 之前是發票抬頭)；
+    找不到 FCR 行時整份當成一個區塊。"""
+    starts = [m.start() for m in re.finditer(r"^FCR\s+\S+\s*$", text, re.MULTILINE)]
+    if not starts:
+        return [text]
+    return [text[s:e] for s, e in zip(starts, starts[1:] + [len(text)])]
+
+
+def _maersk_order_no(text: str) -> Optional[str]:
+    """"Commercial Invoice No:" 後面的號碼；多個號碼時會以逗號分隔並跨行
+    (甚至從號碼中間斷行)，所以把到 "Total Amount Due" 之前的文字去掉空白
+    直接接起來。"""
+    m = re.search(r"Commercial\s*Invoice\s*No\s*:\s*(.*?)\n\s*Total\s*Amount\s*Due",
+                  text, re.DOTALL)
+    if not m:
+        return _search(r"Commercial\s*Invoice\s*No\s*:\s*(\S+)", text)
+    return re.sub(r"\s+", "", m.group(1)) or None
 
 
 def _maersk_extract_total(text: str) -> Optional[int]:
@@ -945,11 +982,9 @@ def _maersk_extract_grand_total(text: str) -> Optional[int]:
 def parse_maersk(text: str) -> Dict:
     header: Dict[str, Optional[str]] = {}
 
-    # "Original" 下方 "INVOICE 5617858220"：INVOICE NO 與 MBL NO 都用這個號碼
-    invoice_no = _search(r"\bINVOICE\s+(\d+)\b", text)
-    header["invoice_no"] = invoice_no
-    header["mbl_no"] = invoice_no
+    header["invoice_no"] = _search(r"\bINVOICE\s+(\d+)\b", text)
     header["invoice_date"] = _maersk_extract_invoice_date(text)
+    header["order_no"] = _maersk_order_no(text)
     # SUPPLIER：第 2 頁 "Issued by:" 下一行；只有第 1 頁時退而取費用表格
     # 下方 ("Total Packages" 那行之後) 的公司名稱
     header["supplier"] = (
@@ -957,21 +992,31 @@ def parse_maersk(text: str) -> Dict:
         or _search(r"Total\s*Packages.*\n(.+)", text)
     )
     header["consignee"] = _search(rf"Sold\s*to\s*:\s*(.+?){_MAERSK_STOP}", text)
-    header["bl_no"] = _search(r"\bFCR\s+(\S+)", text)
-    header["port_of_loading"] = _search(rf"\bPOL\s*:\s*(.+?){_MAERSK_STOP}", text)
-    header["port_of_discharge"] = _search(rf"\bPOD\s*:\s*(.+?){_MAERSK_STOP}", text)
-    header["onboard_date"] = _maersk_parse_date(
-        _search(rf"\bETD\s*:\s*(.+?){_MAERSK_STOP}", text)
-    )
-    header["arrive_date"] = _maersk_parse_date(
-        _search(rf"\bETA\s*:\s*(.+?){_MAERSK_STOP}", text)
-    )
-    header["volume"] = _search(r"Volume\s*:\s*([\d.]+)\s*m3", text)
-    # Shipper：帳單上 "SHPR:" 後面的公司名稱 (跟 "Sold to:" 的帳單對象可能
-    # 不是同一家，不要直接沿用 consignee 的值)。
-    header["shipper"] = _search(rf"\bSHPR\s*:\s*(.+?){_MAERSK_STOP}", text)
+    total_volume = _search(r"Volume\s*:\s*([\d.,]+)\s*m3", text)
 
-    return {"header": header, "items": _maersk_extract_items(text)}
+    items: List[Dict] = []
+    for n, block in enumerate(_maersk_split_fcr_blocks(text)):
+        block_items, block_volume = _maersk_extract_items(block)
+        shipment = {
+            "bl_no": _search(r"^FCR\s+(\S+)", block),
+            "port_of_loading": _search(rf"\bPOL\s*:\s*(.+?){_MAERSK_STOP}", block),
+            "port_of_discharge": _search(rf"\bPOD\s*:\s*(.+?){_MAERSK_STOP}", block),
+            "onboard_date": _maersk_parse_date(
+                _search(rf"\bETD\s*:\s*(.+?){_MAERSK_STOP}", block)
+            ),
+            "arrive_date": _maersk_parse_date(
+                _search(rf"\bETA\s*:\s*(.+?){_MAERSK_STOP}", block)
+            ),
+            "volume": block_volume or total_volume,
+            # Shipper：帳單上 "SHPR:" 後面的公司名稱 (跟 "Sold to:" 的帳單
+            # 對象可能不是同一家，不要直接沿用 consignee 的值)。
+            "shipper": _search(rf"\bSHPR\s*:\s*(.+?){_MAERSK_STOP}", block),
+        }
+        if n == 0:
+            header.update(shipment)  # 抬頭沿用第一票貨的值
+        items.extend({**item, **shipment} for item in block_items)
+
+    return {"header": header, "items": items}
 
 
 # ===========================================================================
