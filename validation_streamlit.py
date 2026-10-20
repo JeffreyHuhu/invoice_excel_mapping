@@ -8,10 +8,11 @@ validation_streamlit.py
 每一份帳單都人工做正確答案 Excel。所以這裡改用「帳單本身就該成立的規則」
 自動檢查擷取結果合不合理，不需要正確答案：
 
-  1. 關鍵欄位缺失：發票號碼/發票日期/供應商名稱抓不到、沒有任何費用明細、
-     有費用名稱卻沒有金額。
+  1. 必填欄位缺失 (ERROR)：INVOICE DATE、INVOICE NO、SUPPLIER、CONSIGNEE、
+     Description、AMOUNT (使用者指定的六個必要欄位)。
   2. 格式檢查：金額/稅額不是數字、日期格式認不得、日期不合理 (太舊或在
-     未來)、到達日早於開船日。
+     未來)、到達日早於開船日；選填欄位的基本格式 (單號要有數字、貨櫃號碼
+     要有 4 碼英文 + 7 碼數字、材積要有數字、港口/船名/出貨方要有文字)。
   3. 金額勾稽：沿用 audit_invoice_totals() 的三項稽核 (未稅加總=未稅總額、
      未稅+稅額=含稅總額、含稅-代扣稅=實付金額)，任何一項不一致就是錯誤。
 
@@ -28,6 +29,7 @@ fallback_streamlit.py 的備援擷取，並列入異常清單 (Exceptions)。
 
 import datetime
 import io
+import re
 from typing import Dict, List, Optional
 
 from openpyxl import load_workbook
@@ -42,6 +44,7 @@ from extract_utils_streamlit import (
     _is_na,
     normalize_value,
 )
+from logger_streamlit import get_logger
 
 ERROR = "ERROR"
 WARN = "WARN"
@@ -50,10 +53,31 @@ INFO = "INFO"
 # 每個問題從信心度 1.0 扣掉的分數
 _SEVERITY_PENALTY = {ERROR: 0.35, WARN: 0.1, INFO: 0.05}
 
-# 少了就幾乎無法入帳的抬頭欄位 (ERROR)，以及缺了值得注意的欄位 (WARN)。
-# 發票日期歸在 WARN：少數供應商的帳單本身就沒有印發票日期 (例如 ECOMET)。
-REQUIRED_HEADER_FIELDS = ("invoice_no", "supplier")
-RECOMMENDED_HEADER_FIELDS = ("invoice_date", "consignee")
+# 使用者指定的必要欄位：抬頭 4 個 + 費用明細 2 個 (description/amount，見
+# _check_items())。缺任何一個都是 ERROR。其餘 12 個欄位為選填，缺值不算
+# 異常，有值時才做基本格式檢查 (_check_optional_formats())。
+REQUIRED_HEADER_FIELDS = ("invoice_date", "invoice_no", "supplier", "consignee")
+
+# 選填欄位的基本格式規則 (WARN)：(欄位, 規則代碼, 檢查函式, 說明)
+_CONTAINER_NO_RE = re.compile(r"[A-Z]{4}\d{6,7}")
+_OPTIONAL_FORMAT_RULES = (
+    ("order_no", "ID_NO_DIGIT", lambda v: re.search(r"\d", v), "單號裡沒有任何數字"),
+    ("bl_no", "ID_NO_DIGIT", lambda v: re.search(r"\d", v), "提單號碼裡沒有任何數字"),
+    ("mbl_no", "ID_NO_DIGIT", lambda v: re.search(r"\d", v), "主提單號碼裡沒有任何數字"),
+    # 貨櫃號碼可能是多個、中間有空白或換行 (例如 "BMOU 4921920")，去掉空白後
+    # 只要找得到至少一組「4 碼英文 + 6~7 碼數字」就算合格
+    ("container_no", "CONTAINER_FORMAT",
+     lambda v: _CONTAINER_NO_RE.search(re.sub(r"\s", "", v.upper())),
+     "找不到「4 碼英文 + 7 碼數字」格式的貨櫃號碼"),
+    ("volume", "VOLUME_NO_DIGIT", lambda v: re.search(r"\d", v), "材積裡沒有任何數字"),
+    ("port_of_loading", "TEXT_NO_LETTER", lambda v: re.search(r"[A-Za-z]", v), "啟運港沒有任何文字"),
+    ("port_of_discharge", "TEXT_NO_LETTER", lambda v: re.search(r"[A-Za-z]", v), "目的港沒有任何文字"),
+    ("vessel", "TEXT_NO_LETTER", lambda v: re.search(r"[A-Za-z]", v), "船名/航班沒有任何文字"),
+    ("shipper", "TEXT_NO_LETTER", lambda v: re.search(r"[A-Za-z]", v), "出貨方沒有任何文字"),
+)
+
+# 正確答案裡常見的「不適用」佔位字元，視同空值 (不算缺漏，也不做格式檢查)
+_PLACEHOLDERS = {"-", "--", "/"}
 
 # 日期合理範圍：早於這一年，或晚於今天 + 這麼多天，視為可疑
 _MIN_REASONABLE_YEAR = 2015
@@ -64,15 +88,38 @@ LEVEL_MEDIUM = "中"
 LEVEL_LOW = "低"
 
 FIELD_LABELS: Dict[str, str] = {
-    "invoice_no": "發票號碼", "invoice_date": "發票日期", "supplier": "供應商名稱",
-    "consignee": "集團公司名稱", "description": "費用名稱", "amount": "金額",
-    "vat": "稅額", "arrive_date": "到達日", "onboard_date": "開船日",
+    "invoice_date": "INVOICE DATE 發票日期", "invoice_no": "INVOICE NO 發票號碼",
+    "supplier": "SUPPLIER 供應商名稱", "consignee": "CONSIGNEE 集團公司名稱",
+    "description": "Description 費用名稱", "amount": "AMOUNT 金額", "vat": "VAT 營業稅額",
+    "order_no": "Order No. 訂單號碼", "arrive_date": "Arrive Date 到達日",
+    "onboard_date": "on board date 開船日", "bl_no": "B/L NO. 提單號碼",
+    "mbl_no": "MBL NO. 主提單號碼", "port_of_loading": "Port of Loading 啟運港",
+    "port_of_discharge": "Port of discharge 目的港", "volume": "Volume 材積",
+    "vessel": "Vessel 船名", "container_no": "Container no. 貨櫃號碼",
+    "shipper": "Shipper 出貨方",
     "total": "金額總計", "supplier_key": "供應商辨識", "extraction": "擷取方式",
 }
 
 
 def _issue(severity: str, field: str, rule: str, message: str) -> Dict[str, str]:
     return {"severity": severity, "field": field, "rule": rule, "message": message}
+
+
+def _is_blank(value) -> bool:
+    """N/A、空值，或「-」這類不適用佔位字元。"""
+    return _is_na(value) or str(value).strip() in _PLACEHOLDERS
+
+
+def _check_optional_formats(row: Dict) -> List[Dict]:
+    """選填欄位有值時的基本格式檢查。"""
+    issues = []
+    for code, rule, check, message in _OPTIONAL_FORMAT_RULES:
+        raw = row.get(code)
+        if _is_blank(raw):
+            continue
+        if not check(str(raw)):
+            issues.append(_issue(WARN, code, rule, f"「{FIELD_LABELS[code]}」{message}：{raw}"))
+    return issues
 
 
 def _to_number(value) -> Optional[float]:
@@ -92,13 +139,10 @@ def _to_number(value) -> Optional[float]:
 def _check_header(row: Dict) -> List[Dict]:
     issues = []
     for code in REQUIRED_HEADER_FIELDS:
-        if _is_na(row.get(code)):
-            issues.append(_issue(ERROR, code, "MISSING_KEY_FIELD",
-                                 f"關鍵欄位「{FIELD_LABELS[code]}」抓不到值"))
-    for code in RECOMMENDED_HEADER_FIELDS:
-        if _is_na(row.get(code)):
-            issues.append(_issue(WARN, code, "MISSING_FIELD",
-                                 f"欄位「{FIELD_LABELS[code]}」抓不到值"))
+        if _is_blank(row.get(code)):
+            issues.append(_issue(ERROR, code, "MISSING_REQUIRED",
+                                 f"必填欄位「{FIELD_LABELS[code]}」抓不到值"))
+    issues.extend(_check_optional_formats(row))
 
     today = datetime.date.today()
     parsed_dates: Dict[str, datetime.date] = {}
@@ -133,13 +177,17 @@ def _check_items(group_rows: List[Dict]) -> List[Dict]:
             continue
         has_any_item = True
         label = f"第 {idx} 筆費用「{desc if not _is_na(desc) else NA}」"
+        if _is_blank(desc):
+            issues.append(_issue(ERROR, "description", "MISSING_REQUIRED",
+                                 f"第 {idx} 筆費用 (金額 {amount_raw}) 沒有「{FIELD_LABELS['description']}」"))
 
         amount = _to_number(amount_raw)
         vat = _to_number(vat_raw)
         if amount is None:
             # 稅金列 (PPN/VAT/PPh) 的慣例是金額 N/A、稅額填在 VAT 欄，不算缺漏
             if vat is None:
-                issues.append(_issue(ERROR, "amount", "AMOUNT_MISSING", f"{label}沒有金額"))
+                issues.append(_issue(ERROR, "amount", "MISSING_REQUIRED",
+                                     f"{label}沒有「{FIELD_LABELS['amount']}」"))
         elif amount != amount:  # NaN
             issues.append(_issue(ERROR, "amount", "AMOUNT_NOT_NUMERIC",
                                  f"{label}的金額不是數字：{amount_raw}"))
@@ -158,8 +206,9 @@ def _check_items(group_rows: List[Dict]) -> List[Dict]:
                                  f"{label}稅額 ({vat_raw}) 大於金額 ({amount_raw})"))
 
     if not has_any_item:
-        # WARN 而非 ERROR：少數帳單 (例如 TATA A/F 明細表) 有些發票本來就沒有費用列
-        issues.append(_issue(WARN, "description", "NO_ITEMS", "沒有抓到任何費用明細"))
+        # Description/AMOUNT 是必填欄位，整張發票沒有任何費用明細就是 ERROR
+        issues.append(_issue(ERROR, "description", "NO_ITEMS",
+                             "沒有抓到任何費用明細 (Description/AMOUNT 為必填)"))
     return issues
 
 
@@ -255,6 +304,19 @@ def worst_level(validations: List[Dict]) -> str:
 
 def error_count(validations: List[Dict]) -> int:
     return sum(1 for v in validations for i in v["issues"] if i["severity"] == ERROR)
+
+
+def log_issues(file_name: str, supplier_lbl: str, source: str, validations: List[Dict]) -> None:
+    """把 ERROR/WARN 等級的異常欄位逐筆寫進 log 檔 (INFO 只是附註，不寫)。"""
+    logger = get_logger()
+    for v in validations:
+        for i in v["issues"]:
+            if i["severity"] == INFO:
+                continue
+            log = logger.error if i["severity"] == ERROR else logger.warning
+            log("%s | %s | invoice=%s | 信心=%s | 來源=%s | 欄位=%s | %s | %s",
+                file_name, supplier_lbl, v["invoice_no"], v["level"], source,
+                FIELD_LABELS.get(i["field"], i["field"]), i["rule"], i["message"])
 
 
 # ---------------------------------------------------------------------------

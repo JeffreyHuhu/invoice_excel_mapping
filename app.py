@@ -84,10 +84,12 @@ try:
         build_exception_rows,
         build_exceptions_excel,
         add_exceptions_sheet,
+        log_issues,
     )
     from fallback_streamlit import (
         SOURCE_RULES,
         SOURCE_LLM,
+        SOURCE_MERGED,
         llm_available,
         llm_supplier_name,
         run_fallbacks,
@@ -443,13 +445,16 @@ if run_clicked:
                     if fb["notes"]:
                         fallback_log.append({"來源檔案": f.name, "備援過程": "；".join(fb["notes"])})
 
-                if result["supplier_key"] is None and source != SOURCE_LLM:
+                llm_used = source in (SOURCE_LLM, SOURCE_MERGED)
+                if result["supplier_key"] is None and not llm_used:
                     unknown_files.append(f.name)
 
                 label = supplier_label(result["supplier_key"])
-                if source == SOURCE_LLM:
+                if llm_used and result["supplier_key"] is None:
                     label = f"{llm_supplier_name(result['rows']) or '未知供應商'} (LLM 擷取)"
                 exception_rows.extend(build_exception_rows(f.name, label, source, validations))
+                # 抓不到/驗證異常的欄位逐筆寫進 log 檔
+                log_issues(f.name, label, source, validations)
                 for row in result["rows"]:
                     row["__supplier_label"] = label
                 all_export_rows.extend(result["rows"])

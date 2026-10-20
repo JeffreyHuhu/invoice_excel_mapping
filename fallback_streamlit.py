@@ -17,6 +17,10 @@ fallback_streamlit.py
      API，是否允許由使用者決定，預設關閉。
      LLM 擷取的結果一律附帶「需人工複查」的標記，信心等級最高只會是「中」，
      不會被當成和規則擷取一樣可信。
+     「既有規則優先」：單張發票時，規則抓到且驗證沒問題的欄位一律保留，
+     只用 LLM 補上「抓不到」或「驗證有異常」的欄位 (_merge_rule_first())，
+     每個補值的欄位都列入異常清單；只有規則完全認不出、或一份 PDF 多張
+     發票無法一對一對應時，才整份改用 LLM 的結果。
 
 設計原則：
   - 只處理「低信心」的發票，高信心的發票完全不經過這裡 (效能優先)。
@@ -38,6 +42,7 @@ from extract_utils_streamlit import (
     HEADER_FIELD_CODES,
     SUPPLIER_REGISTRY,
     _OCR_AVAILABLE,
+    _group_rows_by_invoice,
     audit_invoice_totals,
     detect_supplier,
     expand_to_rows,
@@ -47,8 +52,11 @@ from extract_utils_streamlit import (
 )
 from logger_streamlit import get_logger
 from validation_streamlit import (
+    ERROR,
+    FIELD_LABELS,
     WARN,
     LEVEL_LOW,
+    _is_blank,
     _issue,
     error_count,
     validate_extraction,
@@ -60,6 +68,7 @@ logger = get_logger()
 SOURCE_RULES = "規則擷取"
 SOURCE_OCR = "OCR 重新擷取"
 SOURCE_LLM = "LLM 結構化擷取"
+SOURCE_MERGED = "規則 + LLM 補值"
 
 # OCR 很慢，頁數太多的 PDF 不做 OCR 備援
 MAX_OCR_FALLBACK_PAGES = 10
@@ -276,11 +285,64 @@ def _llm_invoices_to_rows(invoices: List[Dict]) -> Tuple[List[Dict], List[Dict]]
 # 3. 主流程
 # ---------------------------------------------------------------------------
 
-def _rank(candidate: Dict) -> Tuple[int, float]:
-    """錯誤越少越好；錯誤一樣多時，平均信心度越高越好。"""
+# 這些欄位有異常時，代表費用明細本身有問題，整組明細改用 LLM 的結果
+_ITEM_ISSUE_FIELDS = {"description", "amount", "vat", "total"}
+
+
+def _merge_rule_first(rule: Dict, invoice: Dict, llm_audit: List[Dict]) -> Optional[Dict]:
+    """「既有規則優先」合併：規則抓到且驗證沒問題的欄位一律保留，只有
+    「抓不到」或「驗證有異常」的欄位才改用 LLM 的值。費用明細有異常 (缺
+    名稱/金額、金額勾稽不符) 時，整組明細改用 LLM 的。只處理規則跟 LLM 都
+    是單張發票的情況 (才能一對一對應)，其他情況回傳 None。
+    回傳 (rows, audit_results, 補值說明的 issues)；沒有任何欄位需要補時回傳 None。
+    """
+    if len(_group_rows_by_invoice(rule["rows"])) != 1:
+        return None
+    bad_fields = {i["field"] for v in rule["validations"] for i in v["issues"]
+                  if i["severity"] in (ERROR, WARN)}
+    replace_items = bool(bad_fields & _ITEM_ISSUE_FIELDS)
+
+    filled: Dict[str, object] = {}
+    for code in HEADER_FIELD_CODES:
+        llm_value = invoice.get(code)
+        if llm_value in (None, ""):
+            continue
+        if _is_blank(rule["rows"][0].get(code)) or code in bad_fields:
+            filled[code] = llm_value
+    if not filled and not replace_items:
+        return None
+
+    if replace_items:
+        header = {code: rule["rows"][0].get(code) for code in HEADER_FIELD_CODES}
+        header.update(filled)
+        header = {k: (None if _is_blank(v) else v) for k, v in header.items()}
+        rows = expand_to_rows({"header": header, "items": invoice.get("items") or [{}]})
+        audits = [dict(a, invoice_no=rows[0]["invoice_no"]) for a in llm_audit]
+    else:
+        # 明細沿用規則 (保留逐筆覆寫的抬頭欄位)，只補抬頭欄位
+        rows = [dict(r, **filled) for r in rule["rows"]]
+        audits = [dict(a, invoice_no=rows[0]["invoice_no"]) for a in rule["audit_results"]]
+
+    notes = [_issue(WARN, code, "LLM_FILLED",
+                    f"「{FIELD_LABELS.get(code, code)}」規則抓不到或格式不符，已由 LLM 補值：{value}")
+             for code, value in filled.items()]
+    if replace_items:
+        n_items = len(invoice.get("items") or [])
+        notes.append(_issue(WARN, "description", "LLM_ITEMS",
+                            f"費用明細有異常，已改用 LLM 擷取的 {n_items} 筆明細"))
+    return {"rows": rows, "audit_results": audits, "issues": notes}
+
+
+# 錯誤數一樣多時的優先順序 (既有規則優先)：規則/OCR > 規則 + LLM 補值 > 整份 LLM
+_SOURCE_PRIORITY = {SOURCE_RULES: 0, SOURCE_OCR: 0, SOURCE_MERGED: 1, SOURCE_LLM: 2}
+
+
+def _rank(candidate: Dict) -> Tuple[int, int, float]:
+    """錯誤越少越好；錯誤一樣多時依來源優先順序；再一樣才比平均信心度
+    (補值越多欄位、WARN 越多，不能因此輸給整份改用 LLM 的結果)。"""
     validations = candidate["validations"]
     avg_conf = sum(v["confidence"] for v in validations) / max(len(validations), 1)
-    return error_count(validations), -avg_conf
+    return error_count(validations), _SOURCE_PRIORITY[candidate["source"]], -avg_conf
 
 
 def run_fallbacks(
@@ -354,21 +416,48 @@ def run_fallbacks(
                 notes.append("LLM 沒有在文字中找到發票")
             else:
                 llm_rows, llm_audit = _llm_invoices_to_rows(invoices)
-                review_issue = _issue(WARN, "extraction", "LLM_EXTRACTED",
-                                      "此發票由 LLM 擷取，請人工複查所有欄位")
                 # LLM 擷取不依賴供應商規則，不把「無法辨識供應商」算成錯誤
-                llm_key = supplier_key or "__LLM__"
-                candidate = {
-                    "source": SOURCE_LLM, "supplier_key": supplier_key, "rows": llm_rows,
-                    "audit_results": llm_audit,
-                    "validations": validate_extraction(
-                        llm_rows, llm_key, llm_audit, extra_issues=[review_issue]),
-                }
-                if _rank(candidate) < _rank(best):
-                    best = {**candidate, "notes": []}
-                    notes.append("LLM 擷取的結果較佳，已採用 (請人工複查)")
+                llm_key = best["supplier_key"] or "__LLM__"
+                candidates = []
+                # (a) 既有規則優先：只用 LLM 補缺值/異常欄位
+                merged = _merge_rule_first(best, invoices[0], llm_audit) \
+                    if len(invoices) == 1 else None
+                if merged:
+                    candidates.append({
+                        "source": SOURCE_MERGED, "supplier_key": best["supplier_key"],
+                        "rows": merged["rows"], "audit_results": merged["audit_results"],
+                        "validations": validate_extraction(
+                            merged["rows"], llm_key, merged["audit_results"],
+                            extra_issues=merged["issues"]),
+                    })
+                # (b) 整份改用 LLM (規則完全認不出、或一份 PDF 多張發票時)。
+                # LLM 找到的發票張數比規則少時不採用，避免「錯誤比較少」只是因為
+                # 漏掉了好幾張發票。
+                rule_invoices = {k for k in _group_rows_by_invoice(best["rows"]) if k != "N/A"}
+                if len(invoices) >= len(rule_invoices):
+                    review_issue = _issue(WARN, "extraction", "LLM_EXTRACTED",
+                                          "此發票由 LLM 擷取，請人工複查所有欄位")
+                    candidates.append({
+                        "source": SOURCE_LLM, "supplier_key": best["supplier_key"], "rows": llm_rows,
+                        "audit_results": llm_audit,
+                        "validations": validate_extraction(
+                            llm_rows, llm_key, llm_audit, extra_issues=[review_issue]),
+                    })
                 else:
+                    notes.append(f"LLM 只找到 {len(invoices)} 張發票 (規則找到 {len(rule_invoices)} 張)，不整份採用")
+                # 同分時保留排在前面的 (規則 > 規則+補值 > 整份 LLM)
+                winner = min([best] + candidates, key=_rank)
+                if winner is best:
                     notes.append("LLM 擷取沒有比較好，維持原結果")
+                else:
+                    best = {**winner, "notes": []}
+                    if winner["source"] == SOURCE_MERGED:
+                        filled = [i["field"] for v in winner["validations"] for i in v["issues"]
+                                  if i["rule"] in ("LLM_FILLED", "LLM_ITEMS")]
+                        notes.append("保留規則擷取結果，以 LLM 補值："
+                                     + "、".join(FIELD_LABELS.get(f, f) for f in dict.fromkeys(filled)))
+                    else:
+                        notes.append("LLM 擷取的結果較佳，已整份採用 (請人工複查)")
 
     best["notes"] = notes
     logger.info("%s：備援結果 source=%s, %s", file_name, best["source"], "; ".join(notes) or "無")

@@ -15,8 +15,8 @@
 - `verify_app.py`：Streamlit 人工查核網頁 (只上傳 PDF → 逐欄標記錯誤、收集回報)。
 - `run_regression.py`：回歸測試，樣本放在 `test_samples/<SUPPLIER_KEY>/sampleN.pdf` + `sampleN_ref.xlsx`。
 - `learned_configs.json`：各供應商學到的最佳擷取參數。
-- `validation_streamlit.py`：驗證層。不需正確答案，以關鍵欄位、格式、金額勾稽檢查擷取結果，給每張發票信心等級 (高/中/低)，並產出異常清單 (Exceptions)。
-- `fallback_streamlit.py`：備援擷取。信心「低」時依序嘗試 OCR 重新擷取、LLM 結構化擷取 (Claude，需使用者勾選且設定 `ANTHROPIC_API_KEY`，預設關閉)；LLM 結果信心最高只到「中」。
+- `validation_streamlit.py`：驗證層。不需正確答案，以必填欄位 (INVOICE DATE/INVOICE NO/SUPPLIER/CONSIGNEE/Description/AMOUNT，缺少即 ERROR)、格式 (金額/稅額數字、日期、選填欄位基本格式)、金額勾稽檢查擷取結果，給每張發票信心等級 (高/中/低)，產出異常清單 (Exceptions) 並把異常欄位逐筆寫入 log。
+- `fallback_streamlit.py`：備援擷取。信心「低」時依序嘗試 OCR 重新擷取、LLM 結構化擷取 (Claude，需使用者勾選且設定 `ANTHROPIC_API_KEY`，預設關閉)。既有規則優先：單張發票只用 LLM 補缺值/異常欄位，其餘保留規則值；LLM 結果信心最高只到「中」。
 - `logger_streamlit.py`：共用 log，寫入 `logs/invoice_processing.log` (已 gitignore)。
 
 # 工作流程 (Workflow)
