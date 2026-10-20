@@ -398,7 +398,7 @@ def _kn_extract_po_numbers(text: str) -> Optional[str]:
         if not re.fullmatch(r"\d{6,}(?:\s+\d{6,})*", line):
             break
         numbers.extend(line.split())
-    return ", ".join(dict.fromkeys(numbers)) or None
+    return ",".join(dict.fromkeys(numbers)) or None
 
 
 def _kn_extract_charge_items(text: str) -> List[Dict]:
@@ -483,7 +483,7 @@ def parse_kuehne_nagel(text: str) -> Dict:
     # (例如 VB26072003093319) —— 這兩個編號在版面上前後相鄰、很容易搞混，
     # 但使用者核對過的正確答案是以 COMMERCIAL INVOICE NUMBER 為準。
     # 沒有 COMMERCIAL INVOICE NUMBER 的帳單，改用 DESCRIPTION OF GOODS 裡的
-    # "PO NO." 清單 (多個 PO 用 ", " 串接)。
+    # "PO NO." 清單 (多個 PO 用 "," 串接，不加空白)。
     header["order_no"] = (
         _search(rf"COMMERCIAL INVOICE NUMBER\s*\n\s*(.+?){_KN_STOP}", text)
         or _kn_extract_po_numbers(text)
