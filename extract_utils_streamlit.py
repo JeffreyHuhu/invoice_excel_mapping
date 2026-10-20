@@ -688,6 +688,14 @@ def normalize_value(value) -> str:
         if parsed is not None:
             return parsed.strftime("%d %b %Y").upper()
 
+    # 其他供應商專用的日期文字格式 ("2026-SEP-02"、"31.Aug.2026"，見
+    # _coerce_to_date() 上方說明) 也統一轉成 "DD MON YYYY"：正確答案 Excel
+    # 改成真正的日期型別儲存格後 (上面 datetime 分支)，擷取出來的日期文字
+    # 才比對得起來。
+    date_value = _coerce_to_date(text)
+    if date_value is not None:
+        return date_value.strftime("%d %b %Y").upper()
+
     text = text.upper()
     text = re.sub(r"\s+", " ", text)
     return text.rstrip(",")
