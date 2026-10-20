@@ -480,6 +480,63 @@ def is_multi_page_supplier(key: Optional[str]) -> bool:
 
 
 # ---------------------------------------------------------------------------
+# 3b. 單獨一份的印尼稅務發票 (Faktur Pajak / e-Faktur)
+# ---------------------------------------------------------------------------
+# 印尼供應商常把電子稅務發票 (檔名常見 'OutputTaxInvoice-...' 或賣方稅籍
+# 編號開頭) 跟帳單分開寄。這種 PDF 不是帳單，版面也跟任何供應商的帳單
+# 不同，硬套供應商規則只會抓出錯誤資料，所以不轉 Excel，另外歸到
+# 「<供應商> 稅務發票」資料夾。
+#
+# 「單獨一份」= 第 1 頁開頭就是 Faktur Pajak，而且『每一頁』都是稅務發票
+# 的內容 (續頁是一筆筆費用 + Potongan Harga/PPnBM，最後一頁是 DPP/PPN 合計
+# 與電子簽章)。KUEHNE NAGEL 那種「第 1 頁 Faktur Pajak + 後面接 KN Sales
+# Invoice」的混合檔，後面的帳單頁沒有這些字樣，不算單獨稅務發票，照常轉檔。
+
+TAX_INVOICE_FOLDER_SUFFIX = "稅務發票"
+_FAKTUR_PAGE_MARKERS = (
+    "FAKTUR PAJAK", "PENGUSAHA KENA PAJAK", "POTONGAN HARGA", "PPNBM",
+    "DASAR PENGENAAN PAJAK", "HARGA JUAL", "JUMLAH PPN",
+    "DITANDATANGANI SECARA ELEKTRONIK",
+)
+# 賣方 = 「Pengusaha Kena Pajak:」下一行的「Nama : ...」
+_FAKTUR_SELLER_RE = re.compile(
+    r"PENGUSAHA\s+KENA\s+PAJAK\s*:?\s*NAMA\s*:\s*([^\n]+)", re.IGNORECASE)
+_FOLDER_UNSAFE_RE = re.compile(r'[<>:"/\\|?*\x00-\x1f]')
+
+
+def _is_faktur_first_page(text: str) -> bool:
+    upper = (text or "").upper()
+    return (upper.lstrip().startswith("FAKTUR PAJAK")
+            and "KODE DAN NOMOR SERI FAKTUR PAJAK" in upper)
+
+
+def standalone_tax_invoice_owner(pdf_path: str, text: str) -> Optional[str]:
+    """判斷這份 PDF 是不是「單獨一份的稅務發票」。
+
+    不是：回傳 None (照常轉檔)。
+    是：回傳要歸到哪家供應商 —— 賣方名稱能被已註冊的供應商認出來就回傳
+    供應商 key (例如 'MAERSK')，認不出來就回傳賣方名稱本身，連賣方名稱都
+    抓不到時回傳空字串 (呼叫端自行補「未知供應商」)。
+
+    text 是 extract_text_from_pdf() 合併後的全文；開頭不是 Faktur Pajak 時
+    直接回傳 None，不會重讀 PDF，一般帳單不多花時間。
+    """
+    if not _is_faktur_first_page(text):
+        return None
+    pages = extract_pages_from_pdf(pdf_path)
+    if not all(any(m in p.upper() for m in _FAKTUR_PAGE_MARKERS) for p in pages):
+        return None
+
+    m = _FAKTUR_SELLER_RE.search(text)
+    seller = m.group(1).strip() if m else ""
+    if seller:
+        key = detect_supplier(seller)
+        if key:
+            return key
+    return _FOLDER_UNSAFE_RE.sub(" ", seller).strip(" .")
+
+
+# ---------------------------------------------------------------------------
 # 4. 擷取結果組裝：header + items -> 完整列 (一筆費用一列)，缺漏補 N/A
 # ---------------------------------------------------------------------------
 
