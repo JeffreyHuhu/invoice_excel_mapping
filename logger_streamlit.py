@@ -11,9 +11,16 @@ log 檔超過 1MB 自動輪替，最多保留 5 份舊檔，避免無限長大�
 
 import logging
 import os
+import sys
 from logging.handlers import RotatingFileHandler
 
-LOG_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "logs")
+# 打包成 EXE (PyInstaller) 時 __file__ 在執行完就刪除的暫存資料夾裡，
+# log 改寫在 EXE 旁邊的 logs 資料夾，關掉程式後才查得到
+if getattr(sys, "frozen", False):
+    _BASE_DIR = os.path.dirname(os.path.abspath(sys.executable))
+else:
+    _BASE_DIR = os.path.dirname(os.path.abspath(__file__))
+LOG_DIR = os.path.join(_BASE_DIR, "logs")
 LOG_PATH = os.path.join(LOG_DIR, "invoice_processing.log")
 
 _LOGGER_NAME = "invoice_excel_mapping"

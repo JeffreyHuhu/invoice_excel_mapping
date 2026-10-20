@@ -101,8 +101,14 @@ FIELD_LABELS: Dict[str, str] = {
 }
 
 
-def _issue(severity: str, field: str, rule: str, message: str) -> Dict[str, str]:
-    return {"severity": severity, "field": field, "rule": rule, "message": message}
+def _issue(severity: str, field: str, rule: str, message: str,
+           row: Optional[int] = None) -> Dict:
+    """row：問題出在這張發票的第幾筆費用 (0 起算)；抬頭/整張發票層級的問題
+    不帶 row。本機轉檔工具用它把 Excel 裡對應的儲存格反紅。"""
+    issue = {"severity": severity, "field": field, "rule": rule, "message": message}
+    if row is not None:
+        issue["row"] = row
+    return issue
 
 
 def _is_blank(value) -> bool:
@@ -177,9 +183,11 @@ def _check_items(group_rows: List[Dict]) -> List[Dict]:
             continue
         has_any_item = True
         label = f"第 {idx} 筆費用「{desc if not _is_na(desc) else NA}」"
+        row = idx - 1
         if _is_blank(desc):
             issues.append(_issue(ERROR, "description", "MISSING_REQUIRED",
-                                 f"第 {idx} 筆費用 (金額 {amount_raw}) 沒有「{FIELD_LABELS['description']}」"))
+                                 f"第 {idx} 筆費用 (金額 {amount_raw}) 沒有「{FIELD_LABELS['description']}」",
+                                 row))
 
         amount = _to_number(amount_raw)
         vat = _to_number(vat_raw)
@@ -187,23 +195,23 @@ def _check_items(group_rows: List[Dict]) -> List[Dict]:
             # 稅金列 (PPN/VAT/PPh) 的慣例是金額 N/A、稅額填在 VAT 欄，不算缺漏
             if vat is None:
                 issues.append(_issue(ERROR, "amount", "MISSING_REQUIRED",
-                                     f"{label}沒有「{FIELD_LABELS['amount']}」"))
+                                     f"{label}沒有「{FIELD_LABELS['amount']}」", row))
         elif amount != amount:  # NaN
             issues.append(_issue(ERROR, "amount", "AMOUNT_NOT_NUMERIC",
-                                 f"{label}的金額不是數字：{amount_raw}"))
+                                 f"{label}的金額不是數字：{amount_raw}", row))
         elif amount == 0:
             # 金額 0 的費用很常見 (例如 MATERAI 印花稅免收)，只當附註
-            issues.append(_issue(INFO, "amount", "AMOUNT_ZERO", f"{label}金額為 0"))
+            issues.append(_issue(INFO, "amount", "AMOUNT_ZERO", f"{label}金額為 0", row))
         elif amount < 0:
             issues.append(_issue(WARN, "amount", "AMOUNT_NEGATIVE",
-                                 f"{label}金額為負數 ({amount_raw})，請確認是否為折讓/扣款"))
+                                 f"{label}金額為負數 ({amount_raw})，請確認是否為折讓/扣款", row))
 
         if vat is not None and vat != vat:
             issues.append(_issue(WARN, "vat", "VAT_NOT_NUMERIC",
-                                 f"{label}的稅額不是數字：{vat_raw}"))
+                                 f"{label}的稅額不是數字：{vat_raw}", row))
         elif vat is not None and amount and amount == amount and abs(vat) > abs(amount):
             issues.append(_issue(WARN, "vat", "VAT_EXCEEDS_AMOUNT",
-                                 f"{label}稅額 ({vat_raw}) 大於金額 ({amount_raw})"))
+                                 f"{label}稅額 ({vat_raw}) 大於金額 ({amount_raw})", row))
 
     if not has_any_item:
         # Description/AMOUNT 是必填欄位，整張發票沒有任何費用明細就是 ERROR
@@ -259,9 +267,11 @@ def validate_extraction(
 ) -> List[Dict]:
     """驗證一份 PDF 的擷取結果，回傳每張發票各一筆：
       invoice_no  發票號碼 (抓不到時為 N/A)
-      issues      問題清單 (每筆含 severity/field/rule/message)
+      issues      問題清單 (每筆含 severity/field/rule/message，費用明細的
+                  問題另帶 row)
       confidence  信心度 0~1
       level       信心等級 高/中/低
+      rows        這張發票的 rows (跟傳入的 rows 是同一批物件，供對回 Excel 列)
 
     rows 可能包含好幾張發票 (multi_page 供應商或 LLM 擷取)，依 invoice_no
     分組各自驗證。extra_issues 會附加到每張發票上 (例如「本次為 LLM 擷取」)。
@@ -289,6 +299,7 @@ def validate_extraction(
             "issues": issues,
             "confidence": confidence,
             "level": _level(issues, confidence),
+            "rows": group_rows if rows else [],
         })
     return results
 
