@@ -26,6 +26,7 @@ extract_utils.py
 import re
 import io
 import os
+import sys
 import json
 import math
 import datetime
@@ -45,6 +46,16 @@ except ImportError:
     pytesseract = None
     ImageOps = None
     _OCR_AVAILABLE = False
+
+# 本機版打包成 .exe (PyInstaller) 時，會把精簡版 Tesseract 一起包進去
+# (放在解壓目錄的 tesseract/ 底下，見 D:\資誠local執行\*.spec)，有的話優先
+# 使用，讓沒有安裝 Tesseract 的電腦也能辨識掃描檔。雲端 Streamlit 版與
+# 直接執行 .py 時不受影響，照舊從 PATH 找系統安裝的 Tesseract。
+_BUNDLED_TESSERACT_DIR = os.path.join(getattr(sys, "_MEIPASS", ""), "tesseract")
+if pytesseract is not None and getattr(sys, "frozen", False) and \
+        os.path.isfile(os.path.join(_BUNDLED_TESSERACT_DIR, "tesseract.exe")):
+    pytesseract.pytesseract.tesseract_cmd = os.path.join(_BUNDLED_TESSERACT_DIR, "tesseract.exe")
+    os.environ["TESSDATA_PREFIX"] = os.path.join(_BUNDLED_TESSERACT_DIR, "tessdata")
 
 NA = "N/A"  # 抓不到值時，一律填這個 (使用者需求)
 
