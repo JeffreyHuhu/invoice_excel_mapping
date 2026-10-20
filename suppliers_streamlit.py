@@ -829,8 +829,19 @@ def detect_maersk(text: str) -> bool:
     """注意：不能只看 'MAERSK' 這個字，因為其他供應商(例如 PANCARAN)的帳單
     裡 VESSEL NAME 欄位常常就是船名含 'MAERSK' (例如 'JOSEPHINE MAERSK')，
     這跟 PT Maersk Logistics Indonesia 這家供應商本身無關，會誤判。改用更
-    具體的 'MAERSK LOGISTICS' 字樣判斷。"""
-    return "MAERSK LOGISTICS" in text.upper()
+    具體的 'MAERSK LOGISTICS' 字樣判斷。
+
+    另外排除印尼電子稅務發票 (e-Faktur / Faktur Pajak，檔名常見
+    'OutputTaxInvoice-...')：賣方同樣是 MAERSK LOGISTICS INDONESIA，但版面
+    跟 MAERSK 帳單完全不同，硬套 parse_maersk 只會抓出錯誤資料。暫時歸到
+    未知供應商，之後再另外建立電子稅務發票的辨識規則。
+    注意：正常 MAERSK 帳單後面也可能附一頁 Faktur Pajak，所以只排除
+    「一開頭就是 Faktur Pajak」的單獨電子稅務發票。"""
+    upper = text.upper()
+    if (upper.lstrip().startswith("FAKTUR PAJAK")
+            and "KODE DAN NOMOR SERI FAKTUR PAJAK" in upper):
+        return False
+    return "MAERSK LOGISTICS" in upper
 
 
 _MAERSK_LABEL_WORDS = [
