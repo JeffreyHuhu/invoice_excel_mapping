@@ -230,7 +230,9 @@ def parse_dwiharta(text: str) -> Dict:
 #     版面同樣左右兩欄並排，沿用跟 DWIHARTA 一樣的「遇到下一個已知欄位
 #     就停止」策略，只是欄位關鍵字換成 Kuehne Nagel 帳單上的英文標籤。
 #   - 這種帳單沒有海運提單，改用「KN TRACKING NO.」頂替 B/L NO. 欄位；
-#     MBL NO. 與 Container no. 本來就沒有對應資訊，缺漏後續會自動補 N/A。
+#     MBL NO. 本來就沒有對應資訊，缺漏後續會自動補 N/A。
+#   - 帳單辨識以 KN 帳單 (右上/右下角有 Kuehne Nagel 字樣) 為準，稅務發票
+#     不一定每份都有；幣別依各國帳單而定，不寫死 IDR。
 
 def detect_kuehne_nagel(text: str) -> bool:
     upper = text.upper()
@@ -290,16 +292,23 @@ def _kn_clean_tracking_no(value: Optional[str]) -> Optional[str]:
 # 不接受沒有逗號分隔的連續數字，這樣才不會誤抓到 PO 單號、提單號這類沒
 # 有千分位逗號、純數字黏在旁邊字母後面的雜訊行 (pdfplumber 有時會把側邊
 # 直排文字的單個字母併進旁邊的數字行)。
+#
+# 幣別不寫死 IDR：KN 各國帳單的本地幣別不同 (印尼 IDR、其他國家可能是
+# USD/EUR...)，本地幣金額也可能帶兩位小數 (例如 "1,234.56")，所以金額
+# 接受「英式千分位逗號 (可帶兩位小數)」或「三位數以內 + 兩位小數」兩種，
+# 仍然不接受沒有逗號/小數點的純數字 (理由同上，避免誤抓單號雜訊)。
+_KN_AMOUNT = r"\d{1,3}(?:,\d{3})+(?:\.\d{2})?|\d{1,3}\.\d{2}"
 _KN_CHARGE_LINE_PATTERN = re.compile(
     r"^(?P<desc>[A-Z][A-Za-z0-9 /\-\.,()&]+?)\s+"
     r"(?:[\d,]+\.\d{2}\s*[A-Z]{3}\s+)?"
-    r"(?P<amount>\d{1,3}(?:,\d{3})+)\s+\d\s*$",
+    rf"(?P<amount>{_KN_AMOUNT})\s+\d\s*$",
     re.MULTILINE,
 )
 
 
-def _kn_clean_amount_comma_thousands(text: Optional[str]) -> Optional[int]:
-    """英式數字 '1,521,098' (逗號=千分位，沒有小數) -> 1521098。
+def _kn_clean_amount_comma_thousands(text: Optional[str]):
+    """英式數字 '1,521,098' / '1,234.56' (逗號=千分位、句點=小數) -> 數字。
+    小數部分是 0 時回傳 int (例如 1521098)，否則回傳 float。
 
     注意：這跟 _kn_clean_amount() 是不同的格式！_kn_clean_amount() 是給
     Faktur Pajak (稅務發票) 上的印尼式數字用的 ('1.521.098,00'，句點千分位
@@ -310,7 +319,86 @@ def _kn_clean_amount_comma_thousands(text: Optional[str]) -> Optional[int]:
     if not text:
         return None
     text = text.strip().replace(",", "")
-    return int(text) if text.isdigit() else None
+    if not re.fullmatch(r"\d+(?:\.\d+)?", text):
+        return None
+    value = float(text)
+    return int(value) if value.is_integer() else value
+
+
+# SUBTOTAL / 含稅總額行，幣別代碼用任意三個大寫字母 (不寫死 IDR)：
+#   "SUBTOTAL IDR 12,244,622 1,346,908"   (未稅合計 + VAT 合計)
+#   "INVOICE TOTAL IDR 13,591,530"         (含稅總額；有些國家寫 AMOUNT DUE)
+_KN_SUBTOTAL_PATTERN = r"SUBTOTAL\s+[A-Z]{3}\s+([\d,.]+)\s+([\d,.]+)"
+_KN_GRAND_TOTAL_PATTERN = r"(?:INVOICE\s+TOTAL|AMOUNT\s+DUE)\s+[A-Z]{3}\s+([\d,.]+)"
+
+
+# SUPPLIER：以 KN 帳單「右下角」的公司名稱為準 (稅務發票不是每份 PDF 都有)。
+# 頁尾第一行長這樣，最右邊 (行尾) 那個就是右下角欄位：
+#   "PT. Kuehne Nagel Indonesia Tel:+62 ... The Energy Building, 5&6 fl. SCBD PT. Kuehne Nagel Indonesia"
+# 輸出統一成大寫、去掉開頭的 "PT." 公司型態字樣 -> "KUEHNE NAGEL INDONESIA"。
+_KN_FOOTER_NAME = re.compile(
+    r"(?:\bPT\.?\s+)?\b(Kuehne\s*\+?\s*Nagel\b[A-Za-z .&()]*?)\s*$",
+    re.IGNORECASE | re.MULTILINE,
+)
+
+
+def _kn_extract_supplier(text: str) -> Optional[str]:
+    # 優先找頁尾那行 (同一行有 Tel:/Fax:)，找不到才退回任何一行行尾的 KN 公司名稱
+    candidates = [
+        m for m in _KN_FOOTER_NAME.finditer(text)
+        if re.search(r"\b(?:Tel|Fax)\s*:", text[text.rfind("\n", 0, m.start()) + 1:m.end()])
+    ] or list(_KN_FOOTER_NAME.finditer(text))
+    if not candidates:
+        return None
+    return re.sub(r"\s+", " ", candidates[0].group(1)).strip(" .,").upper()
+
+
+# 貨櫃明細 (MARKS & NOS 區塊)：「SEAL NO.」那一行的上一行就是櫃號那一行，
+# 同一行接著寫數量與櫃型，例如：
+#   "FSCU5030780 1 40' GE CONTAINER SAID TO CONTAIN: 4222.68 49.423"
+#   "SEAL NO. 412 CARTON(S)"
+# 一個櫃號對應一個櫃型，櫃號填 Container no.，櫃型彙總成 Volume。
+_KN_CONTAINER_LINE = re.compile(
+    r"^([A-Z]{4}\d{7})\s+(\d+)\s+(\d{2})'\s*([A-Z]{2})\b[^\n]*\n\s*SEAL NO\.",
+    re.MULTILINE,
+)
+
+
+def _kn_extract_containers(text: str) -> List[tuple]:
+    """回傳 [(櫃號, 數量, 呎數, 櫃型), ...]，依文件順序、去除重複
+    (整份內容常被重複印兩次)。"""
+    seen = {}
+    for m in _KN_CONTAINER_LINE.finditer(text):
+        seen.setdefault(m.group(1), (m.group(1), int(m.group(2)), m.group(3), m.group(4)))
+    return list(seen.values())
+
+
+def _kn_container_volume(containers: List[tuple]) -> Optional[str]:
+    """整櫃 (FCL) 的櫃量：同樣櫃型合併數量，櫃型只取第一個字母，
+    例如 40' GE + 40' HC + 20' GE -> "1X40G+1X40H+1X20G"。"""
+    counts: Dict[str, int] = {}
+    for _, qty, size, kind in containers:
+        key = f"{size}{kind[0]}"
+        counts[key] = counts.get(key, 0) + qty
+    return "+".join(f"{qty}X{key}" for key, qty in counts.items()) or None
+
+
+def _kn_extract_po_numbers(text: str) -> Optional[str]:
+    """DESCRIPTION OF GOODS 裡的 "PO NO." 清單：PO NO. 下面逐行都是 PO 號碼，
+    遇到第一行不是純號碼的 (例如 "INV NO."、"INV."、"HS CODE") 就停止。
+    這段常夾著直排水印的單一字母 (C/L/A/T...)，比對前先把它們去掉。"""
+    m = re.search(r"PO NO\.[^\n]*\n(.*)", text, re.DOTALL)
+    if not m:
+        return None
+    numbers: List[str] = []
+    for line in m.group(1).split("\n"):
+        line = re.sub(r"\b[A-Z]\b", "", line).strip()
+        if not line:
+            continue
+        if not re.fullmatch(r"\d{6,}(?:\s+\d{6,})*", line):
+            break
+        numbers.extend(line.split())
+    return ", ".join(dict.fromkeys(numbers)) or None
 
 
 def _kn_extract_charge_items(text: str) -> List[Dict]:
@@ -368,7 +456,11 @@ def _kn_extract_shipper_via_notify(text: str) -> Optional[str]:
 def parse_kuehne_nagel(text: str) -> Dict:
     header: Dict[str, Optional[str]] = {}
 
-    header["supplier"] = _search(r"Pengusaha Kena Pajak:\s*\n\s*Nama\s*:\s*(.+)", text)
+    # SUPPLIER 以 KN 帳單右下角為準；只有右下角抓不到時才退回稅務發票的賣方名稱
+    header["supplier"] = (
+        _kn_extract_supplier(text)
+        or _search(r"Pengusaha Kena Pajak:\s*\n\s*Nama\s*:\s*(.+)", text)
+    )
 
     header["consignee"] = _search(rf"INVOICE TO\s*\n\s*(.+?){_KN_STOP}", text)
     # Sales Invoice 頁的 "CONSIGNEE SHIPPER" 這個區塊裡，SHIPPER 欄位有時
@@ -390,7 +482,12 @@ def parse_kuehne_nagel(text: str) -> Dict:
     # RYH0810074280)，不是緊接在旁邊的「GTN SHIPPING ORDER NUMBER」
     # (例如 VB26072003093319) —— 這兩個編號在版面上前後相鄰、很容易搞混，
     # 但使用者核對過的正確答案是以 COMMERCIAL INVOICE NUMBER 為準。
-    header["order_no"] = _search(rf"COMMERCIAL INVOICE NUMBER\s*\n\s*(.+?){_KN_STOP}", text)
+    # 沒有 COMMERCIAL INVOICE NUMBER 的帳單，改用 DESCRIPTION OF GOODS 裡的
+    # "PO NO." 清單 (多個 PO 用 ", " 串接)。
+    header["order_no"] = (
+        _search(rf"COMMERCIAL INVOICE NUMBER\s*\n\s*(.+?){_KN_STOP}", text)
+        or _kn_extract_po_numbers(text)
+    )
     # Vessel 欄位使用者確認要「船名+航次」(例如 "VANCOUVER 058N")，不是只
     # 取船名；VESSEL NAME/VOYAGE 兩個欄位左右並排在同一行 ("VESSEL NAME :
     # VANCOUVER VOYAGE : 058N")，這裡兩個都抓出來、中間用一個空白接起來。
@@ -410,19 +507,22 @@ def parse_kuehne_nagel(text: str) -> Dict:
         _format_date_en(*_kn_eta_m.groups()) if _kn_eta_m else None
     )
 
-    m2 = re.search(r"AS PER ATTACHED\s+([\d,\.]+)\s+([\d,\.]+)", text)
-    header["volume"] = m2.group(2) if m2 else None
-    # 注意：上面這個「整張帳單共用一個 Volume」只適用於沒有逐櫃拆分費用的
-    # 帳單 (例如只有一筆 OVERTIME CHARGES EXPORT 的簡單帳單)。如果帳單裡有
-    # 「CONTAINER POSITIONING EXPORT」這種逐個貨櫃分開收費的項目，使用者的
-    # 正確答案改用「每個貨櫃自己的櫃型代碼」(例如 "1X40GE") 當那幾筆費用
-    # 各自的 Volume，其餘費用列則留空，不套用整張帳單共用的材積總量——這裡
-    # 先記下有沒有這種逐櫃費用，等下面抓到 items 之後再決定要不要蓋掉這個
-    # 預設值 (見下方 _kn_container_positioning 區塊)。
+    # Volume / Container no.：
+    #   - 整櫃 (FCL)：MARKS & NOS 區塊每個「SEAL NO.」上一行是櫃號+櫃型，
+    #     櫃號串成 Container no.，櫃型彙總成櫃量 (例如 "1X40G+1X40H+1X20G")
+    #     填 Volume，整張帳單每一列都一樣。
+    #   - 散貨 (LCL)：沒有櫃號，Volume 填 "AS PER ATTACHED 重量 材積" 的材積數字。
+    containers = _kn_extract_containers(text)
+    if containers:
+        header["container_no"] = ", ".join(c[0] for c in containers)
+        header["volume"] = _kn_container_volume(containers)
+    else:
+        header["container_no"] = None
+        m2 = re.search(r"AS PER ATTACHED\s+([\d,\.]+)\s+([\d,\.]+)", text)
+        header["volume"] = m2.group(2) if m2 else None
 
-    # 這種帳單本來就沒有海運提單/貨櫃資訊，留空給 expand_to_rows() 補 N/A
+    # 這種帳單沒有主提單，留空給 expand_to_rows() 補 N/A
     header["mbl_no"] = None
-    header["container_no"] = None
 
     items = _kn_extract_charge_items(text)
     # 這家供應商的 PDF 常常把同一張 Sales Invoice「整份內容」重複印兩次
@@ -436,33 +536,6 @@ def parse_kuehne_nagel(text: str) -> Dict:
         half = len(items) // 2
         if items[:half] == items[half:]:
             items = items[:half]
-
-    # 「CONTAINER POSITIONING EXPORT」費用行下面緊接著的明細行會寫出這筆
-    # 費用對應的貨櫃型態，例如 "1 40' GE X 23 USD = 23.00 USD" 代表一個
-    # 40 呎 GE (General Export) 櫃，使用者的正確答案把它轉成 "1X40GE" 這種
-    # 代碼格式填在 Volume 欄位 (只填在這幾筆費用列，不是整張帳單共用一個
-    # 值)。這裡依照文件順序抓出每一個這種代碼，跟 items 裡同樣依文件順序
-    # 出現的 CONTAINER POSITIONING EXPORT 項目一一對應；跟費用明細行一樣，
-    # 整份文字常常重複印兩次，所以也套用同樣的「對半相同就只留前半」處理。
-    _kn_container_codes = [
-        f"1X{num}{kind}"
-        for num, kind in re.findall(r"1\s+(\d+)'\s*([A-Z]+)\s*X\s*[\d.]+\s*USD\s*=", text)
-    ]
-    if _kn_container_codes and len(_kn_container_codes) % 2 == 0:
-        _half = len(_kn_container_codes) // 2
-        if _kn_container_codes[:_half] == _kn_container_codes[_half:]:
-            _kn_container_codes = _kn_container_codes[:_half]
-    if _kn_container_codes:
-        # 有逐櫃費用時，整張帳單共用的材積總量就不適用了 (正確答案這幾張
-        # 帳單的其他費用列 Volume 欄位都是留空，不是填整張帳單的材積總量)。
-        header["volume"] = None
-        _kn_code_iter = iter(_kn_container_codes)
-        for item in items:
-            if item.get("description") == "CONTAINER POSITIONING EXPORT":
-                try:
-                    item["volume"] = next(_kn_code_iter)
-                except StopIteration:
-                    break
 
     if not items:
         # 備援：真的抓不到任何費用明細行時，退回用稅務發票 (Faktur Pajak)
@@ -483,13 +556,12 @@ def parse_kuehne_nagel(text: str) -> Dict:
     # (不是每筆費用各自的稅額)，所以不能像其他供應商一樣把 vat 塞進某一
     # 筆費用明細的 dict 裡 (塞進第一筆會讓人誤以為那筆費用才有稅額)。使用
     # 者更新後的正確答案範本也是這樣處理：額外「多一列」只填 VAT 金額，
-    # Description/Amount 都留空——因此這裡額外附加一筆「只有 vat、沒有
-    # description/amount」的 item，讓 expand_to_rows() 展開成獨立的一列，
-    # 跟正確答案的列結構對齊。
-    _kn_subtotal_m = re.search(r"SUBTOTAL\s+IDR\s+[\d,]+\s+([\d,]+)", text)
+    # Description 統一填 "VAT"、Amount 留空——因此這裡額外附加一筆這樣的
+    # item，讓 expand_to_rows() 展開成獨立的一列，跟正確答案的列結構對齊。
+    _kn_subtotal_m = re.search(_KN_SUBTOTAL_PATTERN, text)
     if _kn_subtotal_m:
-        vat_amount = _kn_clean_amount_comma_thousands(_kn_subtotal_m.group(1))
-        items.append({"description": None, "amount": None, "vat": vat_amount})
+        vat_amount = _kn_clean_amount_comma_thousands(_kn_subtotal_m.group(2))
+        items.append({"description": "VAT", "amount": None, "vat": vat_amount})
 
     return {"header": header, "items": items}
 
@@ -2750,7 +2822,7 @@ def _kn_extract_total(text: str) -> Optional[int]:
     # "SUBTOTAL IDR 1,521,098 167,321" 是 Sales Invoice 費用明細行上的英式
     # 數字 (逗號千分位、無小數)，要用 _kn_clean_amount_comma_thousands()，
     # 不是給 Faktur Pajak 印尼式數字用的 _kn_clean_amount()。
-    return _kn_clean_amount_comma_thousands(_search(r"SUBTOTAL\s+IDR\s+([\d,]+)", text))
+    return _kn_clean_amount_comma_thousands(_search(_KN_SUBTOTAL_PATTERN, text))
 
 
 def _kn_extract_grand_total(text: str) -> Optional[int]:
@@ -2758,7 +2830,7 @@ def _kn_extract_grand_total(text: str) -> Optional[int]:
     # 『未稅加總 + VAT 加總 = 含稅總額』的稽核 (見
     # extract_utils.audit_invoice_totals())。跟上面的 SUBTOTAL 是不同行，
     # 用 "INVOICE TOTAL" 這個獨有字樣區分，不會跟 SUBTOTAL 那一行搶到。
-    return _kn_clean_amount_comma_thousands(_search(r"INVOICE\s+TOTAL\s+IDR\s+([\d,]+)", text))
+    return _kn_clean_amount_comma_thousands(_search(_KN_GRAND_TOTAL_PATTERN, text))
 
 
 def _indo_extract_grand_total(text: str) -> Optional[int]:
