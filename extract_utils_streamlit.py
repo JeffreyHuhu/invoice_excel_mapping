@@ -582,7 +582,7 @@ def parse_invoice_pdf(pdf_path: str, supplier_key: Optional[str] = None,
 #   3. "DD/MM/YYYY"（例如 "08/04/2025"）：PUTRA_SEJAHTERA_SENTOSA 專用的
 #      _pss_format_date()。
 #   4. "DD.Mon.YYYY"（例如 "31.Aug.2026"）：MAERSK INVOICE DATE 專用的
-#      _maersk_format_invoice_date() (為了跟正確答案的文字儲存格比對，刻意
+#      _maersk_extract_invoice_date() (為了跟正確答案的文字儲存格比對，刻意
 #      保留點分隔)；跟格式 1 只差在分隔符號，共用同一個 regex。
 # _coerce_to_date() 把這幾種格式統一解析成真正的 datetime.date，供輸出
 # Excel 時寫成日期型別儲存格用；往後若有供應商新增其他格式，在這裡
