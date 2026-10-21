@@ -493,9 +493,35 @@ def supplier_label(key: Optional[str]) -> str:
     return "未知供應商 (無法辨識)"
 
 
+def set_supplier_number(key: str, number: str, vendor_code: str = "",
+                        official_name: str = "") -> None:
+    """登記供應商編號 (例如 'ID02') 與廠商代號 (例如 '100019226')，編號依
+    進度管控的 Top 供應商清單 (見 suppliers_streamlit.py 的 SUPPLIER_NUMBERS)。
+    只是對照資料，不影響辨識順序與擷取規則。"""
+    SUPPLIER_REGISTRY[key].update(
+        number=number, vendor_code=vendor_code, official_name=official_name)
+
+
+def supplier_number(key: Optional[str]) -> str:
+    """供應商編號，沒有登記時回傳空字串。"""
+    return (SUPPLIER_REGISTRY.get(key) or {}).get("number", "") if key else ""
+
+
+def supplier_display(key: Optional[str]) -> str:
+    """畫面/報表顯示用：'ID02 MAERSK'，沒有編號時就是 key 本身。"""
+    number = supplier_number(key)
+    return f"{number} {key}" if number else (key or "")
+
+
 def list_registered_suppliers() -> List[Dict[str, str]]:
-    """回傳目前已註冊的供應商清單 (給網頁上顯示用)。"""
-    return [{"key": k, "label": v["label"]} for k, v in SUPPLIER_REGISTRY.items()]
+    """回傳目前已註冊的供應商清單 (給網頁上顯示用)，依編號排序，沒有編號
+    的排在最後 (維持註冊順序)。辨識時仍依註冊順序比對 (detect_supplier())。"""
+    suppliers = [
+        {"key": k, "label": v["label"], "number": v.get("number", ""),
+         "vendor_code": v.get("vendor_code", "")}
+        for k, v in SUPPLIER_REGISTRY.items()
+    ]
+    return sorted(suppliers, key=lambda s: (not s["number"], s["number"]))
 
 
 def is_multi_page_supplier(key: Optional[str]) -> bool:

@@ -174,7 +174,9 @@ st.markdown(
 registered = list_registered_suppliers()
 with st.expander(f"🏷️ 目前系統已支援 {len(registered)} 家供應商的辨識規則"):
     for s in registered:
-        st.write(f"- **{s['label']}** (代碼: `{s['key']}`)")
+        number = f"{s['number']} " if s["number"] else ""
+        vendor = f"，廠商代號 {s['vendor_code']}" if s["vendor_code"] else ""
+        st.write(f"- **{number}{s['label']}** (代碼: `{s['key']}`{vendor})")
     st.caption("要新增供應商，請在 suppliers_streamlit.py 增加一組辨識/擷取規則並註冊，不用改這個網頁程式。")
 
 st.markdown(

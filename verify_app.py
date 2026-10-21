@@ -406,7 +406,9 @@ st.markdown(
 
 with st.expander("ℹ️ 目前已支援的供應商清單"):
     for s in list_registered_suppliers():
-        st.write(f"- **{s['label']}** (代碼: `{s['key']}`)")
+        number = f"{s['number']} " if s["number"] else ""
+        vendor = f"，廠商代號 {s['vendor_code']}" if s["vendor_code"] else ""
+        st.write(f"- **{number}{s['label']}** (代碼: `{s['key']}`{vendor})")
     st.caption(
         "沒有列在上面的供應商，系統會顯示「未知供應商 (無法辨識)」，"
         "所有欄位都會是 N/A，這種情況也可以照樣核對、標記正確答案，"

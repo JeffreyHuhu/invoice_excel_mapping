@@ -25,7 +25,7 @@ import re
 import datetime
 from typing import Dict, List, Optional, Tuple
 
-from extract_utils_streamlit import register_supplier
+from extract_utils_streamlit import register_supplier, set_supplier_number
 
 # 印尼文月份對照表 (DWIHARTA 帳單用印尼文寫月份)
 INDO_MONTHS = {
@@ -4979,3 +4979,41 @@ register_supplier(
     extract_final_total=_pss_extract_total_paid,
     deduction_prefixes=("PPH",),
 )
+
+
+# ===========================================================================
+# 供應商編號 (依進度管控的 Top 供應商清單)
+# ===========================================================================
+# 印尼：Desktop\印尼進度管控 的「Indonesia Supplier Top 15, 2025-2026.xlsx」
+# 與「印尼進度管控表」占比工作表 (2025-2026 請款金額排名 + 廠商代號)。
+#   ID01~ID15 = 印尼 TOP15；TOP15 以外沿用同一份排名 (例如 FEMARIA 第 18 名
+#   = ID18)。TOP15 只剩 ID08 ORIENTAL POWER LOGISTICS (100004377) 還沒建規則。
+# 越南：Desktop\越南進度管控 的「Vietnam Supplier Top 20.xlsx」(01~20，資料夾
+#   名稱「編號-廠商代號 公司名」)，建好規則後一樣在這裡登記 VN01~VN20。
+# 編號只是對照資料 (顯示在網頁清單、轉檔畫面與轉檔總表)，不影響辨識順序。
+SUPPLIER_NUMBERS = {
+    # 供應商 key: (編號, 廠商代號, 進度管控表上的公司名稱)
+    "YJE_TATA": ("ID01", "100019748", "PT. TATA HARMONI SARANATAMA"),
+    "MAERSK": ("ID02", "100019226", "PT. MAERSK LOGISTICS INDONESIA"),
+    "HANDAL": ("ID03", "100019606", "PT.HANDAL MANDIRI TRANSINDO"),
+    "DHL": ("ID04", "100019563", "PT. BIROTIKA SEMESTA"),
+    "KUEHNE_NAGEL": ("ID05", "100019143", "PT. KUEHNE NAGEL INDONESIA"),
+    "DSV": ("ID06", "100023151", "PT. DSV TRANSPORT INDONESIA"),
+    "INDOPROSTIME_TRANSPORT": ("ID07", "100019300", "PT. INDOPROSTIME TRANSPORT"),
+    "DWIHARTA": ("ID09", "100019242", "PT. DWIHARTA LOGISTINDO"),
+    "TRANS_DAYA_PRIMA": ("ID10", "100019488", "PT. TRANS DAYA PRIMA"),
+    "GALUH": ("ID11", "100019600", "PT.GALUH INTI BAHARI"),
+    "ECOMET": ("ID12", "100019489", "PT. TRANS ECOMET GLOBAL"),
+    "PUTRA_SEJAHTERA_SENTOSA": ("ID13", "100030053", "PT. PUTRA SEJAHTERA SENTOSA"),
+    "APL": ("ID14", "100019535", "PT. APL LOGISTICS"),
+    "PANCARAN": ("ID15", "100019386", "PT. PANCARAN SRIKANDI LOGISTIK"),
+    "INDOPROSTIME": ("ID16", "100030991", "PT INDO PROSTIME EXPRESS"),
+    "FEMARIA": ("ID18", "100019597", "PT. FEMARIA BUANA CARGO"),
+    "EXPRESS_MAXIMUM": ("ID21", "100019046", "PT EXPRESS MAXIMUM"),
+    "PAN_EKSPRES": ("ID28", "100030970", "PT PAN EKSPRES INTERNATIONAL"),
+    "HYPER_MEGA": ("ID31", "100019295", "PT. HYPER MEGA SHIPPING"),
+    "EVERGREEN_LOGISTICS": ("ID38", "100019246", "PT. EVERGREEN LOGISTICS INDONESIA"),
+}
+
+for _key, (_number, _vendor_code, _name) in SUPPLIER_NUMBERS.items():
+    set_supplier_number(_key, _number, _vendor_code, _name)
