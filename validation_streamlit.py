@@ -30,7 +30,7 @@ fallback_streamlit.py 的備援擷取，並列入異常清單 (Exceptions)。
 import datetime
 import io
 import re
-from typing import Dict, List, Optional
+from typing import Dict, List, Optional, Tuple
 
 from openpyxl import load_workbook
 from openpyxl.styles import Alignment, Font, PatternFill
@@ -78,6 +78,17 @@ _OPTIONAL_FORMAT_RULES = (
 
 # 正確答案裡常見的「不適用」佔位字元，視同空值 (不算缺漏，也不做格式檢查)
 _PLACEHOLDERS = {"-", "--", "/"}
+
+# 已知的「原帳單本身的問題」：使用者核對過原帳單，確認不是擷取錯誤。驗證時
+# 照常標示 (仍算 WARN、Excel 照樣反紅)，但在說明後面註記屬原帳單問題，查核
+# 時不必再回頭懷疑擷取規則。
+#   供應商 key -> {(欄位代碼, 規則代碼): (說明, 只在這些原始值時才算；None=不限)}
+KNOWN_SOURCE_ISSUES: Dict[str, Dict[Tuple[str, str], Tuple[str, Optional[set]]]] = {
+    "MAERSK": {
+        ("arrive_date", "DATE_FORMAT"): ("MAERSK 原帳單的 ETA 本身就是「--」", {"--"}),
+        ("arrive_date", "DATE_ORDER"): ("MAERSK 原帳單的 ETA 本身就早於 ETD", None),
+    },
+}
 
 # 日期合理範圍：早於這一年，或晚於今天 + 這麼多天，視為可疑
 _MIN_REASONABLE_YEAR = 2015
@@ -172,6 +183,25 @@ def _check_header(row: Dict) -> List[Dict]:
         issues.append(_issue(WARN, "arrive_date", "DATE_ORDER",
                              f"到達日 ({row.get('arrive_date')}) 早於開船日 ({row.get('onboard_date')})"))
     return issues
+
+
+def _mark_known_source_issues(issues: List[Dict], supplier_key: Optional[str],
+                              row: Dict) -> List[Dict]:
+    """符合 KNOWN_SOURCE_ISSUES 的問題，在說明後面註記屬原帳單問題 (另帶
+    known_source_issue=True)，嚴重度不變。回傳新的 list，不改動原本的 dict。"""
+    known = KNOWN_SOURCE_ISSUES.get(supplier_key or "", {})
+    if not known:
+        return issues
+    marked = []
+    for issue in issues:
+        entry = known.get((issue["field"], issue["rule"]))
+        if entry:
+            note, only_values = entry
+            if only_values is None or str(row.get(issue["field"], "")).strip() in only_values:
+                issue = dict(issue, known_source_issue=True,
+                             message=f"{issue['message']}（{note}，屬原帳單問題，非擷取錯誤）")
+        marked.append(issue)
+    return marked
 
 
 def _check_items(group_rows: List[Dict]) -> List[Dict]:
@@ -293,6 +323,7 @@ def validate_extraction(
         issues.extend(_check_header(group_rows[0]))
         issues.extend(_check_items(group_rows))
         issues.extend(_check_audit(audit_by_invoice.get(inv_key), supplier_key))
+        issues = _mark_known_source_issues(issues, supplier_key, group_rows[0])
         confidence = _confidence(issues)
         results.append({
             "invoice_no": group_rows[0].get("invoice_no", NA),

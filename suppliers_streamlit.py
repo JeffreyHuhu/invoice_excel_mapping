@@ -896,6 +896,12 @@ def parse_indoprostime_transport(text: str) -> Dict:
 #   Net value  = 費用金額加總          (extract_total)
 #   Amount Due = 費用金額 + VAT 加總   (extract_grand_total)
 # 兩項都相符時，VAT 加總也必然等於小表格的 VAT 那一列。
+#
+# 已知原帳單問題 (使用者核對原帳單確認，不是擷取錯誤，不要改規則去「修」)：
+#   - ETA 本身印的就是「--」：Arrive Date 照原樣擷取成 "--"。
+#   - ETA 早於 ETD。
+# 這兩項登記在 validation_streamlit.KNOWN_SOURCE_ISSUES，驗證時會註記
+# 「屬原帳單問題」。
 
 def detect_maersk(text: str) -> bool:
     """注意：不能只看 'MAERSK' 這個字，因為其他供應商(例如 PANCARAN)的帳單
