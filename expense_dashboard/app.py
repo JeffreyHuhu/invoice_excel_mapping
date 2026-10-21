@@ -76,17 +76,18 @@ def query(db: str, db_mtime: float, sql: str, params: Tuple = ()) -> pd.DataFram
 
 
 def build_where(filters: Dict[str, List], years: Optional[List[int]],
-                include_dup: bool, months: Optional[int] = None) -> Tuple[str, Tuple]:
-    """篩選條件 -> (WHERE 子句, 參數)。months：只取 1~months 月 (同期比較用)。"""
+                include_dup: bool, cutoff: Optional[Tuple[int, int]] = None) -> Tuple[str, Tuple]:
+    """篩選條件 -> (WHERE 子句, 參數)。cutoff：(月, 日)，只取每年 1/1 到
+    該月日 (同期比較用，避免拿不完整的最後一個月去比去年整個月)。"""
     clauses, params = [], []
     if not include_dup:
         clauses.append("NOT is_duplicate")
     if years is not None:
         clauses.append("list_contains(?, year)")
         params.append(years)
-    if months is not None:
-        clauses.append("month <= ?")
-        params.append(months)
+    if cutoff is not None:
+        clauses.append("(month < ? OR (month = ? AND day(invoice_date) <= ?))")
+        params.extend([cutoff[0], cutoff[0], cutoff[1]])
     for col, values in filters.items():
         if values:
             clauses.append(f"list_contains(?, {col})")
@@ -192,17 +193,17 @@ if not kpi["lines"]:
     st.stop()
 avg_invoice = kpi["amount"] / kpi["invoices"] if kpi["invoices"] else None
 
-# 同期比較：最新選取年份 vs 前一年，都只取 1 ~ 最新年份資料的最後月份
+# 同期比較：最新選取年份 vs 前一年，都只取 1/1 ~ 最新年份資料的最後一天
 latest = max(years)
 cur_kpi = prev_kpi = None
-latest_month = query(DB, MTIME, "SELECT max(month) AS m FROM expense_items " +
-                     build_where(filters, [latest], include_dup)[0],
-                     build_where(filters, [latest], include_dup)[1])["m"].iloc[0]
-if latest_month is not None and not pd.isna(latest_month):
-    latest_month = int(latest_month)
-    w, p = build_where(filters, [latest], include_dup, latest_month)
+w, p = build_where(filters, [latest], include_dup)
+last_day = query(DB, MTIME, f"SELECT max(invoice_date) AS d FROM expense_items {w}", p)["d"].iloc[0]
+if last_day is not None and not pd.isna(last_day):
+    last_day = pd.Timestamp(last_day)
+    cutoff = (last_day.month, last_day.day)
+    w, p = build_where(filters, [latest], include_dup, cutoff)
     cur_kpi = query(DB, MTIME, KPI_SQL.format(where=w), p).iloc[0]
-    w, p = build_where(filters, [latest - 1], include_dup, latest_month)
+    w, p = build_where(filters, [latest - 1], include_dup, cutoff)
     prev_kpi = query(DB, MTIME, KPI_SQL.format(where=w), p).iloc[0]
     if not prev_kpi["lines"]:
         prev_kpi = None
@@ -228,8 +229,8 @@ c3.metric("總發票數", f"{int(kpi['invoices']):,} 張", yoy("invoices"), bord
 c4.metric("平均單筆費用 (每張發票)", fmt_big(avg_invoice), yoy("amount", per_invoice=True),
           border=True, help=f"{avg_invoice:,.0f}" if avg_invoice else None)
 if prev_kpi is not None:
-    st.caption(f"增減率：{latest} 年 1–{latest_month} 月 vs {latest - 1} 年同期 "
-               f"(套用相同篩選條件)")
+    st.caption(f"增減率：{latest} 年 1/1–{cutoff[0]}/{cutoff[1]} vs {latest - 1} 年同期 "
+               f"(以發票日期計，套用相同篩選條件)")
 else:
     st.caption(f"增減率：{latest - 1} 年同期沒有資料，無法比較")
 
@@ -282,6 +283,8 @@ with right:
     fig.update_xaxes(tickmode="array", tickvals=list(range(1, 13)),
                      ticktext=[f"{m}月" for m in range(1, 13)], range=[0.6, 12.4])
     st.plotly_chart(style_fig(fig), width="stretch")
+    if cur_kpi is not None and not last_day.is_month_end:
+        st.caption(f"{latest} 年資料只到 {last_day:%m/%d}，{last_day.month} 月是不完整月份。")
 
 # 年度比較表 (主管最常問：哪一項漲最多)
 with st.expander("📋 費用項目年度比較表", expanded=False):
@@ -303,7 +306,7 @@ with st.expander("📋 費用項目年度比較表", expanded=False):
         fmt["增減率"] = "{:+.1%}"
     st.dataframe(comp.style.format(fmt, na_rep="—"), hide_index=True, width="stretch")
     if len(year_cols) >= 2:
-        st.caption("此表為所選年份的全年合計；KPI 增減率為同期 (1 月至最新月份) 比較。")
+        st.caption("此表為所選年份的全年合計；KPI 增減率為同期 (1/1 至最新資料日期) 比較。")
 
 # ============================================================
 # 港口 / 航線成本分析

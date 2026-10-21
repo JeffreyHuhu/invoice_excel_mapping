@@ -235,18 +235,22 @@ EXPENSE_CATEGORIES = (
     ("碼頭處理費 (THC)", r"TERMINAL HANDLING"),
     ("VGM 費用", r"\bVGM\b"),
     ("CFS / 倉儲", r"\bCFS\b|WAREHOUSE|GUDANG|STORAGE|STUFFING|UNSTUFFING"),
-    ("文件 / 提單費", r"DOCUMENTATION|\bFCR\b|\bBL\b|\bAWB\b|\bEDI\b|ISSUANCE|\bSEAL\b"),
+    ("文件 / 提單費", r"DOCUMENTATION|\bFCR\b|\bCBL\b|\bBL\b|BILL OF LADING|\bAWB\b|\bEDI\b|"
+                     r"ISSUANCE|\bSEAL\b|SHIPPING INSTRUCTION"),
     ("運費", r"FREIGHT|\bBAF\b|\bCAF\b|BUNKER|SURCHARGE"),
-    ("報關 / 檢驗", r"CUSTOMS|CLEARANCE|\bPEB\b|\bPIB\b|INSPECTION|QUARANTINE|FUMIGATION"),
-    ("拖車 / 陸運", r"TRUCKING|HAULAGE|DELIVERY|TRANSPORT|PICK ?UP|LIFT ON|LIFT OFF"),
-    ("手續 / 代理 / 行政", r"HANDLING|AGENCY|ADMINISTRATION|SERVICE|COMMISSION"),
+    ("報關 / 檢驗", r"CUSTOMS|CLEARANCE|DECLARATION|\bPEB\b|\bPIB\b|INSPECTION|QUARANTINE|"
+                   r"FUMIGATION"),
+    ("拖車 / 陸運 / 滯櫃", r"TRUCKING|HAULAGE|DELIVERY|TRANSPORT|PICK ?UP|LIFT ON|LIFT OFF|"
+                         r"DETENTION|DEMURRAGE"),
+    ("手續 / 管理 / 行政", r"HANDLING|AGENCY|ADMINISTRATION|SERVICE|COMMISSION|MANAGEMENT|"
+                         r"BOOKING|COMPLIAN|LATE PAYMENT"),
 )
 _CATEGORY_RES = tuple((name, re.compile(p)) for name, p in EXPENSE_CATEGORIES)
 OTHER_CATEGORY = "其他"
 UNKNOWN_EXPENSE = "(未填費用名稱)"
 
 # 顯示名稱用 Title Case 時要保持全大寫的縮寫
-_ACRONYMS = {"CFS", "VGM", "FCR", "THC", "BL", "AWB", "EDI", "PEB", "PIB", "LCL",
+_ACRONYMS = {"CFS", "VGM", "FCR", "CBL", "THC", "BL", "AWB", "EDI", "PEB", "PIB", "LCL",
              "FCL", "DO", "PPN", "VAT", "BAF", "CAF", "ISPS", "EMKL", "AE", "LSS",
              "TEU", "FEU", "DG", "USD", "IDR", "HBL", "MBL", "CY"}
 
@@ -299,6 +303,8 @@ def normalize_port(value) -> Optional[str]:
     text = clean_text(value)
     if not text:
         return None
+    # 擷取時偶爾連後面的船名航次一起抓到 ("Jakarta Vessel/voyage:XIN YAN TAI/ 272N")
+    text = re.split(r"\s+VESSEL\b", text, maxsplit=1, flags=re.IGNORECASE)[0].strip()
     if len(text) <= 3 and text.isalpha():
         return text.upper()
     return " ".join(w[:1].upper() + w[1:].lower() for w in text.split(" "))
