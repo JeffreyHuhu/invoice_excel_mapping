@@ -300,7 +300,13 @@ def extract_pages_from_pdf(pdf_path: str, **pdfplumber_kwargs) -> List[str]:
     """跟 extract_text_from_pdf() 一樣，但個別回傳『每一頁』的文字 (不合併成
     一個字串)。給 multi_page 供應商 (一份 PDF 裡有好幾張各自獨立的發票，
     一頁一張) 逐頁辨識/擷取用。同樣會對沒有文字層的頁面自動改用 OCR。
+
+    Excel 帳單 (見 is_spreadsheet()) 回傳每個「顯示中」工作表的文字，第一
+    段以 SHEET_TEXT_MARK 開頭，detect_supplier() 據此只比對 Excel 供應商。
     """
+    if is_spreadsheet(pdf_path):
+        return [sheet_text(name, rows) for name, rows in read_spreadsheet(pdf_path).sheets]
+
     key = _pages_cache_key(pdf_path, pdfplumber_kwargs)
     if key in _PAGES_CACHE:
         _PAGES_CACHE.move_to_end(key)
@@ -318,6 +324,71 @@ def extract_pages_from_pdf(pdf_path: str, **pdfplumber_kwargs) -> List[str]:
     while len(_PAGES_CACHE) > _PAGES_CACHE_SIZE:
         _PAGES_CACHE.popitem(last=False)
     return list(pages_text)
+
+
+# ---------------------------------------------------------------------------
+# 2b. Excel 帳單 (越南供應商常用 Excel 對帳表請款，不是 PDF)
+# ---------------------------------------------------------------------------
+# 只讀「顯示中」的工作表：供應商常把舊的工作副本 (例如 "(2)"、"CHECK XE"、
+# "THEO BG"、"gốc") 隱藏起來留在同一個檔案裡，那些不是這次請款的內容。
+# Excel 供應商用 register_supplier(..., sheet_parse=..., sheet_totals=...)
+# 註冊：detect 一樣吃文字 (sheet_text() 的結果)，parse/稽核則直接拿結構化
+# 的儲存格 (SheetBook)，不用從文字再切欄位。
+
+SPREADSHEET_SUFFIXES = (".xlsx", ".xlsm", ".xls")
+# Excel 帳單轉成的文字開頭會帶這個標記，detect_supplier() 看到就只比對
+# Excel 供應商 (避免 PDF 供應商的關鍵字，例如備註欄的 "DHL"，誤判)
+SHEET_TEXT_MARK = "[[SPREADSHEET]]"
+
+
+class SheetBook:
+    """一份 Excel 帳單：file_name 檔名、sheets [(工作表名稱, 列資料)] (只含
+    顯示中的工作表；列資料是各儲存格的值，日期為 datetime)。"""
+
+    def __init__(self, path: str, sheets: List[Tuple[str, List[list]]]):
+        self.path = path
+        self.file_name = os.path.basename(path)
+        self.sheets = sheets
+
+
+def is_spreadsheet(path) -> bool:
+    return str(path).lower().endswith(SPREADSHEET_SUFFIXES)
+
+
+_BOOK_CACHE: "OrderedDict[tuple, SheetBook]" = OrderedDict()
+
+
+def read_spreadsheet(path: str) -> SheetBook:
+    """讀 Excel 帳單的顯示中工作表 (xlsx/xls 都支援，用 python-calamine)。
+    跟 PDF 一樣快取最近幾份，擷取、稽核、驗證時不會重複讀檔。"""
+    from python_calamine import CalamineWorkbook, SheetVisibleEnum
+
+    key = _pages_cache_key(path, {})
+    if key in _BOOK_CACHE:
+        _BOOK_CACHE.move_to_end(key)
+        return _BOOK_CACHE[key]
+    wb = CalamineWorkbook.from_path(path)
+    sheets = []
+    for meta in wb.sheets_metadata:
+        if meta.visible != SheetVisibleEnum.Visible:
+            continue
+        rows = wb.get_sheet_by_name(meta.name).to_python(skip_empty_area=False)
+        sheets.append((meta.name, rows))
+    book = SheetBook(path, sheets)
+    _BOOK_CACHE[key] = book
+    while len(_BOOK_CACHE) > _PAGES_CACHE_SIZE:
+        _BOOK_CACHE.popitem(last=False)
+    return book
+
+
+def sheet_text(name: str, rows: List[list]) -> str:
+    """工作表轉成文字 (每列一行，儲存格用 ' | ' 隔開)，給 detect/驗證/顯示用。"""
+    lines = [f"{SHEET_TEXT_MARK} [{name}]"]
+    for row in rows:
+        cells = [str(v).strip() for v in row if v not in (None, "")]
+        if cells:
+            lines.append(" | ".join(cells))
+    return "\n".join(lines)
 
 
 def _generate_extraction_configs(max_attempts: int = 100) -> List[Dict]:
@@ -414,15 +485,27 @@ SUPPLIER_REGISTRY: Dict[str, Dict] = {}
 
 def register_supplier(key: str, label: str,
                        detect_fn: Callable[[str], bool],
-                       parse_fn: Callable[[str], Dict],
+                       parse_fn: Optional[Callable[[str], Dict]],
                        multi_page: bool = False,
                        extract_total: Optional[Callable[[str], Optional[float]]] = None,
                        extract_grand_total: Optional[Callable[[str], Optional[float]]] = None,
                        extract_final_total: Optional[Callable[[str], Optional[float]]] = None,
                        deduction_prefixes: Tuple[str, ...] = (),
                        audit_exclude: Tuple[str, ...] = (),
-                       force_ocr: bool = False) -> None:
+                       force_ocr: bool = False,
+                       sheet_parse: Optional[Callable[["SheetBook"], List[Dict]]] = None,
+                       sheet_totals: Optional[Callable[["SheetBook"], List[Dict]]] = None) -> None:
     """註冊一家供應商。
+
+    sheet_parse (Excel 帳單供應商用)：有給就代表這家供應商的帳單是 Excel
+    (見 read_spreadsheet())。detect_fn 一樣吃文字 (sheet_text() 的結果)，
+    但擷取改呼叫 sheet_parse(book)，回傳「每張對帳單/發票各一個」
+    {"header":.., "items":[..]} 的 list；parse_fn 可傳 None。
+
+    sheet_totals (Excel 帳單供應商用，可選)：從帳單本身的合計列抓總額，回傳
+    [{"invoice_no":.., "total":.., "grand_total":.., "final_total":..}, ..]
+    (不適用的項目給 None)，audit_invoice_totals() 拿來跟擷取到的明細加總勾稽；
+    可另帶 "grand_tolerance" 放寬含稅總額的容許誤差 (預設 ±1)。
 
     extract_total (可選)：從『一張發票』的原始文字裡抓出帳單本身寫的
     『未稅總額』(Total (Excl. VAT) / Sub Total / SUBTOTAL / Net value… /
@@ -471,14 +554,23 @@ def register_supplier(key: str, label: str,
         "extract_total": extract_total, "extract_grand_total": extract_grand_total,
         "extract_final_total": extract_final_total, "deduction_prefixes": deduction_prefixes,
         "audit_exclude": audit_exclude, "force_ocr": force_ocr,
+        "sheet_parse": sheet_parse, "sheet_totals": sheet_totals,
+        # Excel 供應商一份檔案可能有好幾張對帳單，比對時跟 multi_page 一樣用
+        # invoice_no 分組
+        "multi_page": multi_page or sheet_parse is not None,
     }
 
 
 def detect_supplier(text: str) -> Optional[str]:
     """依序問過每個已註冊的供應商『這是你的帳單嗎』，回傳第一個承認的 key。
     都沒有承認就回傳 None，呼叫端應提示『無法辨識供應商』。
+    Excel 帳單的文字 (以 SHEET_TEXT_MARK 開頭) 只比對 Excel 供應商，PDF 的
+    文字只比對 PDF 供應商。
     """
+    from_sheet = (text or "").startswith(SHEET_TEXT_MARK)
     for key, entry in SUPPLIER_REGISTRY.items():
+        if (entry.get("sheet_parse") is not None) != from_sheet:
+            continue
         try:
             if entry["detect"](text):
                 return key
@@ -665,6 +757,15 @@ def parse_invoice_pdf(pdf_path: str, supplier_key: Optional[str] = None,
     """
     text = extract_text_from_pdf(pdf_path, **pdfplumber_kwargs)
     key = supplier_key or detect_supplier(text)
+
+    if is_spreadsheet(pdf_path):
+        entry = SUPPLIER_REGISTRY.get(key) if key else None
+        if entry and entry.get("sheet_parse"):
+            rows = [row for parsed in entry["sheet_parse"](read_spreadsheet(pdf_path))
+                    for row in expand_to_rows(parsed)]
+        else:
+            rows = []
+        return key, rows or expand_to_rows({"header": {}, "items": [{}]}), text
 
     if is_multi_page_supplier(key):
         rows = _parse_multi_page_pdf(pdf_path, key, **pdfplumber_kwargs)
@@ -1090,16 +1191,17 @@ def audit_invoice_totals(
     entry = SUPPLIER_REGISTRY.get(supplier_key) if supplier_key else None
     if not entry:
         return []
-
     extract_total_fn = entry.get("extract_total")
     extract_grand_total_fn = entry.get("extract_grand_total")
     extract_final_total_fn = entry.get("extract_final_total")
-    if not extract_total_fn and not extract_grand_total_fn and not extract_final_total_fn:
+    sheet_totals_fn = entry.get("sheet_totals") if is_spreadsheet(pdf_path) else None
+    if not (extract_total_fn or extract_grand_total_fn or extract_final_total_fn
+            or sheet_totals_fn):
         return []
 
     exclude_descs = {normalize_value(d) for d in entry.get("audit_exclude", ())}
     deduction_prefixes = tuple(p.upper() for p in entry.get("deduction_prefixes", ()))
-    need_vat_split = bool(extract_grand_total_fn or extract_final_total_fn)
+    need_vat_split = bool(extract_grand_total_fn or extract_final_total_fn or sheet_totals_fn)
 
     def _sum_rows(group_rows: List[Dict]) -> float:
         total = 0.0
@@ -1131,7 +1233,11 @@ def audit_invoice_totals(
                 add_total += vat
         return add_total, deduct_total
 
-    def _build_result(group_rows: List[Dict], invoice_total, grand_total, final_total) -> Dict:
+    def _build_result(group_rows: List[Dict], invoice_total, grand_total, final_total,
+                      grand_tolerance: float = 1) -> Dict:
+        """grand_tolerance：含稅總額允許的誤差 (預設 ±1)。帳單合計的稅額若是
+        「未稅合計 × 稅率」、明細稅額卻是逐列四捨五入 (例如 CONG THANH 代墊款)，
+        Excel 供應商可透過 sheet_totals 放寬到「每列 0.5」。"""
         extracted_sum = _sum_rows(group_rows)
         vat_sum = deduction_sum = None
         if need_vat_split:
@@ -1157,7 +1263,7 @@ def audit_invoice_totals(
                 if extracted_grand is not None and grand_total is not None else None
             ),
             "grand_match": (
-                abs(extracted_grand - grand_total) <= 1
+                abs(extracted_grand - grand_total) <= grand_tolerance
                 if extracted_grand is not None and grand_total is not None else None
             ),
             "deduction_sum": deduction_sum,
@@ -1175,6 +1281,17 @@ def audit_invoice_totals(
         return result
 
     results: List[Dict] = []
+
+    if sheet_totals_fn:
+        # Excel 帳單：總額直接取自帳單本身的合計列 (sheet_totals)，依
+        # invoice_no 對回擷取到的明細
+        groups = _group_rows_by_invoice(rows)
+        for t in sheet_totals_fn(read_spreadsheet(pdf_path)):
+            group_rows = groups.get(normalize_value(t.get("invoice_no"))) or []
+            if group_rows:
+                results.append(_build_result(group_rows, t.get("total"), t.get("grand_total"),
+                                             t.get("final_total"), t.get("grand_tolerance", 1)))
+        return results
 
     if entry.get("multi_page"):
         pages = extract_pages_from_pdf(pdf_path, **pdfplumber_kwargs)
@@ -1330,6 +1447,8 @@ def find_best_extraction(
     用法：reference_rows 是呼叫端已經篩好、只屬於這張發票的那幾列。
     """
     configs = list(configs or EXTRACTION_CONFIGS)[:max_attempts]
+    if is_spreadsheet(pdf_path):
+        configs = [{}]  # Excel 帳單沒有 pdfplumber 參數可調，讀一次就好
 
     learned_entry = _load_learned_configs().get(supplier_key) if supplier_key else None
     learned_config = learned_entry["config"] if learned_entry else None
@@ -1347,7 +1466,10 @@ def find_best_extraction(
     reached_100 = False
 
     for i, cfg in enumerate(configs, start=1):
-        if is_multi:
+        if is_spreadsheet(pdf_path):
+            key, rows, _ = parse_invoice_pdf(pdf_path, supplier_key)
+            is_multi = True  # Excel 帳單一份檔案可能有好幾張對帳單
+        elif is_multi:
             # multi_page 供應商：這份 PDF 可能是好幾張各自獨立的發票 (一頁
             # 一張)，rows 會混著所有頁面/發票的列，reference_rows 這裡預期
             # 是「完整」的正確答案表格 (呼叫端不要預先篩成某一張發票)，

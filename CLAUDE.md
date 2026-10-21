@@ -11,6 +11,8 @@
 # 專案架構 (Project Structure)
 - `extract_utils_streamlit.py`：與供應商無關的共用核心引擎 (PDF 文字擷取/OCR、供應商註冊表、標準欄位、比對評分、VAT/總額稽核、Excel 讀寫)。
 - `suppliers_streamlit.py`：各供應商專屬的 `detect_xxx()` / `parse_xxx()`，以 `register_supplier()` 註冊。新增或修正供應商只改這支檔案；`detect_supplier()` 依註冊順序比對，關鍵字較寬鬆的規則要放後面。
+  - Excel 帳單供應商 (越南 VN03 RỒNG Á CHÂU、VN05 CONG THANH)：用 `register_supplier(..., sheet_parse=, sheet_totals=)` 註冊；核心只交出「顯示中」的工作表 (`read_spreadsheet()`，隱藏的是供應商的工作副本)，detect 吃 `sheet_text()` (以 `SHEET_TEXT_MARK` 開頭，只跟 Excel 供應商比對)，`sheet_totals` 取帳單本身合計列做金額勾稽。
+  - 供應商編號 `SUPPLIER_NUMBERS`：印尼 ID01~ (Top15 + 同一份金額排名)、越南 VN01~VN20 (Vietnam Supplier Top 20)。
 - `app.py`：Streamlit 自動比對網頁 (上傳 PDF + 正確答案 Excel → 逐欄比對、計算正確率)。
 - `verify_app.py`：Streamlit 人工查核網頁 (只上傳 PDF → 逐欄標記錯誤、收集回報)。
 - `run_regression.py`：回歸測試，樣本放在 `test_samples/<SUPPLIER_KEY>/sampleN.pdf` + `sampleN_ref.xlsx`。

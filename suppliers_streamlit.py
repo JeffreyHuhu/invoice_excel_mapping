@@ -4982,6 +4982,466 @@ register_supplier(
 
 
 # ===========================================================================
+# 越南 Excel 帳單共用工具 (VN03 RỒNG Á CHÂU、VN05 CONG THANH)
+# ===========================================================================
+# 越南供應商用 Excel 對帳表 (Bảng kê / Statement) 請款，不是 PDF。核心引擎
+# 只交出「顯示中」的工作表 (read_spreadsheet())，這裡直接讀儲存格，不從文字
+# 切欄位。金額欄位是數字型態，不用處理千分位。
+
+def _vn_text(value) -> str:
+    """儲存格 -> 文字：整數型的浮點數 (例如報關單號 308933256500.0) 去掉 .0，
+    連續空白壓成一個。"""
+    if value is None:
+        return ""
+    if isinstance(value, float) and value.is_integer():
+        value = int(value)
+    return re.sub(r"\s+", " ", str(value)).strip()
+
+
+def _vn_label(value) -> str:
+    """表頭文字比對用：轉大寫、換行與連續空白壓成一個空白。"""
+    return _vn_text(value).upper()
+
+
+def _vn_num(value) -> Optional[float]:
+    """數字儲存格 (或純數字文字) -> float，空白/非數字回傳 None。"""
+    if isinstance(value, bool) or value is None:
+        return None
+    if isinstance(value, (int, float)):
+        return float(value)
+    text = _vn_text(value).replace(",", "")
+    try:
+        return float(text) if text else None
+    except ValueError:
+        return None
+
+
+def _vn_amount(value) -> Optional[float]:
+    """金額：分攤出來的金額會有很多位小數，四捨五入到小數 2 位；0 視為沒有。"""
+    num = _vn_num(value)
+    if not num:
+        return None
+    return round(num, 2)
+
+
+def _vn_date(value) -> Optional[str]:
+    """日期儲存格 (datetime) 或 'DD/MM/YYYY' 文字 -> 'DD Mon YYYY'。"""
+    if isinstance(value, (datetime.datetime, datetime.date)):
+        return _format_date_en(value.day, value.month, value.year)
+    m = re.match(r"^(\d{1,2})[/.-](\d{1,2})[/.-](\d{4})$", _vn_text(value))
+    return _format_date_en(m.group(1), m.group(2), m.group(3)) if m else None
+
+
+def _vn_cell(row: list, col: Optional[int]):
+    return row[col] if col is not None and col < len(row) else None
+
+
+_VN_CONTAINER_RE = re.compile(r"^[A-Z]{4}\d{7}$")
+
+
+def _vn_container(value) -> Optional[str]:
+    """「CONT / XE」欄常混著車牌 (51C.91515) 或簡寫櫃號 (CTTU642)，只收完整的
+    貨櫃號碼 (4 碼英文 + 7 碼數字)。"""
+    text = _vn_text(value).upper().replace(" ", "")
+    return text if _VN_CONTAINER_RE.match(text) else None
+
+
+# ===========================================================================
+# 供應商 VN05：CONG THANH (CTY TNHHDV GN VT VA TM CONG THANH，廠商代號 100008048)
+# ===========================================================================
+# 每個月分好幾批 (DOT 1/DOT 2…) 請款，每批兩個檔案：
+#   1. 「POUSUNG EX T09.2026 DOT 1.xls」：兩個工作表各是一張對帳單
+#        VC T9-1.2026 = STATEMENT OF EXPORT TRANPORTATION CHARGE (運費)
+#        DV T9-1.2026 = STATEMENT OF EXPORT SERVICE CHARGE (服務費)
+#      抬頭：賣方/買方名稱、"Form : 26/08 - 15/09/2026 .No: 09VC-1/2026"；
+#      明細每列一筆出貨 (SHIP DATE / DEC 報關單號 / SO INV / 櫃型件數 / CBM /
+#      Total amount / Remark 送貨地點 / CONT XE)，併車的出貨單價 0 (費用算在
+#      同車第一筆)，0 元列不轉；最後 Total、VAT: (8%)、Grand total；簽核欄
+#      "CONG THANH 15/09/2026" 是對帳單日期。
+#   2. 「…-CHI HO.xls(x)」：代墊款 INVOICE LIST (第三方發票，例如 "Nang ha"
+#      吊櫃上下)，每筆代墊自帶 VAT 欄 (每品項自帶 VAT)，同一張第三方發票分攤
+#      到好幾筆出貨時，後面的出貨只列 INV/報關單號、沒有金額，不轉；合計
+#      列 "TỔNG CỘNG"。
+# 辨識：賣方稅籍編號 0301434547。
+
+_CONG_THANH_TAX_ID = "0301434547"
+
+
+def detect_cong_thanh(text: str) -> bool:
+    upper = text.upper()
+    return _CONG_THANH_TAX_ID in text and ("CÔNG THÀNH" in upper or "CONG THANH" in upper)
+
+
+def _ct_header(rows: List[list]) -> Dict[str, Optional[str]]:
+    """對帳單抬頭：賣方、買方、對帳單號、對帳單日期 (簽核欄日期，沒有就用期間迄日)。"""
+    text = "\n".join(" | ".join(_vn_text(v) for v in r if _vn_text(v)) for r in rows)
+    header: Dict[str, Optional[str]] = {code: None for code in (
+        "invoice_date", "invoice_no", "supplier", "consignee")}
+    header["supplier"] = _search(r"Tên Đơn vị bán hàng:\s*([^|\n]+)", text)
+    header["consignee"] = _search(r"Tên Đơn vị mua hàng:\s*\|?\s*([^|\n]+)", text)
+    header["invoice_no"] = _search(r"\bNo:\s*([\w./-]+)", text)
+    signed = re.search(r"CONG THANH\s+(\d{1,2})/(\d{1,2})/(\d{4})", text)
+    period = re.search(r"Form\s*:\s*[\d/]+\s*-\s*(\d{1,2})/(\d{1,2})/(\d{4})", text)
+    date_m = signed or period
+    if date_m:
+        header["invoice_date"] = _format_date_en(*date_m.groups())
+    return header
+
+
+def _ct_columns(rows: List[list], start: int) -> Tuple[Optional[int], Dict[str, int]]:
+    """找表頭列 (含 'SO INV' 或 'Số Hóa đơn')，回傳 (表頭列 index, {表頭文字: 欄號})。"""
+    for i in range(start, min(start + 20, len(rows))):
+        labels = {_vn_label(v): j for j, v in enumerate(rows[i]) if _vn_label(v)}
+        if "SO INV" in labels or "SỐ HÓA ĐƠN" in labels:
+            return i, labels
+    return None, {}
+
+
+def _ct_statement(rows: List[list]) -> Optional[Dict]:
+    """運費 (VC) / 服務費 (DV) 對帳單。"""
+    header = _ct_header(rows[:15])
+    title = next((_vn_text(r[0]) for r in rows[:15]
+                  if r and _vn_label(r[0]).startswith("STATEMENT OF")), "")
+    # "STATEMENT OF EXPORT  TRANPORTATION CHARGE  SEPTEMBER OF , 2026" -> 費用名稱
+    charge = re.sub(r"^STATEMENT OF\s+|\s+(JANUARY|FEBRUARY|MARCH|APRIL|MAY|JUNE|JULY|AUGUST|"
+                    r"SEPTEMBER|OCTOBER|NOVEMBER|DECEMBER)\b.*$", "", title, flags=re.I).strip()
+    head_i, cols = _ct_columns(rows, 0)
+    if head_i is None or not charge:
+        return None
+    c_date, c_inv, c_cbm = cols.get("SHIP DATE"), cols.get("SO INV"), cols.get("CBM")
+    c_amount, c_remark = cols.get("TOTAL AMOUNT"), cols.get("REMARK")
+    c_cont, c_from = cols.get("CONT XE"), cols.get("ĐIỂM ĐI")
+
+    items = []
+    total = vat = grand = None
+    vat_label = "VAT"
+    for row in rows[head_i + 1:]:
+        labels = [_vn_label(v) for v in row if isinstance(v, str) and _vn_label(v)]
+        # 合計區 (TOTAL / Total / VAT: (8%) / Grand total)：金額不一定在明細的
+        # 金額欄 (服務費表是在前一欄)，取該列最右邊的數字
+        numbers = [n for n in (_vn_num(v) for v in row if not isinstance(v, str)) if n is not None]
+        summary = numbers[-1] if numbers else None
+        if "GRAND TOTAL" in labels:
+            grand = summary
+            break
+        vat_text = next((lb for lb in labels if lb.startswith("VAT")), None)
+        if vat_text:
+            vat = summary
+            pct = re.search(r"(\d+(?:[.,]\d+)?)\s*%", vat_text)
+            vat_label = f"VAT ({pct.group(1)}%)" if pct else "VAT"
+            continue
+        if "TOTAL" in labels:
+            total = summary
+            continue
+        amount = _vn_amount(_vn_cell(row, c_amount))
+        order_no = _vn_text(_vn_cell(row, c_inv))
+        if amount is None or not order_no:
+            continue
+        items.append({
+            "description": charge, "amount": amount, "vat": None,
+            "order_no": order_no,
+            "onboard_date": _vn_date(_vn_cell(row, c_date)),
+            "volume": _vn_num(_vn_cell(row, c_cbm)),
+            "container_no": _vn_container(_vn_cell(row, c_cont)),
+            "port_of_loading": _vn_text(_vn_cell(row, c_from)) or None,
+            "port_of_discharge": _vn_text(_vn_cell(row, c_remark)) or None,
+        })
+    if vat:
+        items.append({"description": vat_label, "amount": None, "vat": round(vat, 2)})
+    return {"header": header, "items": items,
+            "totals": {"total": total, "grand_total": grand}}
+
+
+def _ct_paid_on_behalf(rows: List[list]) -> Optional[Dict]:
+    """代墊款 (CHI HO) INVOICE LIST。"""
+    header = _ct_header(rows[:15])
+    head_i, cols = _ct_columns(rows, 0)
+    if head_i is None or "SỐ HÓA ĐƠN" not in cols:
+        return None
+    c_content, c_net, c_vat = cols.get("NỘI DUNG"), cols.get("TIỀN TRƯỚC THUẾ"), cols.get("VAT")
+    c_total, c_inv, c_cont = cols.get("TOTAL"), cols.get("INV"), cols.get("CONT")
+    items = []
+    total = grand = None
+    for row in rows[head_i + 1:]:
+        if _vn_label(_vn_cell(row, 0)).startswith("TỔNG"):
+            total, grand = _vn_num(_vn_cell(row, c_net)), _vn_num(_vn_cell(row, c_total))
+            break
+        amount = _vn_amount(_vn_cell(row, c_net))
+        if amount is None:
+            continue  # 同一張第三方發票分攤到的其他出貨，只列單號沒有金額
+        items.append({
+            "description": _vn_text(_vn_cell(row, c_content)) or None,
+            "amount": amount, "vat": _vn_amount(_vn_cell(row, c_vat)),
+            "order_no": _vn_text(_vn_cell(row, c_inv)) or None,
+            "container_no": _vn_container(_vn_cell(row, c_cont)),
+        })
+    # 合計列的 VAT 是「未稅合計 × 8%」，明細 VAT 是逐列四捨五入，含稅總額
+    # 勾稽容許每列 0.5 的尾差；超過就是帳單本身稅額不一致
+    return {"header": header, "items": items,
+            "totals": {"total": total, "grand_total": grand,
+                       "grand_tolerance": max(1.0, 0.5 * len(items))}}
+
+
+def _ct_parse_book(book) -> List[Dict]:
+    """每個工作表各是一張對帳單 (header + items + 帳單本身的合計)。"""
+    parsed = []
+    for _name, rows in book.sheets:
+        top = " ".join(_vn_label(v) for r in rows[:15] for v in r if _vn_label(v))
+        result = _ct_paid_on_behalf(rows) if "INVOICE LIST" in top else _ct_statement(rows)
+        if result and result["items"]:
+            parsed.append(result)
+    return parsed
+
+
+def parse_cong_thanh_sheets(book) -> List[Dict]:
+    return [{"header": p["header"], "items": p["items"]} for p in _ct_parse_book(book)]
+
+
+def _cong_thanh_totals(book) -> List[Dict]:
+    return [{"invoice_no": p["header"]["invoice_no"], "total": p["totals"]["total"],
+             "grand_total": p["totals"]["grand_total"], "final_total": None,
+             "grand_tolerance": p["totals"].get("grand_tolerance", 1)}
+            for p in _ct_parse_book(book)]
+
+
+register_supplier(
+    "CONG_THANH", "CTY TNHHDV GN VT VA TM CONG THANH", detect_cong_thanh, None,
+    sheet_parse=parse_cong_thanh_sheets, sheet_totals=_cong_thanh_totals,
+)
+
+
+# ===========================================================================
+# 供應商 VN03：RỒNG Á CHÂU (CÔNG TY TNHH GIAO NHẬN THƯƠNG MẠI RỒNG Á CHÂU，
+# 英文 Asia Dragon Cargo = 單號開頭的 "ADC"，廠商代號 100008978)
+# ===========================================================================
+# 每週一批 (PART 1~4) 拖車/報關服務費 Bảng kê，出口、進口分開檔案：
+#   - AIR - EXPORT：BẢNG KÊ PHÍ VẬN CHUYỂN HÀNG XUẤT AIR，費用分兩組
+#       PHI VAN CHUYEN (DON GIA 運費 + PHỤ PHÍ XĂNG DẦU 燃油附加 + THANH TIEN
+#       小計 + PHAT SINH 額外費用) 與 PHI DICH VU (DON GIA 單價 + THANH TIEN)。
+#   - FCL, LCL, AIR IKEA - EXPORT：SERVICE CHARGE / TRUCKING FEE / 燃油附加 /
+#       D/O,H/L,THC,CIC / LIFT ON / LIFTOFF / CSHT / FUMIGATION，TỔNG CỘNG 小計。
+#   - LCL+LOCAL - IMPORT、FCL - IMPORT：左右兩個表，左邊是整櫃/整票原始費用，
+#       右邊 (從第二個 "INVOICE No" 開始) 是依重量分攤到每張寶成發票的實際
+#       請款金額，取右邊；CLEARING EXPENSE / TOTAL / SERVICE ALL 是小計欄。
+#       VAT PASS THROUGH 是代收代付的稅，放 VAT 欄。
+#   每個表最後一列是逐欄合計 (出口有 "TOTAL"/"TỔNG" 字樣，進口第一欄空白)。
+# 檔案裡常留著隱藏的工作副本 ("(2)"、"CHECK XE"、"THEO BG"、"gốc"…)，核心
+# 引擎只交出顯示中的工作表。
+# 帳單本身沒有供應商名稱、對帳單號與日期：INVOICE NO 用檔名 (例如
+# "POU SUNG EX PART 4 SEP. 2026 - DEBIT SERVICE TRUCKING - (07.09-12.09)")、
+# INVOICE DATE 用檔名期間的迄日、SUPPLIER 用越南 Top20 清單上的名稱、
+# CONSIGNEE 依檔名的 POU SUNG。每筆出貨的每個非 0 費用欄轉成一列，費用名稱
+# 照抄欄位表頭。
+
+_RAC_SUPPLIER = "CÔNG TY TNHH GIAO NHẬN THƯƠNG MẠI RỒNG Á CHÂU"
+_VN_CONSIGNEES = {
+    # 檔名關鍵字 -> 越南 Top 公司名稱 (Vietnam Supplier Top 20.xlsx「越南by公司」)
+    "POU SUNG": "POU SUNG VIETNAM COMPANY LIMITED",
+    "POUSUNG": "POU SUNG VIETNAM COMPANY LIMITED",
+    "POU CHEN": "POU CHEN VIETNAM ENTERPRISE LTD.",
+    "POUYUEN": "POUYUEN VIETNAM COMPANY LIMITED",
+    "POU YUEN": "POUYUEN VIETNAM COMPANY LIMITED",
+    "YUE DE": "YUE DE VIETNAM COMPANY LIMITED",
+    "POU LI": "POU LI VIETNAM COMPANY LIMITED",
+    "POU HUNG": "POU HUNG VIETNAM COMPANY LIMITED",
+    "PRIME ASIA": "PRIME ASIA (VIETNAM) CO.,LTD.",
+}
+
+# 費用欄 (表頭轉大寫後完全相同)；PHI VAN CHUYEN/PHI DICH VU 兩組另外處理
+_RAC_CHARGE_LABELS = {
+    "SERVICE CHARGE", "SERVICE FEE", "TRUCKING FEE", "D/O, H/L, THC,CIC FEE", "LIFT ON",
+    "LIFTOFF FEE", "LIFT ON/OFF FEE", "CSHT", "FUMIGATION FEE", "FREIGHT AIR PER P/L",
+    "FREIGHT SEA PER P/L", "CFS", "CIC", "THC", "D/O", "HANDLING", "STORAGE", "INCURRED",
+    "EXTRA CUSTOM SHEET", "DEMURRAGE", "PHAT SINH",
+}
+_RAC_VAT_LABELS = {"VAT PASS THROUGH"}
+# 小計/合計欄，不轉成費用也不列入勾稽
+_RAC_SUBTOTAL_LABELS = {"TỔNG CỘNG", "TOTAL", "CLEARING EXPENSE PER P/L", "CLEARING EXPENSE",
+                        "SERVICE ALL"}
+
+
+def detect_rong_a_chau(text: str) -> bool:
+    upper = text.upper()
+    return ("BẢNG KÊ PHÍ VẬN CHUYỂN" in upper or "ADC - JOB FILE" in upper
+            or ("CLEARING EXPENSE" in upper and "VAT PASS THROUGH" in upper))
+
+
+def _rac_statement_info(file_name: str) -> Tuple[str, Optional[str], Optional[str]]:
+    """檔名 -> (對帳單號 = 整理過的檔名, 對帳單日期 = 期間迄日, 收貨方)。"""
+    stem = re.sub(r"\.xls[xm]?$", "", file_name, flags=re.I)
+    invoice_no = re.sub(r"\s+", " ", re.sub(r"\s+([.,])", r"\1", stem)).strip()
+    upper = invoice_no.upper()
+    date = None
+    bill = re.search(r"\b(JAN|FEB|MAR|APR|MAY|JUN|JUL|AUG|SEP|OCT|NOV|DEC)[A-Z]*\.?\s*(\d{4})", upper)
+    period = re.search(r"\(\s*\d{1,2}\.\d{1,2}\s*-\s*(\d{1,2})\.(\d{1,2})\s*\)", upper)
+    if bill and period:
+        year = int(bill.group(2))
+        bill_month = _MONTH_NAME_TO_NUM[bill.group(1)]
+        end_month = int(period.group(2))
+        # 期間迄日在帳單月份之後 (例如 1 月帳單、期間到 12 月)：屬於前一年
+        if end_month > bill_month + 1:
+            year -= 1
+        date = _format_date_en(period.group(1), end_month, year)
+    consignee = next((name for key, name in _VN_CONSIGNEES.items() if key in upper), None)
+    return invoice_no, date, consignee
+
+
+def _rac_table(rows: List[list]):
+    """找表頭並分類每一欄，回傳 dict 或 None：
+      head (表頭列 index)、meta {欄位代碼: 欄號}、charges [(欄號, 費用名稱)]、
+      vat_cols [欄號]、billing [列入勾稽的欄號]、export (出口表)。"""
+    head = next((i for i, r in enumerate(rows[:10])
+                 if any(_vn_label(v) in ("INVOICE", "SO INVOICE", "INVOICE NO") for v in r)), None)
+    if head is None:
+        return None
+    top = [_vn_label(v) for v in rows[head]]
+    # 第二列表頭 (例如 DON GIA / 20' / 1 MT) 只有文字；有數字或日期就是資料列
+    nxt = rows[head + 1] if head + 1 < len(rows) else []
+    is_sub = any(isinstance(v, str) and v.strip() for v in nxt) and not any(
+        isinstance(v, (int, float, datetime.date)) and not isinstance(v, bool) for v in nxt)
+    sub = [_vn_label(v) for v in nxt] if is_sub else []
+    width = max(len(top), len(sub))
+    top += [""] * (width - len(top))
+    sub += [""] * (width - len(sub))
+    # 合併儲存格的群組名稱往右補，直到下一個群組或沒有子表頭的欄
+    group, groups = "", []
+    for j in range(width):
+        if top[j]:
+            group = top[j]
+        elif not sub[j]:
+            group = ""
+        groups.append(group)
+
+    # 左右兩個表 (進口)：實際請款的是第二個 "INVOICE NO" 開始的右表
+    inv_cols = [j for j, lb in enumerate(top) if lb == "INVOICE NO"]
+    block_start = inv_cols[1] if len(inv_cols) > 1 else 0
+
+    meta: Dict[str, int] = {}
+    charges, vat_cols, billing = [], [], []
+    first_charge = None
+    for j in range(width):
+        label = sub[j] or top[j]
+        if not label:
+            continue
+        if j >= block_start:
+            # 費用名稱照抄表頭原文；PHI VAN CHUYEN 組的「DON GIA」就是運費本身，
+            # THANH TIEN 是小計；PHI DICH VU 組取 THANH TIEN (DON GIA 是單價)
+            original = _vn_text(rows[head + 1][j] if sub[j] else rows[head][j])
+            charge = None
+            if groups[j] == "PHI VAN CHUYEN":
+                charge = {"DON GIA": "PHI VAN CHUYEN", "THANH TIEN": None}.get(label, original)
+            elif groups[j] == "PHI DICH VU":
+                charge = "PHI DICH VU" if label == "THANH TIEN" else None
+            elif label in _RAC_CHARGE_LABELS or label.startswith("PHỤ PHÍ XĂNG DẦU"):
+                charge = original
+            if charge:
+                charges.append((j, charge))
+                first_charge = j if first_charge is None else first_charge
+            elif label in _RAC_VAT_LABELS:
+                vat_cols.append(j)
+        # 描述欄位：同名欄位以第一次出現的為準 (左右表內容相同)
+        field = {
+            "INVOICE": "order_no", "SO INVOICE": "order_no", "INVOICE NO": "order_no",
+            "SỐ BILL": "bl_no", "AWB,B/L NO": "bl_no", "CONT NO": "container_no",
+            "PORT": "port", "CBM": "volume", "NGÀY ĐÓNG HÀNG": "onboard_date",
+            "DELIVERY DATE LCL": "arrive_date", "DELIVERY DATE FCL": "arrive_date",
+        }.get(label)
+        if field and field not in meta:
+            meta[field] = j
+    if first_charge is None:
+        return None
+    # 勾稽範圍：第一個費用欄之後、不是小計/描述欄的所有數字欄
+    skip = {j for j in range(width) if (sub[j] or top[j]) in _RAC_SUBTOTAL_LABELS
+            or (groups[j] == "PHI VAN CHUYEN" and sub[j] == "THANH TIEN")
+            or (groups[j] == "PHI DICH VU" and sub[j] == "DON GIA")
+            or j in meta.values()}
+    billing = [j for j in range(first_charge, width) if j not in skip and j not in vat_cols]
+    return {"head": head, "meta": meta, "charges": charges, "vat_cols": vat_cols,
+            "billing": billing, "sub_header": any(sub)}
+
+
+def _rac_parse_sheet(name: str, rows: List[list]) -> Optional[Tuple[List[Dict], float, float]]:
+    """一個工作表 -> (items, 合計列的費用合計, 合計列的 VAT 合計)。"""
+    table = _rac_table(rows)
+    if table is None:
+        return None
+    export = "EXPORT" in name.upper()
+    meta = table["meta"]
+    start = table["head"] + (2 if table["sub_header"] else 1)
+    items: List[Dict] = []
+    total = vat_total = 0.0
+    for row in rows[start:]:
+        order_no = _vn_text(_vn_cell(row, meta.get("order_no")))
+        first = _vn_label(_vn_cell(row, 0))
+        if not order_no or first.startswith(("TOTAL", "TỔNG")):
+            # 合計列：明細之後第一列有金額、但沒有單號的列
+            nums = [_vn_num(_vn_cell(row, j)) for j in table["billing"] + table["vat_cols"]]
+            if any(n for n in nums):
+                total = sum(_vn_num(_vn_cell(row, j)) or 0 for j in table["billing"])
+                vat_total = sum(_vn_num(_vn_cell(row, j)) or 0 for j in table["vat_cols"])
+                break
+            continue
+        port = _vn_text(_vn_cell(row, meta.get("port"))) or None
+        shared = {
+            "order_no": order_no,
+            "bl_no": _vn_text(_vn_cell(row, meta.get("bl_no"))) or None,
+            "container_no": _vn_container(_vn_cell(row, meta.get("container_no"))),
+            "volume": _vn_num(_vn_cell(row, meta.get("volume"))),
+            "onboard_date": _vn_date(_vn_cell(row, meta.get("onboard_date"))),
+            "arrive_date": _vn_date(_vn_cell(row, meta.get("arrive_date"))),
+            "port_of_loading" if export else "port_of_discharge": port,
+        }
+        for j, charge in table["charges"]:
+            amount = _vn_amount(_vn_cell(row, j))
+            if amount is not None:
+                items.append({"description": charge, "amount": amount, "vat": None, **shared})
+        for j in table["vat_cols"]:
+            vat = _vn_amount(_vn_cell(row, j))
+            if vat is not None:
+                items.append({"description": "VAT PASS THROUGH", "amount": None, "vat": vat,
+                              **shared})
+    return items, total, vat_total
+
+
+def _rac_parse_book(book) -> Optional[Dict]:
+    """整個檔案是一張對帳單：所有顯示中工作表的明細合併。"""
+    invoice_no, date, consignee = _rac_statement_info(book.file_name)
+    items: List[Dict] = []
+    total = vat_total = 0.0
+    for name, rows in book.sheets:
+        parsed = _rac_parse_sheet(name, rows)
+        if parsed:
+            items.extend(parsed[0])
+            total += parsed[1]
+            vat_total += parsed[2]
+    if not items:
+        return None
+    header = {"invoice_date": date, "invoice_no": invoice_no, "supplier": _RAC_SUPPLIER,
+              "consignee": consignee}
+    return {"header": header, "items": items,
+            "totals": {"total": round(total, 2), "grand_total": round(total + vat_total, 2)}}
+
+
+def parse_rong_a_chau_sheets(book) -> List[Dict]:
+    parsed = _rac_parse_book(book)
+    return [{"header": parsed["header"], "items": parsed["items"]}] if parsed else []
+
+
+def _rong_a_chau_totals(book) -> List[Dict]:
+    parsed = _rac_parse_book(book)
+    if not parsed:
+        return []
+    return [{"invoice_no": parsed["header"]["invoice_no"], "total": parsed["totals"]["total"],
+             "grand_total": parsed["totals"]["grand_total"], "final_total": None}]
+
+
+register_supplier(
+    "RONG_A_CHAU", "CÔNG TY TNHH GIAO NHẬN THƯƠNG MẠI RỒNG Á CHÂU", detect_rong_a_chau, None,
+    sheet_parse=parse_rong_a_chau_sheets, sheet_totals=_rong_a_chau_totals,
+)
+
+
+# ===========================================================================
 # 供應商編號 (依進度管控的 Top 供應商清單)
 # ===========================================================================
 # 印尼：Desktop\印尼進度管控 的「Indonesia Supplier Top 15, 2025-2026.xlsx」
@@ -5013,6 +5473,8 @@ SUPPLIER_NUMBERS = {
     "PAN_EKSPRES": ("ID28", "100030970", "PT PAN EKSPRES INTERNATIONAL"),
     "HYPER_MEGA": ("ID31", "100019295", "PT. HYPER MEGA SHIPPING"),
     "EVERGREEN_LOGISTICS": ("ID38", "100019246", "PT. EVERGREEN LOGISTICS INDONESIA"),
+    "RONG_A_CHAU": ("VN03", "100008978", "CÔNG TY TNHH GIAO NHẬN THƯƠNG MẠI RỒNG Á CHÂU"),
+    "CONG_THANH": ("VN05", "100008048", "CTY TNHHDV GN VT VA TM CONG THANH"),
 }
 
 for _key, (_number, _vendor_code, _name) in SUPPLIER_NUMBERS.items():

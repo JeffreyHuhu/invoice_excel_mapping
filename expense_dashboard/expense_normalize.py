@@ -19,6 +19,7 @@ expense_normalize.py
 """
 
 import re
+import unicodedata
 from datetime import date, datetime, timedelta
 from typing import Optional, Tuple
 
@@ -195,6 +196,8 @@ _EXPANSIONS = (
     (r"\bCOSTOMS\b|\bCUSTOM\b", "CUSTOMS"),
     (r"\bWEIGHT\b", "WEIGHING"),
     (r"\bADM\b|\bADMIN\b", "ADMINISTRATION"),
+    (r"\bTRANPORTATION\b", "TRANSPORTATION"),  # CONG THANH 對帳單標題的拼字
+    (r"\bLIFTOFF\b", "LIFT OFF"),
 )
 _EXPANSION_RES = tuple((re.compile(p), r) for p, r in _EXPANSIONS)
 
@@ -207,6 +210,8 @@ _NOISE_RES = (
     # 備註用的日期，例如 'ADMINISTRATION FEE - 9 okt'
     re.compile(r"\b\d{1,2}\s*(?:JAN|FEB|MAR|APR|MAY|MEI|JUN|JUL|AUG|AGU|AGT|SEP|"
                r"OCT|OKT|NOV|NOP|DEC|DES)[A-Z]*\b(?:\s*\d{2,4}\b)?"),
+    # 附加費的費率，例如越南燃油附加費 'PHỤ PHÍ XĂNG DẦU UP 12%' / 'UP 15%'
+    re.compile(r"\bUP\s*\d+(?:[.,]\d+)?\s*%?"),
 )
 
 # 正規化後的 key -> 統一顯示名稱 (同性質費用合併在這裡加)
@@ -230,22 +235,34 @@ EXPENSE_ALIASES = {
     "ORIGIN DOCUMENTATION CHARGE": "Origin Documentation Fee",
     "DOCUMENTATION FEE": "Documentation Fee",
     "DOCUMENTATION CHARGE": "Documentation Fee",
+    # 越南文費用名稱 (去掉聲調後比對)
+    "PHI VAN CHUYEN": "Transportation Fee (Phí vận chuyển)",
+    "PHI DICH VU": "Service Fee (Phí dịch vụ)",
+    "PHU PHI XANG DAU": "Fuel Surcharge (Phụ phí xăng dầu)",
+    "PHAT SINH": "Incurred (Phát sinh)",
+    "NANG HA": "Lift On/Off (Nâng hạ)",
+    "LUU BAI": "Storage (Lưu bãi)",
+    "PT HA BAI SOM": "Early Drop Fee (Phí hạ bãi sớm)",
+    "CSHT": "Port Infrastructure Fee (CSHT)",
+    "D O H L TERMINAL HANDLING CHARGE CIC FEE": "D/O, H/L, THC, CIC Fee",
+    "FREIGHT SEA PER P L": "Freight Sea (per P/L)",
+    "FREIGHT AIR PER P L": "Freight Air (per P/L)",
 }
 
 # 費用大類：(大類名稱, 關鍵字 regex)，由上往下比對，先符合的先用
 EXPENSE_CATEGORIES = (
-    ("碼頭處理費 (THC)", r"TERMINAL HANDLING"),
+    ("碼頭處理費 (THC)", r"TERMINAL HANDLING|\bCSHT\b|\bD O H L\b"),
     ("VGM 費用", r"\bVGM\b"),
-    ("CFS / 倉儲", r"\bCFS\b|WAREHOUSE|GUDANG|STORAGE|STUFFING|UNSTUFFING"),
+    ("CFS / 倉儲", r"\bCFS\b|WAREHOUSE|GUDANG|STORAGE|STUFFING|UNSTUFFING|LUU BAI"),
     ("文件 / 提單費", r"DOCUMENTATION|\bFCR\b|\bCBL\b|\bBL\b|BILL OF LADING|\bAWB\b|\bEDI\b|"
                      r"ISSUANCE|\bSEAL\b|SHIPPING INSTRUCTION"),
     ("運費", r"FREIGHT|\bBAF\b|\bCAF\b|BUNKER|SURCHARGE"),
     ("報關 / 檢驗", r"CUSTOMS|CLEARANCE|DECLARATION|\bPEB\b|\bPIB\b|INSPECTION|QUARANTINE|"
                    r"FUMIGATION"),
     ("拖車 / 陸運 / 滯櫃", r"TRUCKING|HAULAGE|DELIVERY|TRANSPORT|PICK ?UP|LIFT ON|LIFT OFF|"
-                         r"DETENTION|DEMURRAGE"),
+                         r"DETENTION|DEMURRAGE|VAN CHUYEN|XANG DAU|NANG HA|HA BAI"),
     ("手續 / 管理 / 行政", r"HANDLING|AGENCY|ADMINISTRATION|SERVICE|COMMISSION|MANAGEMENT|"
-                         r"BOOKING|COMPLIAN|LATE PAYMENT"),
+                         r"BOOKING|COMPLIAN|LATE PAYMENT|DICH VU"),
 )
 _CATEGORY_RES = tuple((name, re.compile(p)) for name, p in EXPENSE_CATEGORIES)
 OTHER_CATEGORY = "其他"
@@ -264,6 +281,11 @@ def expense_key(description) -> Optional[str]:
     text = clean_text(description)
     if not text:
         return None
+    # 越南文等帶聲調的字母先去掉聲調 (PHỤ PHÍ XĂNG DẦU -> PHU PHI XANG DAU)，
+    # 不然下面去標點時會把整個字母刪掉
+    text = text.replace("Đ", "D").replace("đ", "d")
+    text = "".join(ch for ch in unicodedata.normalize("NFKD", text)
+                   if not unicodedata.combining(ch))
     text = text.upper().replace("&", " AND ")
     for noise in _NOISE_RES:
         text = noise.sub(" ", text)
@@ -303,7 +325,11 @@ def normalize_expense(description) -> Tuple[str, str]:
 # 在費用名稱裡 (例如 'FREIGHT CHARGE (USD 23.54)')，金額欄已經換成 IDR
 DEFAULT_CURRENCY = "IDR"
 # 個別供應商的金額幣別跟預設不同時加在這裡 (key：SUPPLIER 欄位轉大寫)
-SUPPLIER_CURRENCY: dict = {}
+SUPPLIER_CURRENCY: dict = {
+    # 越南供應商 (Excel 對帳表，金額為越南盾)
+    "CÔNG TY TNHH GIAO NHẬN THƯƠNG MẠI RỒNG Á CHÂU": "VND",
+    "CÔNG TY TNHH DỊCH VỤ GIAO NHẬN VẬN TẢI VÀ THƯƠNG MẠI CÔNG THÀNH": "VND",
+}
 
 _CURRENCY_RES = (
     ("USD", re.compile(r"\bUSD\b|US\$|^\s*\$")),

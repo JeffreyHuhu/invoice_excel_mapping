@@ -20,6 +20,7 @@ from typing import Dict, List, Tuple
 import duckdb
 
 API_URL = "https://api.frankfurter.dev/v1/{start}..{end}?base=USD&symbols={symbols}"
+CURRENCIES_URL = "https://api.frankfurter.dev/v1/currencies"
 SOURCE_ECB = "ECB 月平均"
 SOURCE_MANUAL = "手動"
 TIMEOUT = 20
@@ -35,9 +36,17 @@ def ensure_table(con: duckdb.DuckDBPyConnection) -> None:
 def fetch_monthly_rates(currencies: List[str], start: date, end: date
                         ) -> Tuple[Dict[Tuple[str, int, int], float], List[str]]:
     """回傳 ({(幣別, 年, 月): 1 USD 兌換數}, ECB 沒有提供的幣別)。
-    一次抓一年，避免單次請求範圍太大。"""
+    一次抓一年，避免單次請求範圍太大。請求裡只要有一個 ECB 不支援的幣別
+    (例如越南盾 VND) 整個請求就會失敗，所以先查支援清單、只要支援的幣別。"""
+    req = urllib.request.Request(CURRENCIES_URL, headers={"User-Agent": "expense-dashboard"})
+    with urllib.request.urlopen(req, timeout=TIMEOUT) as resp:
+        supported = set(json.load(resp))
+    unsupported = [c for c in currencies if c not in supported]
+    currencies = [c for c in currencies if c in supported]
     sums: Dict[Tuple[str, int, int], List[float]] = defaultdict(list)
     seen = set()
+    if not currencies:
+        return {}, unsupported
     for year in range(start.year, end.year + 1):
         s = max(start, date(year, 1, 1))
         e = min(end, date(year, 12, 31))
@@ -53,7 +62,7 @@ def fetch_monthly_rates(currencies: List[str], start: date, end: date
                 sums[(cur, d.year, d.month)].append(float(value))
                 seen.add(cur)
     monthly = {k: sum(v) / len(v) for k, v in sums.items()}
-    return monthly, [c for c in currencies if c not in seen]
+    return monthly, unsupported + [c for c in currencies if c not in seen]
 
 
 def update_fx_rates(con: duckdb.DuckDBPyConnection) -> str:

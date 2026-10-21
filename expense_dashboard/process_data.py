@@ -65,6 +65,7 @@ BATCH_ROWS = 20_000
 # 標題列最多往下找幾列 (pdf_to_excel 範本在第 1 列、批次範本在第 2 列)
 HEADER_SEARCH_ROWS = 6
 SUMMARY_REPORT_PREFIX = "轉檔總表"
+RESULT_SUFFIX = "_轉檔結果.xlsx"
 
 # Excel 標題第一行 (換行前、轉大寫、去掉結尾的點) -> 欄位代碼
 HEADER_FIELDS = {
@@ -117,6 +118,11 @@ def get_logger() -> logging.Logger:
 # 掃描檔案
 # ============================================================
 
+def _result_name(file_name: str) -> str:
+    """原始帳單檔名 -> 轉檔工具產生的轉檔結果檔名。"""
+    return f"{os.path.splitext(file_name)[0]}{RESULT_SUFFIX}"
+
+
 def _is_target_folder(name: str, level: str, supplier_folder: Optional[str]) -> bool:
     if not name.endswith(f"-辨識等級({level})"):
         return False
@@ -136,11 +142,15 @@ def scan_excel_files(roots: List[Path], level: str,
             get_logger().warning("無法讀取資料夾 %s：%s", current, e)
             continue
         target = _is_target_folder(os.path.basename(current), level, supplier_folder)
+        names = {e.name for e in entries}
         for entry in entries:
             if entry.is_dir(follow_symlinks=False):
                 stack.append(entry.path)
             elif target and entry.name.lower().endswith((".xlsx", ".xlsm")) \
-                    and not entry.name.startswith(("~$", SUMMARY_REPORT_PREFIX)):
+                    and not entry.name.startswith(("~$", SUMMARY_REPORT_PREFIX)) \
+                    and _result_name(entry.name) not in names:
+                # 最後一個條件：Excel 帳單 (越南供應商) 轉檔後，原始帳單跟
+                # 「<檔名>_轉檔結果.xlsx」放在同一個資料夾，原始帳單不是轉檔結果
                 st = entry.stat()
                 # 來源資料夾：辨識等級資料夾的上一層 (例如客戶/專案資料夾名稱)
                 folder = os.path.basename(os.path.dirname(current))
