@@ -19,6 +19,10 @@ process_data.py — 第一階段：把上萬份「辨識等級(高)」轉檔結�
      轉了兩次)，只保留其中一份，其餘標記 is_duplicate，儀表板預設不計入。
   7. 讀不了/格式不符的 Excel 記進 etl_files 與 logs/expense_etl.log，
      不中斷整批處理。
+  8. 每列記錄金額幣別 (currency)，最後更新 ECB 月平均匯率 (fx.py)，儀表板
+     用它換算成 USD。抓匯率失敗 (例如沒有網路) 只提示，不影響資料匯入。
+
+儀表板「資料管理」頁 (data_admin.py) 也是呼叫這裡的 run()。
 
 【怎麼用】
   python process_data.py "D:\\發票\\02-Maersk Logistics Indonesia"
@@ -28,30 +32,33 @@ process_data.py — 第一階段：把上萬份「辨識等級(高)」轉檔結�
 
 import argparse
 import logging
+import multiprocessing
 import os
 import sys
 import time
-from concurrent.futures import ProcessPoolExecutor
+from concurrent.futures import ProcessPoolExecutor, ThreadPoolExecutor
 from datetime import datetime
 from logging.handlers import RotatingFileHandler
 from pathlib import Path
-from typing import Dict, Iterator, List, Optional, Tuple
+from typing import Callable, Dict, Iterator, List, Optional, Tuple
 
 import duckdb
 import pandas as pd
 
+import fx
 from expense_normalize import (
+    DEFAULT_CURRENCY,
     clean_text,
+    detect_currency,
     normalize_expense,
     normalize_port,
     parse_amount,
     parse_date,
     parse_float,
 )
+from settings import LOG_DIR, get_db_path
 
-BASE_DIR = Path(__file__).resolve().parent
-DEFAULT_DB = BASE_DIR / "data" / "expenses.duckdb"
-LOG_PATH = BASE_DIR / "logs" / "expense_etl.log"
+LOG_PATH = LOG_DIR / "expense_etl.log"
 
 # 每累積幾列寫進資料庫一次 (控制主程式記憶體用量)
 BATCH_ROWS = 20_000
@@ -77,7 +84,7 @@ ITEM_COLUMNS = (
     ("invoice_no", "VARCHAR"), ("supplier", "VARCHAR"), ("consignee", "VARCHAR"),
     ("description_raw", "VARCHAR"), ("expense_item", "VARCHAR"),
     ("expense_category", "VARCHAR"), ("amount", "DOUBLE"), ("vat", "DOUBLE"),
-    ("order_no", "VARCHAR"), ("arrive_date", "DATE"), ("onboard_date", "DATE"),
+    ("currency", "VARCHAR"), ("order_no", "VARCHAR"), ("arrive_date", "DATE"), ("onboard_date", "DATE"),
     ("bl_no", "VARCHAR"), ("mbl_no", "VARCHAR"), ("port_of_loading", "VARCHAR"),
     ("port_of_discharge", "VARCHAR"), ("volume", "DOUBLE"), ("vessel", "VARCHAR"),
     ("container_no", "VARCHAR"), ("shipper", "VARCHAR"),
@@ -177,7 +184,8 @@ def _find_header(rows: List[list]) -> Tuple[int, Dict[int, str]]:
     raise ValueError("找不到標題列 (前幾列沒有 Description / AMOUNT 等欄位)")
 
 
-def clean_record(raw: Dict[str, object]) -> Dict[str, object]:
+def clean_record(raw: Dict[str, object],
+                 default_currency: str = DEFAULT_CURRENCY) -> Dict[str, object]:
     """一列原始值 -> 清洗後的明細 (不含 source_file/source_folder)。"""
     invoice_date = parse_date(raw.get("invoice_date"))
     item, category = normalize_expense(raw.get("description"))
@@ -193,6 +201,7 @@ def clean_record(raw: Dict[str, object]) -> Dict[str, object]:
         "expense_category": category,
         "amount": parse_amount(raw.get("amount")),
         "vat": parse_amount(raw.get("vat")),
+        "currency": detect_currency(raw.get("amount"), raw.get("supplier"), default_currency),
         "order_no": clean_text(raw.get("order_no")),
         "arrive_date": parse_date(raw.get("arrive_date")),
         "onboard_date": parse_date(raw.get("onboard_date")),
@@ -207,10 +216,10 @@ def clean_record(raw: Dict[str, object]) -> Dict[str, object]:
     }
 
 
-def load_file(task: Tuple[str, str]) -> Tuple[str, List[tuple], Optional[str]]:
+def load_file(task: Tuple[str, str, str]) -> Tuple[str, List[tuple], Optional[str]]:
     """讀一份 Excel 並清洗，回傳 (路徑, 明細列 tuple 清單, 錯誤原因)。
     任何例外都轉成錯誤原因回傳，不讓單一壞檔中斷整批。"""
-    path, folder = task
+    path, folder, default_currency = task
     try:
         rows = _read_rows(path)
         header_index, mapping = _find_header(rows)
@@ -220,7 +229,7 @@ def load_file(task: Tuple[str, str]) -> Tuple[str, List[tuple], Optional[str]]:
             # 範本後面的空白列、或只剩框線的列直接略過
             if all(clean_text(v) is None for v in raw.values()):
                 continue
-            rec = clean_record(raw)
+            rec = clean_record(raw, default_currency)
             rec["source_file"] = path
             rec["source_folder"] = folder
             records.append(tuple(rec[name] for name, _ in ITEM_COLUMNS))
@@ -237,9 +246,17 @@ def init_db(con: duckdb.DuckDBPyConnection) -> None:
     cols = ", ".join(f"{name} {typ}" for name, typ in ITEM_COLUMNS)
     con.execute(f"CREATE TABLE IF NOT EXISTS expense_items ({cols}, "
                 "is_duplicate BOOLEAN DEFAULT FALSE)")
+    # 舊版資料庫沒有幣別欄：補上並填預設幣別 (舊版只有印尼盾資料)
+    has_currency = con.execute(
+        "SELECT count(*) FROM information_schema.columns "
+        "WHERE table_name = 'expense_items' AND column_name = 'currency'").fetchone()[0]
+    if not has_currency:
+        con.execute("ALTER TABLE expense_items ADD COLUMN currency VARCHAR")
+        con.execute("UPDATE expense_items SET currency = ?", [DEFAULT_CURRENCY])
     con.execute("""CREATE TABLE IF NOT EXISTS etl_files (
         source_file VARCHAR PRIMARY KEY, mtime DOUBLE, size BIGINT,
         row_count INTEGER, error VARCHAR, processed_at TIMESTAMP)""")
+    fx.ensure_table(con)
 
 
 def _delete_files(con: duckdb.DuckDBPyConnection, paths: List[str]) -> None:
@@ -292,105 +309,158 @@ def mark_duplicates(con: duckdb.DuckDBPyConnection) -> int:
     return con.execute("SELECT count(*) FROM expense_items WHERE is_duplicate").fetchone()[0]
 
 
+def _drop_db_keep_manual_rates(db_path: Path) -> List[tuple]:
+    """完整重建用：記下手動輸入的匯率後刪掉整個資料庫檔。DuckDB 刪除資料
+    不會縮小檔案，直接開新檔才不會越用越肥 (資料庫要放共用資料夾給大家讀)。"""
+    if not db_path.exists():
+        return []
+    con = duckdb.connect(str(db_path))
+    try:
+        fx.ensure_table(con)
+        rows = con.execute("SELECT currency, year, month, per_usd, source FROM fx_rates "
+                           "WHERE source = ?", [fx.SOURCE_MANUAL]).fetchall()
+    finally:
+        con.close()
+    for path in (db_path, db_path.with_name(db_path.name + ".wal")):
+        if path.exists():
+            path.unlink()
+    return rows
+
+
 # ============================================================
 # 主流程
 # ============================================================
 
-def run(roots: List[Path], db_path: Path, level: str, supplier_folder: Optional[str],
-        workers: int, full: bool, parquet: Optional[Path]) -> int:
+def run(roots: List[Path], db_path: Path, level: str = "高",
+        supplier_folder: Optional[str] = None, workers: int = 0, full: bool = False,
+        parquet: Optional[Path] = None, default_currency: str = DEFAULT_CURRENCY,
+        update_fx: bool = True, use_threads: bool = False,
+        echo: Callable[[str], None] = print,
+        progress: Optional[Callable[[int, int], None]] = None) -> Dict:
+    """彙整主流程，回傳結果摘要 dict。
+    use_threads：用執行緒代替多個 process 讀檔 (儀表板/EXE 裡執行時用，避免
+    在網頁伺服器或打包後的 EXE 裡另開 process)。
+    echo：輸出訊息的函式；progress(已處理份數, 總份數)：進度回報。"""
     log = get_logger()
     started = time.time()
+    workers = workers or max((os.cpu_count() or 2) - 1, 1)
     db_path.parent.mkdir(parents=True, exist_ok=True)
+    manual_rates = _drop_db_keep_manual_rates(db_path) if full else []
     con = duckdb.connect(str(db_path))
-    init_db(con)
-    if full:
-        con.execute("DELETE FROM expense_items")
-        con.execute("DELETE FROM etl_files")
+    try:
+        init_db(con)
+        if manual_rates:
+            con.executemany("INSERT INTO fx_rates (currency, year, month, per_usd, source) "
+                            "VALUES (?, ?, ?, ?, ?)", manual_rates)
 
-    print(f"掃描資料夾 (辨識等級({level})"
-          + (f"、供應商資料夾 {supplier_folder}" if supplier_folder else "") + ") ...")
-    scanned = {path: (folder, mtime, size)
-               for path, folder, mtime, size in scan_excel_files(roots, level, supplier_folder)}
-    known = {path: (mtime, size) for path, mtime, size in
-             con.execute("SELECT source_file, mtime, size FROM etl_files").fetchall()}
+        echo(f"掃描資料夾 (辨識等級({level})"
+             + (f"、供應商資料夾 {supplier_folder}" if supplier_folder else "") + ") ...")
+        scanned = {path: (folder, mtime, size) for path, folder, mtime, size
+                   in scan_excel_files(roots, level, supplier_folder)}
+        known = {path: (mtime, size) for path, mtime, size in
+                 con.execute("SELECT source_file, mtime, size FROM etl_files").fetchall()}
 
-    todo = [p for p, (_, mtime, size) in scanned.items() if known.get(p) != (mtime, size)]
-    # 資料庫有紀錄但檔案已不存在 (被搬走/刪除) 的 -> 移除；只是這次沒掃到
-    # (例如換了 --supplier-folder) 但檔案還在的保留
-    removed = [p for p in known if p not in scanned and not os.path.exists(p)]
-    _delete_files(con, [p for p in todo if p in known] + removed)
-    print(f"找到 {len(scanned):,} 份 Excel：新增/修改 {len(todo):,} 份、"
-          f"未變動 {len(scanned) - len(todo):,} 份、已移除 {len(removed):,} 份")
+        todo = [p for p, (_, mtime, size) in scanned.items() if known.get(p) != (mtime, size)]
+        # 資料庫有紀錄但檔案已不存在 (被搬走/刪除) 的 -> 移除；只是這次沒掃到
+        # (例如換了 --supplier-folder) 但檔案還在的保留
+        removed = [p for p in known if p not in scanned and not os.path.exists(p)]
+        _delete_files(con, [p for p in todo if p in known] + removed)
+        echo(f"找到 {len(scanned):,} 份 Excel：新增/修改 {len(todo):,} 份、"
+             f"未變動 {len(scanned) - len(todo):,} 份、已移除 {len(removed):,} 份")
 
-    items: List[tuple] = []
-    files: List[tuple] = []
-    total_rows = failed = 0
-    tasks = [(p, scanned[p][0]) for p in todo]
-    if tasks:
-        with ProcessPoolExecutor(max_workers=workers) as pool:
-            for done, (path, records, error) in enumerate(
-                    pool.map(load_file, tasks, chunksize=16), start=1):
-                _, mtime, size = scanned[path]
-                if error:
-                    failed += 1
-                    log.error("%s | 讀取失敗 | %s", path, error)
-                elif not records:
-                    log.warning("%s | 沒有任何明細列", path)
-                items.extend(records)
-                total_rows += len(records)
-                files.append((path, mtime, size, len(records), error, datetime.now()))
-                if len(items) >= BATCH_ROWS:
-                    _flush(con, items, files)
-                if done % 500 == 0 or done == len(tasks):
-                    rate = done / max(time.time() - started, 1e-6)
-                    print(f"  已處理 {done:,}/{len(tasks):,} 份 ({rate:,.0f} 份/秒)，"
-                          f"明細 {total_rows:,} 列，失敗 {failed:,} 份")
-        _flush(con, items, files)
+        items: List[tuple] = []
+        files: List[tuple] = []
+        total_rows = failed = 0
+        tasks = [(p, scanned[p][0], default_currency) for p in todo]
+        if tasks:
+            executor = ThreadPoolExecutor if use_threads else ProcessPoolExecutor
+            with executor(max_workers=workers) as pool:
+                for done, (path, records, error) in enumerate(
+                        pool.map(load_file, tasks, chunksize=16), start=1):
+                    _, mtime, size = scanned[path]
+                    if error:
+                        failed += 1
+                        log.error("%s | 讀取失敗 | %s", path, error)
+                    elif not records:
+                        log.warning("%s | 沒有任何明細列", path)
+                    items.extend(records)
+                    total_rows += len(records)
+                    files.append((path, mtime, size, len(records), error, datetime.now()))
+                    if len(items) >= BATCH_ROWS:
+                        _flush(con, items, files)
+                    if progress:
+                        progress(done, len(tasks))
+                    if done % 500 == 0 or done == len(tasks):
+                        rate = done / max(time.time() - started, 1e-6)
+                        echo(f"  已處理 {done:,}/{len(tasks):,} 份 ({rate:,.0f} 份/秒)，"
+                             f"明細 {total_rows:,} 列，失敗 {failed:,} 份")
+            _flush(con, items, files)
 
-    duplicates = mark_duplicates(con)
-    if parquet:
-        parquet.parent.mkdir(parents=True, exist_ok=True)
-        con.execute(f"COPY (SELECT * FROM expense_items) TO '{parquet.as_posix()}' "
-                    "(FORMAT PARQUET, COMPRESSION ZSTD)")
-        print(f"已匯出 Parquet：{parquet}")
+        duplicates = mark_duplicates(con)
 
-    summary = con.execute("""
-        SELECT coalesce(CAST(year AS VARCHAR), '日期無法辨識'), count(*),
-               count(DISTINCT coalesce(supplier, '') || '|' || coalesce(invoice_no, source_file)),
-               sum(amount)
-        FROM expense_items WHERE NOT is_duplicate GROUP BY 1 ORDER BY 1""").fetchall()
-    con.close()
+        fx_message = None
+        if update_fx:
+            try:
+                fx_message = fx.update_fx_rates(con)
+            except Exception as e:  # noqa: BLE001  沒網路等狀況不影響資料匯入
+                fx_message = f"匯率更新失敗 (沿用資料庫裡現有的匯率)：{e}"
+                log.warning("匯率更新失敗 | %s", e)
+            echo(fx_message)
 
-    print("=" * 60)
-    print(f"完成，耗時 {time.time() - started:,.1f} 秒；資料庫：{db_path}")
-    print(f"本次寫入 {total_rows:,} 列，讀取失敗 {failed:,} 份 (原因見 {LOG_PATH})；"
-          f"重複發票 {duplicates:,} 列不計入")
-    for year, rows, invoices, amount in summary:
-        print(f"  {year}：發票 {invoices:,} 張、明細 {rows:,} 列、金額 {amount or 0:,.0f}")
-    print("=" * 60)
+        if parquet:
+            parquet.parent.mkdir(parents=True, exist_ok=True)
+            con.execute(f"COPY (SELECT * FROM expense_items) TO '{parquet.as_posix()}' "
+                        "(FORMAT PARQUET, COMPRESSION ZSTD)")
+            echo(f"已匯出 Parquet：{parquet}")
+
+        summary = con.execute("""
+            SELECT coalesce(CAST(year AS VARCHAR), '日期無法辨識'), count(*),
+                   count(DISTINCT coalesce(supplier, '') || '|' || coalesce(invoice_no, source_file)),
+                   sum(amount), string_agg(DISTINCT currency, '/')
+            FROM expense_items WHERE NOT is_duplicate GROUP BY 1 ORDER BY 1""").fetchall()
+    finally:
+        con.close()
+
+    elapsed = time.time() - started
+    echo("=" * 60)
+    echo(f"完成，耗時 {elapsed:,.1f} 秒；資料庫：{db_path}")
+    echo(f"本次寫入 {total_rows:,} 列，讀取失敗 {failed:,} 份 (原因見 {LOG_PATH})；"
+         f"重複發票 {duplicates:,} 列不計入")
+    for year, rows, invoices, amount, currencies in summary:
+        echo(f"  {year}：發票 {invoices:,} 張、明細 {rows:,} 列、金額 {amount or 0:,.0f} ({currencies})")
+    echo("=" * 60)
     log.info("ETL 完成 | 新增/修改 %d 份 | 寫入 %d 列 | 失敗 %d 份", len(todo), total_rows, failed)
-    return 0
+    return {"scanned": len(scanned), "processed": len(todo), "removed": len(removed),
+            "rows": total_rows, "failed": failed, "duplicates": duplicates,
+            "fx": fx_message, "seconds": elapsed}
 
 
 def main(argv: Optional[List[str]] = None) -> int:
+    default_db = get_db_path()
     parser = argparse.ArgumentParser(description="彙整轉檔結果 Excel 進 DuckDB")
     parser.add_argument("roots", nargs="+", type=Path, help="要掃描的資料夾 (可多個，含所有子資料夾)")
-    parser.add_argument("--db", type=Path, default=DEFAULT_DB, help=f"DuckDB 檔案 (預設 {DEFAULT_DB})")
+    parser.add_argument("--db", type=Path, default=default_db, help=f"DuckDB 檔案 (預設 {default_db})")
     parser.add_argument("--level", default="高", help="只讀這個辨識等級的資料夾 (預設 高)")
     parser.add_argument("--supplier-folder", help="只讀名稱以此開頭的辨識等級資料夾，例如 MAERSK")
-    parser.add_argument("--workers", type=int, default=max((os.cpu_count() or 2) - 1, 1),
+    parser.add_argument("--workers", type=int, default=0,
                         help="平行讀檔的 process 數 (預設 CPU 核心數 - 1)")
     parser.add_argument("--full", action="store_true", help="清空資料庫重新匯入")
     parser.add_argument("--parquet", type=Path, help="另外匯出一份 Parquet 檔")
+    parser.add_argument("--default-currency", default=DEFAULT_CURRENCY,
+                        help=f"金額沒有標示幣別時的預設幣別 (預設 {DEFAULT_CURRENCY})")
+    parser.add_argument("--no-fx", action="store_true", help="不要上網更新匯率")
     args = parser.parse_args(argv)
 
     missing = [str(r) for r in args.roots if not r.is_dir()]
     if missing:
         print(f"找不到資料夾：{', '.join(missing)}")
         return 1
-    return run([r.resolve() for r in args.roots], args.db.resolve(), args.level,
-               args.supplier_folder, args.workers, args.full, args.parquet)
+    run([r.resolve() for r in args.roots], args.db.resolve(), args.level,
+        args.supplier_folder, args.workers, args.full, args.parquet,
+        args.default_currency.upper(), not args.no_fx)
+    return 0
 
 
 if __name__ == "__main__":
+    multiprocessing.freeze_support()
     sys.exit(main())

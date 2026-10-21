@@ -10,6 +10,8 @@ expense_normalize.py
   - parse_float()      ：材積等一般小數 (點一律當小數點)
   - normalize_expense():費用名稱正規化，回傳 (標準費用項目, 費用大類)
   - normalize_port()   ：港口名稱統一大小寫與空白
+  - detect_currency()  ：金額幣別 (金額文字裡有幣別就用它，否則用供應商預設，
+                         再沒有就用 DEFAULT_CURRENCY)
   - clean_text()       ：一般文字欄位去空白，N/A / - / 空字串一律變成 None
 
 要新增「同性質費用合併」的對照，改 EXPENSE_ALIASES 即可；要調整費用大類，
@@ -291,6 +293,39 @@ def normalize_expense(description) -> Tuple[str, str]:
         if pattern.search(key):
             return item, name
     return item, OTHER_CATEGORY
+
+
+# ============================================================
+# 幣別
+# ============================================================
+
+# 目前所有供應商 (印尼) 轉檔結果的 AMOUNT 都是印尼盾；帳單上的美金只出現
+# 在費用名稱裡 (例如 'FREIGHT CHARGE (USD 23.54)')，金額欄已經換成 IDR
+DEFAULT_CURRENCY = "IDR"
+# 個別供應商的金額幣別跟預設不同時加在這裡 (key：SUPPLIER 欄位轉大寫)
+SUPPLIER_CURRENCY: dict = {}
+
+_CURRENCY_RES = (
+    ("USD", re.compile(r"\bUSD\b|US\$|^\s*\$")),
+    ("IDR", re.compile(r"\bIDR\b|\bRP\.?", re.IGNORECASE)),
+    ("SGD", re.compile(r"\bSGD\b|S\$")),
+    ("EUR", re.compile(r"\bEUR\b|€")),
+    ("CNY", re.compile(r"\bCNY\b|\bRMB\b")),
+    ("TWD", re.compile(r"\bTWD\b|\bNTD?\$?")),
+)
+
+
+def detect_currency(amount_raw, supplier, default: str = DEFAULT_CURRENCY) -> str:
+    """金額幣別：金額文字帶幣別 (例如 'USD 1,234'、'Rp 50.000') 優先，
+    其次 SUPPLIER_CURRENCY，最後 default。"""
+    if isinstance(amount_raw, str):
+        for code, pattern in _CURRENCY_RES:
+            if pattern.search(amount_raw):
+                return code
+    sup = clean_text(supplier)
+    if sup and sup.upper() in SUPPLIER_CURRENCY:
+        return SUPPLIER_CURRENCY[sup.upper()]
+    return default
 
 
 # ============================================================

@@ -1,50 +1,54 @@
 # 費用分析系統 (expense_dashboard)
 
-把轉檔工具輸出的「辨識等級(高)」Excel 彙整成資料庫，給主管用網頁儀表板分析 2025–2026 年各項費用。
+把轉檔工具輸出的「辨識等級(高)」Excel 彙整成資料庫，給主管用網頁儀表板分析各項費用 (可換算 USD)。
 
-## 安裝
+## 給使用者：expense_dashboard.exe
+
+雙擊 `expense_dashboard.exe` → 自動打開瀏覽器顯示儀表板 (不用安裝 Python；程式只在自己電腦上執行，不對外開放)。
+黑色視窗是程式本身，關掉它就結束。第一次執行防毒軟體會先掃描，可能要等 1~2 分鐘。
+
+左側選單有兩頁：
+
+- **費用分析儀表板**：篩選、KPI、圖表、明細匯出 (CSV / Excel)。側邊欄「幣別」可切換 **換算 USD** (每月平均匯率或自訂固定匯率) 或 **原幣**。
+- **資料管理**：
+  1. 資料庫位置：指向要看的 `expenses.duckdb` (例如公司共用資料夾)，記在 EXE 旁邊的 `dashboard_config.json`。
+  2. 從轉檔結果更新資料：輸入資料夾、按「開始更新」(只處理新增/修改的 Excel)。
+  3. 匯率：一鍵抓 ECB 月平均匯率，或在表格裡手動修改 (手動的不會被自動更新覆蓋)。
+  4. 讀取失敗的檔案清單。
+
+### 資料怎麼佈署
+
+EXE 不含資料；資料是另一個檔案 `expenses.duckdb` (MAERSK 2025–2026 約 55 MB)。
+
+| 方式 | 做法 | 適合 |
+|---|---|---|
+| **共用資料夾 (建議)** | 把 `expenses.duckdb` 放在公司共用磁碟/NAS；每個人第一次開 EXE 時在「資料管理」指定一次路徑。資料由一人更新，大家看到的都是最新的。 | 團隊多人使用 |
+| **跟 EXE 一起發** | 資料夾裡放 `expense_dashboard.exe` + `data\expenses.duckdb`，壓縮後發給同事。EXE 預設就讀旁邊的 `data\expenses.duckdb`。 | 離線、少數人 |
+
+注意：拿到資料庫檔就能看到全部發票資料，只在公司內部流通，不要放進公開的 GitHub repo (repo 已 gitignore `data/`)。
+同一時間只能有一個人更新資料；更新期間其他人的儀表板會提示「資料庫正在更新中」，稍後重新整理即可。
+
+## 給維護者
 
 ```
 pip install -r requirements.txt
+streamlit run app.py                      # 開發時直接跑網頁
+python process_data.py "<轉檔結果所在資料夾>" [--supplier-folder MAERSK] [--full]
+python -m PyInstaller --noconfirm expense_dashboard.spec   # 打包 dist\expense_dashboard.exe
 ```
 
-## 第一階段：彙整資料 (process_data.py)
-
-```
-python process_data.py "D:\發票\02-Maersk Logistics Indonesia"
-python process_data.py <資料夾1> <資料夾2> --supplier-folder MAERSK
-python process_data.py <資料夾> --full --parquet data\expenses.parquet
-```
-
-- 掃描資料夾底下所有 `XXX-辨識等級(高)` 子資料夾裡的 Excel (略過轉檔總表與 `~$` 暫存檔)。
-- 多 process 平行讀檔、每 20,000 列寫入一次資料庫，記憶體用量固定 (實測 1 萬份約 16 秒)。
-- 增量更新：再跑一次只處理新增/修改的檔案；檔案被刪除或搬走時，它的明細會從資料庫移除。`--full` 整個重建。
-- 同一張發票 (供應商 + 發票號碼) 出現在好幾份 Excel 時只算一次 (其餘標 `is_duplicate`)。
-- 讀不了的檔案記在 `etl_files` 資料表與 `logs/expense_etl.log`，不中斷整批。
-- 結果存在 `data/expenses.duckdb` (`--db` 可改位置)。
-
-### 清洗規則 (expense_normalize.py)
-
-| 欄位 | 規則 |
+| 檔案 | 內容 |
 |---|---|
-| INVOICE DATE | `31.Aug.2026`、`2026-08-31`、`31/08/2026`、印尼文月份 (`9 Okt 2025`)、Excel 日期序號等都轉成標準日期，另存年份/月份 |
-| AMOUNT / VAT | 去掉 `Rp`/`IDR`、千分位 (`1.234.567` 或 `1,234,567`)、括號負數，轉成數值 |
-| Description | 轉大寫、去標點與追蹤號碼、展開縮寫 (THC、Doc、Chg…)，再對照 `EXPENSE_ALIASES` 合併成標準費用項目，並依關鍵字分到費用大類 (`EXPENSE_CATEGORIES`)；原始名稱保留在 `description_raw` |
-| 港口 | 統一大小寫 (`LOS ANGELES` → `Los Angeles`) |
+| `app.py` | 入口，切換兩個頁面 |
+| `dashboard.py` / `data_admin.py` | 儀表板頁 / 資料管理頁 |
+| `process_data.py` | 彙整 (多 process 讀檔、每 2 萬列寫入一次、增量更新、重複發票標記、更新匯率) |
+| `expense_normalize.py` | 清洗規則：日期、金額、幣別、費用名稱對照 (`EXPENSE_ALIASES`)、費用大類 (`EXPENSE_CATEGORIES`)、港口 |
+| `fx.py` | 匯率表與換算 USD 的 SQL |
+| `settings.py` | 路徑與設定檔 (EXE 時以 EXE 所在資料夾為準) |
+| `launcher.py` / `dashboard_deps.py` / `expense_dashboard.spec` | EXE 打包 |
 
-發現有同性質費用沒被合併時，在 `EXPENSE_ALIASES` 加一行對照，然後執行 `python process_data.py <資料夾> --full` 重建。
+### 幣別與匯率
 
-## 第二階段：儀表板 (app.py)
-
-```
-streamlit run app.py
-```
-
-- 側邊欄篩選：年份、供應商、費用大類、費用項目、啟運港、目的港、集團公司。
-- KPI：總費用金額、總 VAT、總發票數、平均每張發票金額，以及最新年份跟前一年**同期** (1 月到最新月份) 比較的增減率。
-- 圖表：費用項目排行榜、2025 vs 2026 月度趨勢、目的港 × 費用大類堆疊圖、航線排行。
-- 費用項目年度比較表 (各年金額、增減金額、增減率)。
-- 明細表格 (畫面顯示最新 2,000 筆) 與匯出全部符合條件的明細 (CSV / Excel)。
-
-資料庫在別的位置時，可以在側邊欄輸入路徑，或設定環境變數 `EXPENSE_DB`。
-儀表板只用唯讀連線讀資料庫，開著時也可以同時跑 process_data.py 更新資料。
+- 每筆明細記錄原幣別：金額文字帶幣別 (USD、Rp…) 就用它，否則用 `SUPPLIER_CURRENCY`，再沒有就用預設 IDR (目前 18 家印尼供應商的轉檔結果金額都是 IDR)。
+- 匯率表 `fx_rates`：每幣別每月一筆「1 USD = ?」，來源為歐洲央行 (Frankfurter API) 每日參考匯率的月平均；只送出幣別與日期，不送任何發票資料。當月沒有匯率時用最近一個月。
+- 修改費用名稱對照規則後要「完整重建」(`--full`)；完整重建會開新檔 (避免資料庫越用越大)，手動輸入的匯率會保留。
