@@ -79,9 +79,9 @@ _OPTIONAL_FORMAT_RULES = (
 # 正確答案裡常見的「不適用」佔位字元，視同空值 (不算缺漏，也不做格式檢查)
 _PLACEHOLDERS = {"-", "--", "/"}
 
-# 已知的「原帳單本身的問題」：使用者核對過原帳單，確認不是擷取錯誤。驗證時
-# 照常標示 (仍算 WARN、Excel 照樣反紅)，但在說明後面註記屬原帳單問題，查核
-# 時不必再回頭懷疑擷取規則。
+# 已知的「原帳單本身的問題」：使用者核對過原帳單，確認不是擷取錯誤。使用者
+# 規定原帳單的問題不標示為 WARN、不反紅：改成 INFO (只當附註、不扣信心分數、
+# 不影響信心等級)，說明後面註記屬原帳單問題。
 #   供應商 key -> {(欄位代碼, 規則代碼): (說明, 只在這些原始值時才算；None=不限)}
 KNOWN_SOURCE_ISSUES: Dict[str, Dict[Tuple[str, str], Tuple[str, Optional[set]]]] = {
     "MAERSK": {
@@ -187,8 +187,9 @@ def _check_header(row: Dict) -> List[Dict]:
 
 def _mark_known_source_issues(issues: List[Dict], supplier_key: Optional[str],
                               row: Dict) -> List[Dict]:
-    """符合 KNOWN_SOURCE_ISSUES 的問題，在說明後面註記屬原帳單問題 (另帶
-    known_source_issue=True)，嚴重度不變。回傳新的 list，不改動原本的 dict。"""
+    """符合 KNOWN_SOURCE_ISSUES 的問題改成 INFO，說明後面註記屬原帳單問題
+    (另帶 known_source_issue=True，_confidence() 不扣分)。回傳新的 list，
+    不改動原本的 dict。"""
     known = KNOWN_SOURCE_ISSUES.get(supplier_key or "", {})
     if not known:
         return issues
@@ -198,7 +199,7 @@ def _mark_known_source_issues(issues: List[Dict], supplier_key: Optional[str],
         if entry:
             note, only_values = entry
             if only_values is None or str(row.get(issue["field"], "")).strip() in only_values:
-                issue = dict(issue, known_source_issue=True,
+                issue = dict(issue, severity=INFO, known_source_issue=True,
                              message=f"{issue['message']}（{note}，屬原帳單問題，非擷取錯誤）")
         marked.append(issue)
     return marked
@@ -276,7 +277,9 @@ def _check_audit(audit: Optional[Dict], supplier_key: Optional[str]) -> List[Dic
 
 
 def _confidence(issues: List[Dict]) -> float:
-    score = 1.0 - sum(_SEVERITY_PENALTY[i["severity"]] for i in issues)
+    # 已知原帳單問題不是擷取錯誤，不扣分
+    score = 1.0 - sum(_SEVERITY_PENALTY[i["severity"]] for i in issues
+                      if not i.get("known_source_issue"))
     return round(max(score, 0.0), 2)
 
 

@@ -900,8 +900,8 @@ def parse_indoprostime_transport(text: str) -> Dict:
 # 已知原帳單問題 (使用者核對原帳單確認，不是擷取錯誤，不要改規則去「修」)：
 #   - ETA 本身印的就是「--」：Arrive Date 照原樣擷取成 "--"。
 #   - ETA 早於 ETD。
-# 這兩項登記在 validation_streamlit.KNOWN_SOURCE_ISSUES，驗證時會註記
-# 「屬原帳單問題」。
+# 這兩項登記在 validation_streamlit.KNOWN_SOURCE_ISSUES，驗證時只當附註
+# (INFO，不反紅、不影響信心等級)，並註記「屬原帳單問題」。
 
 def detect_maersk(text: str) -> bool:
     """注意：不能只看 'MAERSK' 這個字，因為其他供應商(例如 PANCARAN)的帳單
