@@ -30,6 +30,7 @@ import sys
 import json
 import math
 import datetime
+from collections import OrderedDict
 from typing import Callable, Dict, List, Optional, Tuple
 
 import pdfplumber
@@ -174,15 +175,11 @@ def extract_text_from_pdf(pdf_path: str, **pdfplumber_kwargs) -> str:
     y_tolerance、layout。不同供應商/不同份 PDF 的版面留白不盡相同，同一組
     參數不一定每份都是最佳解，因此開放參數化，讓 find_best_extraction()
     可以多試幾組，挑出效果最好的。
+
+    全文 = 各頁文字 (extract_pages_from_pdf()) 用換行合併，兩者共用同一份
+    快取，同一份 PDF 不管先呼叫哪一支都只解析一次。
     """
-    parts = []
-    with pdfplumber.open(pdf_path) as pdf:
-        for i, page in enumerate(pdf.pages):
-            text = page.extract_text(**pdfplumber_kwargs) or ""
-            if not text.strip():
-                text = _ocr_page_text(pdf_path, i, page)
-            parts.append(text)
-    return "\n".join(parts)
+    return "\n".join(extract_pages_from_pdf(pdf_path, **pdfplumber_kwargs))
 
 
 _OCR_ENHANCED_TEXT_CACHE: Dict[Tuple[str, int], str] = {}
@@ -278,11 +275,37 @@ def _page_is_scanned_image(page, coverage_threshold: float = 0.9) -> bool:
     return False
 
 
+# 同一份 PDF 在一次轉檔裡會被讀好幾次 (擷取 parse_invoice_pdf()、金額稽核
+# audit_invoice_totals()、稅務發票判斷 standalone_tax_invoice_owner()、
+# multi_page 供應商逐頁擷取)。pdfplumber 解析是整個流程最慢的一步 (實測
+# MAERSK 每份約 180ms，佔總時間 4 成以上是在重複解析)，所以把每頁文字快取
+# 起來，同一份 PDF 只解析一次。只留最近幾份，批次處理上萬份也不會佔記憶體；
+# key 含檔案修改時間與大小，同一路徑換成別的檔案 (例如網頁上傳的暫存檔)
+# 不會讀到舊內容。
+_PAGES_CACHE: "OrderedDict[tuple, List[str]]" = OrderedDict()
+_PAGES_CACHE_SIZE = 8
+
+
+def _pages_cache_key(pdf_path: str, pdfplumber_kwargs: Dict) -> tuple:
+    try:
+        st = os.stat(pdf_path)
+        identity = (st.st_mtime_ns, st.st_size)
+    except OSError:
+        identity = None
+    kwargs = tuple(sorted((k, repr(v)) for k, v in pdfplumber_kwargs.items()))
+    return os.path.abspath(pdf_path), identity, kwargs
+
+
 def extract_pages_from_pdf(pdf_path: str, **pdfplumber_kwargs) -> List[str]:
     """跟 extract_text_from_pdf() 一樣，但個別回傳『每一頁』的文字 (不合併成
     一個字串)。給 multi_page 供應商 (一份 PDF 裡有好幾張各自獨立的發票，
     一頁一張) 逐頁辨識/擷取用。同樣會對沒有文字層的頁面自動改用 OCR。
     """
+    key = _pages_cache_key(pdf_path, pdfplumber_kwargs)
+    if key in _PAGES_CACHE:
+        _PAGES_CACHE.move_to_end(key)
+        return list(_PAGES_CACHE[key])
+
     pages_text = []
     with pdfplumber.open(pdf_path) as pdf:
         for i, page in enumerate(pdf.pages):
@@ -290,7 +313,11 @@ def extract_pages_from_pdf(pdf_path: str, **pdfplumber_kwargs) -> List[str]:
             if not text.strip():
                 text = _ocr_page_text(pdf_path, i, page)
             pages_text.append(text)
-    return pages_text
+
+    _PAGES_CACHE[key] = pages_text
+    while len(_PAGES_CACHE) > _PAGES_CACHE_SIZE:
+        _PAGES_CACHE.popitem(last=False)
+    return list(pages_text)
 
 
 def _generate_extraction_configs(max_attempts: int = 100) -> List[Dict]:
