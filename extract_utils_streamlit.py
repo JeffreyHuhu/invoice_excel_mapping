@@ -391,6 +391,149 @@ def sheet_text(name: str, rows: List[list]) -> str:
     return "\n".join(lines)
 
 
+def excel_formula_issues(path: str) -> Optional[List[Dict]]:
+    """檢查 Excel 帳單 (xlsx) 顯示中工作表的合計公式：欄位自己的直向
+    =SUM(X3:X259) 範圍，有沒有漏掉下面的明細列 (例如明細到第 277 列，合計
+    只加到第 259 列)。回傳問題清單 (同一列、同一個漏算範圍的欄合併成一筆)：
+      {"sheet", "row", "end", "last", "formula", "missing": {欄: 漏算金額}}
+    .xls 舊格式讀不到公式，回傳 None (呼叫端顯示「無法檢查」)。"""
+    if not str(path).lower().endswith((".xlsx", ".xlsm")):
+        return None
+    from openpyxl import load_workbook as _load
+    from openpyxl.utils import column_index_from_string
+
+    sum_re = re.compile(r"^=SUM\(\$?([A-Z]{1,3})\$?(\d+):\$?([A-Z]{1,3})\$?(\d+)\)$", re.I)
+    values = dict(read_spreadsheet(path).sheets)
+    wb = _load(path, read_only=True, data_only=False)
+    issues: List[Dict] = []
+    try:
+        for ws in wb.worksheets:
+            if ws.sheet_state != "visible" or ws.title not in values:
+                continue
+            filled: Dict[str, List[int]] = {}   # 欄 -> 有內容的列號
+            sums = []                           # (列, 欄, 起, 迄, 公式)
+            for row in ws.iter_rows():
+                for cell in row:
+                    v = getattr(cell, "value", None)
+                    if v is None or v == "":
+                        continue
+                    col = cell.column_letter
+                    filled.setdefault(col, []).append(cell.row)
+                    m = sum_re.match(v) if isinstance(v, str) else None
+                    if m and m.group(1).upper() == m.group(3).upper() == col:
+                        sums.append((cell.row, col, int(m.group(2)), int(m.group(4)), v))
+            grid = values[ws.title]
+            grouped: Dict[tuple, Dict] = {}
+            for f_row, col, start, end, formula in sums:
+                data_rows = [r for r in filled.get(col, []) if start <= r < f_row]
+                last = max(data_rows, default=end)
+                if last <= end:
+                    continue
+                c = column_index_from_string(col) - 1
+                missing = 0.0
+                for r in range(end + 1, last + 1):
+                    v = grid[r - 1][c] if r - 1 < len(grid) and c < len(grid[r - 1]) else None
+                    if isinstance(v, (int, float)) and not isinstance(v, bool):
+                        missing += v
+                g = grouped.setdefault((f_row, end, last), {
+                    "sheet": ws.title, "row": f_row, "end": end, "last": last,
+                    "formula": formula, "missing": {}})
+                g["missing"][col] = missing
+            issues.extend(grouped.values())
+    finally:
+        wb.close()
+    return issues
+
+
+def format_formula_issue(issue: Dict) -> str:
+    """公式問題 -> 說明文字 (給驗證異常、轉檔總表、查驗結果用)。"""
+    cols = list(issue["missing"])
+    amounts = "、".join(f"{c} 欄 {v:,.2f}" for c, v in issue["missing"].items() if v)
+    return (f"Excel 合計列公式漏算：[{issue['sheet'].strip()}] 第 {issue['row']} 列 "
+            f"{'/'.join(cols)} 欄 (例 {issue['formula']}) 只加到第 {issue['end']} 列，"
+            f"明細到第 {issue['last']} 列，第 {issue['end'] + 1}~{issue['last']} 列沒算進合計"
+            + (f"；漏算 {amounts}" if amounts else ""))
+
+
+# ---------------------------------------------------------------------------
+# 2c. 非英文文字加英文備註 (使用者最高原則：擷取出來不是英文就要加英文翻譯)
+# ---------------------------------------------------------------------------
+# 只在「寫入轉檔結果 Excel」時套用 (跟日期格式一樣)，不改 parse 結果，比對
+# 正確答案與回歸測試不受影響。比對用「去掉聲調、轉大寫」的文字；先套整句
+# 對照，再套詞組對照；越南文沒有對照的部分至少附上去聲調拼音。新詞直接加進
+# 下面兩個表即可。
+
+TEXT_NOTE_FIELDS = ("supplier", "consignee", "description", "port_of_loading",
+                    "port_of_discharge", "shipper", "vessel")
+
+# 整句對照 (公司名稱等)
+_EN_FULL = {
+    "CONG TY TNHH GIAO NHAN THUONG MAI RONG A CHAU":
+        "Rong A Chau Trading Forwarding Co., Ltd. / Asia Dragon Cargo",
+    "CONG TY TNHH DICH VU GIAO NHAN VAN TAI VA THUONG MAI CONG THANH":
+        "Cong Thanh Forwarding, Transport and Trading Service Co., Ltd.",
+    "CONG TY TRACH NHIEM HUU HAN POU SUNG VIET NAM": "Pou Sung Vietnam Co., Ltd.",
+}
+# 詞組對照 (由長到短套用；越南文、印尼文常見帳單用語)
+_EN_PHRASES = (
+    # 越南文
+    ("PHU PHI XANG DAU", "Fuel surcharge"), ("PHI VAN CHUYEN", "Transportation fee"),
+    ("PHI DICH VU", "Service fee"), ("PHAT SINH", "Incurred charge"),
+    ("PT HA BAI SOM", "Early drop-off fee"), ("NANG HA", "Lift on/off"),
+    ("LUU BAI", "Storage"), ("LUU CONT", "Container detention"),
+    # 印尼文
+    ("TOTAL BIAYA EKSTERNAL", "Total external cost"), ("TOTAL BIAYA REIMBURSEMENT",
+                                                       "Total reimbursement cost"),
+    ("BIAYA LOKASI BELUM OPEN", "Location-not-yet-open fee"),
+    ("BIAYA SEGEL CONTAINER", "Container seal fee"), ("BIAYA SEWA MOBIL", "Car rental fee"),
+    ("BIAYA PENUMPUKAN", "Storage (stacking) fee"), ("BIAYA LOLO", "LOLO fee"),
+    ("BIAYA EXTERNAL", "External cost"), ("BIAYA EKSTERNAL", "External cost"),
+    ("JASA TRANSPORTASI", "Transportation service"), ("JASA PPJK", "Customs broker (PPJK) service"),
+    ("JASA HANDLING", "Handling service"), ("GUDANG FEE", "Warehouse fee"),
+    ("FIAT DOKUMEN", "Document approval"), ("ADMINISTRASI", "Administration"),
+    ("MATERAI", "Stamp duty"), ("NON PPH", "excl. income tax (PPh)"),
+    ("BIAYA", "Fee"), ("JASA", "Service"), ("GUDANG", "Warehouse"),
+)
+_EN_PHRASE_RES = tuple((re.compile(rf"(?<![A-Z]){re.escape(k)}(?![A-Z])"), v)
+                       for k, v in sorted(_EN_PHRASES, key=lambda kv: -len(kv[0])))
+
+
+def _strip_tones(text: str) -> str:
+    import unicodedata
+    text = text.replace("Đ", "D").replace("đ", "d")
+    return "".join(ch for ch in unicodedata.normalize("NFKD", text)
+                   if not unicodedata.combining(ch))
+
+
+def english_note(value):
+    """不是英文的文字後面加上英文翻譯括號備註，例如
+    'PHỤ PHÍ XĂNG DẦU UP 15%' -> 'PHỤ PHÍ XĂNG DẦU UP 15% (Fuel surcharge UP 15%)'。
+    已經是英文 (或對照表沒有、也沒有越南文聲調) 就原樣回傳；已經有同樣備註
+    的不重複加。"""
+    if not isinstance(value, str) or not value.strip() or value == NA:
+        return value
+    plain = _strip_tones(value)
+    key = re.sub(r"\s+", " ", plain).strip().upper()
+    english = _EN_FULL.get(key)
+    if english is None:
+        translated, used = key, []
+        for pattern, repl in _EN_PHRASE_RES:
+            if pattern.search(translated):
+                translated = pattern.sub(repl, translated)
+                used.append(repl)
+        # 已經帶英文備註 (例如 'Nang ha (Lift on/off)') 就不重複加
+        if used and all(u.upper() in value.upper() for u in used):
+            return value
+        if used:
+            english = translated
+        elif plain != value:
+            # 越南文地名等沒有對照的：附上去聲調的拼音
+            english = re.sub(r"\s+", " ", plain).strip().title()
+    if not english or english.upper() in value.upper():
+        return value
+    return f"{value} ({english})"
+
+
 def _generate_extraction_configs(max_attempts: int = 100) -> List[Dict]:
     """產生一組(最多 max_attempts 個)不同的 pdfplumber 擷取參數組合，
     給「重新嘗試擷取」的迴圈依序測試。第一組永遠是預設值 (最常見、最快)，
@@ -1679,6 +1822,8 @@ def build_excel(
             cell_a.font = red_bold_font
         for idx, code in enumerate(FIELD_CODES, start=2):
             raw_value = row.get(code, NA)
+            if code in TEXT_NOTE_FIELDS:
+                raw_value = english_note(raw_value)  # 非英文加英文備註
             cell = ws.cell(row=r, column=idx, value=raw_value)
             if code in DATE_FIELD_CODES:
                 date_value = _coerce_to_date(raw_value)

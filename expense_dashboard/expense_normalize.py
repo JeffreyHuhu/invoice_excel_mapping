@@ -349,6 +349,9 @@ def detect_currency(amount_raw, supplier, default: str = DEFAULT_CURRENCY) -> st
             if pattern.search(amount_raw):
                 return code
     sup = clean_text(supplier)
+    if sup:
+        # 轉檔結果會在非英文名稱後面加英文括號備註，比對時去掉
+        sup = re.sub(r"\s*\([^()]*\)\s*$", "", sup)
     if sup and sup.upper() in SUPPLIER_CURRENCY:
         return SUPPLIER_CURRENCY[sup.upper()]
     return default

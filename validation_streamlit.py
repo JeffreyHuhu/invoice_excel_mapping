@@ -192,6 +192,26 @@ def _check_header(row: Dict) -> List[Dict]:
     return issues
 
 
+# Excel 帳單的合計列公式錯誤 (呼叫端檢查後放進 extra_issues，見
+# extract_utils.excel_formula_issues())
+RULE_EXCEL_FORMULA = "EXCEL_FORMULA_RANGE"
+
+
+def _explain_by_formula_issue(issues: List[Dict]) -> List[Dict]:
+    """Excel 帳單的查驗順序：先查 Excel 公式，再查每票，最後查整份帳單合計。
+    已經查到合計列公式錯誤時，整份帳單合計對不上就是這個錯誤造成的：保留
+    公式錯誤 (ERROR)，合計不一致改成 INFO 並註明原因，不重複算成兩個錯誤。"""
+    if not any(i["rule"] == RULE_EXCEL_FORMULA for i in issues):
+        return issues
+    explained = []
+    for issue in issues:
+        if issue["rule"] == "TOTAL_FINAL_MISMATCH":
+            issue = dict(issue, severity=INFO,
+                         message=f"{issue['message']}（原因：帳單 Excel 合計列公式漏算，見公式錯誤）")
+        explained.append(issue)
+    return explained
+
+
 def _mark_known_source_issues(issues: List[Dict], supplier_key: Optional[str],
                               row: Dict) -> List[Dict]:
     """符合 KNOWN_SOURCE_ISSUES 的問題改成 INFO，說明後面註記屬原帳單問題
@@ -334,6 +354,7 @@ def validate_extraction(
         issues.extend(_check_header(group_rows[0]))
         issues.extend(_check_items(group_rows))
         issues.extend(_check_audit(audit_by_invoice.get(inv_key), supplier_key))
+        issues = _explain_by_formula_issue(issues)
         issues = _mark_known_source_issues(issues, supplier_key, group_rows[0])
         confidence = _confidence(issues)
         results.append({
