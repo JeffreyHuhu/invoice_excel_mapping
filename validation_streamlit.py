@@ -275,7 +275,8 @@ def _check_audit(audit: Optional[Dict], supplier_key: Optional[str]) -> List[Dic
     checks = (
         ("match", "diff", "TOTAL_NET_MISMATCH", "費用加總 (未稅) 與帳單未稅總額不一致"),
         ("grand_match", "grand_diff", "TOTAL_GRAND_MISMATCH", "未稅 + 稅額與帳單含稅總額不一致"),
-        ("final_match", "final_diff", "TOTAL_FINAL_MISMATCH", "含稅 - 代扣稅與帳單實付金額不一致"),
+        ("final_match", "final_diff", "TOTAL_FINAL_MISMATCH",
+         "含稅 - 代扣稅與帳單實付金額 (Excel 帳單為表格合計列) 不一致"),
     )
     for match_key, diff_key, rule, message in checks:
         if audit.get(match_key) is False:

@@ -507,7 +507,8 @@ def register_supplier(key: str, label: str,
     (不適用的項目給 None)，audit_invoice_totals() 拿來跟擷取到的明細加總勾稽；
     可另帶 "grand_tolerance" / "final_tolerance" 放寬含稅總額 / 實付金額的容許
     誤差 (預設 ±1)。invoice_no 給
-    None 代表「整份檔案的合計」，用全部明細勾稽並套用到檔案裡的每張發票。
+    None 代表「整份檔案的合計」，用全部明細勾稽並套用到檔案裡的每張發票；
+    同時也有該發票自己的合計時，含稅總額 (grand) 以發票自己的為準。
 
     extract_total (可選)：從『一張發票』的原始文字裡抓出帳單本身寫的
     『未稅總額』(Total (Excl. VAT) / Sub Total / SUBTOTAL / Net value… /
@@ -1289,19 +1290,33 @@ def audit_invoice_totals(
         # Excel 帳單：總額直接取自帳單本身的合計列 (sheet_totals)，依
         # invoice_no 對回擷取到的明細
         groups = _group_rows_by_invoice(rows)
+        whole = None
+        per_invoice: Dict[str, Dict] = {}
         for t in sheet_totals_fn(read_spreadsheet(pdf_path)):
             args = (t.get("total"), t.get("grand_total"), t.get("final_total"),
                     t.get("grand_tolerance", 1), t.get("final_tolerance", 1))
             if t.get("invoice_no") is None:
-                # 帳單只有整份檔案的合計 (沒有每張發票的合計)：用全部明細勾稽，
-                # 結果套用到檔案裡的每張發票
+                # 整份檔案的合計 (例如表格最後的合計列)：用全部明細勾稽
                 whole = _build_result(rows, *args)
-                results.extend({**whole, "invoice_no": g[0].get("invoice_no", NA)}
-                               for g in groups.values() if g)
                 continue
-            group_rows = groups.get(normalize_value(t.get("invoice_no"))) or []
-            if group_rows:
-                results.append(_build_result(group_rows, *args))
+            key = normalize_value(t.get("invoice_no"))
+            if groups.get(key):
+                per_invoice[key] = _build_result(groups[key], *args)
+        # 每張發票的結果：有整份檔案的勾稽就套用到每張發票；這張發票自己的
+        # 含稅總額勾稽 (grand_*) 優先 (例如 RỒNG Á CHÂU：每張發票的費用 +
+        # VAT PASS THROUGH = 該發票的 TOTAL)
+        for key, group_rows in groups.items():
+            if not group_rows:
+                continue
+            own = per_invoice.get(key)
+            if whole is None and own is None:
+                continue
+            result = dict(whole or own)
+            if whole is not None and own is not None:
+                result.update({k: own[k] for k in ("vat_sum", "grand_total", "grand_diff",
+                                                     "grand_match")})
+            result["invoice_no"] = group_rows[0].get("invoice_no", NA)
+            results.append(result)
         return results
 
     if entry.get("multi_page"):

@@ -5405,8 +5405,12 @@ def _rac_table(rows: List[list]):
         or (groups[j] == "PHI VAN CHUYEN" and sub[j] == "THANH TIEN")
         or (groups[j] == "PHI DICH VU" and sub[j] == "DON GIA")}
     billing = [j for j in range(charges[0][0], width) if j not in skip and j not in vat_cols]
+    # 每列的總金額欄 (費用 + VAT PASS THROUGH)：進口 TOTAL、IKEA 出口 TỔNG CỘNG；
+    # 空運出口沒有這一欄
+    row_total = next((j for j in range(width - 1, block_start - 1, -1)
+                      if labels[j] in ("TOTAL", "TỔNG CỘNG")), None)
     return {"head": head, "meta": meta, "charges": charges, "vat_cols": vat_cols,
-            "billing": billing, "sub_header": is_sub}
+            "billing": billing, "sub_header": is_sub, "row_total": row_total}
 
 
 def _rac_volume(row: list, meta: Dict[str, int], kind: str) -> Optional[str]:
@@ -5424,8 +5428,9 @@ def _rac_volume(row: list, meta: Dict[str, int], kind: str) -> Optional[str]:
     return f"{_vn_text(kgs)} KG" if kgs else None
 
 
-def _rac_parse_sheet(name: str, rows: List[list]) -> Optional[Tuple[List[Dict], float, float]]:
-    """一個工作表 -> (items, 合計列的費用合計, 合計列的 VAT 合計)。"""
+def _rac_parse_sheet(name: str, rows: List[list]):
+    """一個工作表 -> (items, 合計列的費用合計, 合計列的 VAT 合計,
+    {發票號: 該發票各列 TOTAL 的加總，有任何一列沒填 TOTAL 時為 None})。"""
     table = _rac_table(rows)
     if table is None:
         return None
@@ -5434,6 +5439,7 @@ def _rac_parse_sheet(name: str, rows: List[list]) -> Optional[Tuple[List[Dict], 
     start = table["head"] + (2 if table["sub_header"] else 1)
     items: List[Dict] = []
     total = vat_total = 0.0
+    invoice_totals: Dict[str, Optional[float]] = {}
     last_port = None
     for row in rows[start:]:
         invoice_no = _vn_text(_vn_cell(row, meta.get("invoice_no")))
@@ -5446,6 +5452,13 @@ def _rac_parse_sheet(name: str, rows: List[list]) -> Optional[Tuple[List[Dict], 
                 vat_total = sum(_vn_num(_vn_cell(row, j)) or 0 for j in table["vat_cols"])
                 break
             continue
+        if table["row_total"] is not None:
+            row_total = _vn_num(_vn_cell(row, table["row_total"]))
+            has_charge = any(_vn_num(_vn_cell(row, j)) for j, _ in table["charges"])
+            if row_total is None and has_charge:
+                invoice_totals[invoice_no] = None  # 這張發票有列沒填 TOTAL，無法勾稽
+            elif invoice_no not in invoice_totals or invoice_totals[invoice_no] is not None:
+                invoice_totals[invoice_no] = (invoice_totals.get(invoice_no) or 0) + (row_total or 0)
         date_cd = _vn_date(_vn_cell(row, meta.get("date_cd")))
         shared = {
             "invoice_no": invoice_no,
@@ -5472,24 +5485,28 @@ def _rac_parse_sheet(name: str, rows: List[list]) -> Optional[Tuple[List[Dict], 
             vat = sum(_vn_num(_vn_cell(row, j)) or 0 for j in table["vat_cols"])
             items.append({"description": "VAT" if kind == "lcl_import" else "VAT PASS THROUGH",
                           "amount": None, "vat": vat or None, **shared})
-    return items, total, vat_total
+    return items, total, vat_total, invoice_totals
 
 
 def _rac_parse_book(book) -> Optional[Dict]:
     """所有顯示中工作表的明細合併成一組 (每列各自帶 INVOICE NO)。"""
     items: List[Dict] = []
     total = vat_total = 0.0
+    invoice_totals: Dict[str, Optional[float]] = {}
     for name, rows in book.sheets:
         parsed = _rac_parse_sheet(name, rows)
         if parsed:
             items.extend(parsed[0])
             total += parsed[1]
             vat_total += parsed[2]
+            for inv, value in parsed[3].items():
+                known = invoice_totals.get(inv, 0.0)
+                invoice_totals[inv] = None if value is None or known is None else known + value
     if not items:
         return None
     header = {"invoice_date": None, "supplier": _RAC_SUPPLIER,
               "consignee": _rac_consignee(book.path)}
-    return {"header": header, "items": items,
+    return {"header": header, "items": items, "invoice_totals": invoice_totals,
             "totals": {"total": total, "grand_total": total + vat_total}}
 
 
@@ -5499,12 +5516,18 @@ def parse_rong_a_chau_sheets(book) -> List[Dict]:
 
 
 def _rong_a_chau_totals(book) -> List[Dict]:
-    """整份檔案一組合計 (invoice_no=None：核心會套用到檔案裡的每張發票)。"""
+    """勾稽 (使用者規定的查驗方式)：同一張發票的所有費用 + VAT PASS THROUGH =
+    該發票的 TOTAL (各列 TOTAL 加總，含稅總額 grand_total)。另外保留整份檔案
+    逐欄「明細加總 = 表格合計列」(invoice_no=None：未稅 total 與含稅 final_total)，
+    抓得到合計列公式範圍漏算這類問題。空運出口沒有 TOTAL 欄，只有整份檔案勾稽。"""
     parsed = _rac_parse_book(book)
     if not parsed:
         return []
-    return [{"invoice_no": None, "total": parsed["totals"]["total"],
-             "grand_total": parsed["totals"]["grand_total"], "final_total": None}]
+    net, gross = parsed["totals"]["total"], parsed["totals"]["grand_total"]
+    entries = [{"invoice_no": None, "total": net, "grand_total": None, "final_total": gross}]
+    entries += [{"invoice_no": inv, "total": None, "grand_total": value, "final_total": None}
+                for inv, value in parsed["invoice_totals"].items() if value is not None]
+    return entries
 
 
 register_supplier(
