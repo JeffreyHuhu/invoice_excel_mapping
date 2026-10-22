@@ -24,7 +24,6 @@ register_supplier() 呼叫順序的後面，因為 detect_supplier() 是依序�
 import os
 import re
 import datetime
-import unicodedata
 from typing import Dict, List, Optional, Tuple
 
 from extract_utils_streamlit import register_supplier, set_supplier_number
@@ -5061,36 +5060,19 @@ def _vn_container(value) -> Optional[str]:
 #      同車第一筆)，0 元列不轉；最後 Total、VAT: (8%)、Grand total；簽核欄
 #      "CONG THANH 15/09/2026" 是對帳單日期。
 #   2. 「…-CHI HO.xls(x)」：代墊款 INVOICE LIST (第三方發票，例如 "Nang ha"
-#      吊櫃上下)，每筆代墊自帶 VAT 欄 (每品項自帶 VAT)，同一張第三方發票分攤
-#      到好幾筆出貨時，後面的出貨只列 INV/報關單號、沒有金額，不轉 (使用者
-#      答案也只取第一筆 INV，報關單號不填)；合計列 "TỔNG CỘNG"。
-#      越南文的費用名稱 (Nội dung) 要加英文備註，例如 "Nang ha (Lift on/off)"。
-#      勾稽 (使用者提示)：各列 AMOUNT + VAT = 該列 TOTAL；TỔNG CỘNG 是三欄各自
-#      的合計。帳單 TỔNG CỘNG 的 VAT 常是「未稅合計 × 8%」，跟逐列四捨五入的
-#      VAT 加總會有幾元尾差，容許每列 0.5。
+#      吊櫃上下)，每筆代墊自帶 VAT 欄 (每品項自帶 VAT)。同一張第三方發票分攤
+#      到好幾筆出貨時，後面的出貨只列 INV / 報關單號 (Tờ khai)、沒有金額。
+#      欄位對應 (使用者答案 test_samples/CONG_THANH/sample1)：每張第三方發票
+#      各一張發票，INVOICE NO = Số Hóa đơn、INVOICE DATE = Ngày、Order No. =
+#      這張發票所有的 INV、B/L NO. 與 MBL NO. = 所有報關單號 (逗號連接)；
+#      合計列 "TỔNG CỘNG"。越南文費用名稱的英文備註在寫入轉檔結果時才加
+#      (extract_utils.english_note())。
+#      勾稽 (使用者提示)：每張發票 AMOUNT + VAT = 該列 TOTAL；TỔNG CỘNG 是三欄
+#      各自的合計。帳單 TỔNG CỘNG 的 VAT 常是「未稅合計 × 8%」，跟逐列四捨五入
+#      的 VAT 加總會有幾元尾差，容許每列 0.5。
 # 辨識：賣方稅籍編號 0301434547。
 
 _CONG_THANH_TAX_ID = "0301434547"
-
-# 代墊款越南文費用名稱 (去掉聲調、轉小寫後比對) -> 英文備註；沒列到的照抄
-_CT_EN_NOTES = {
-    "nang ha": "Lift on/off",
-    "pt ha bai som": "Early drop-off fee",
-    "luu bai": "Storage",
-    "luu cont": "Container detention",
-    "ve sinh cont": "Container cleaning",
-    "phi cssh": "Port infrastructure fee",
-}
-
-
-def _ct_with_english(content: str) -> str:
-    """'Nang ha' -> 'Nang ha (Lift on/off)'；已經有括號備註或不認得的照抄。"""
-    if not content or "(" in content:
-        return content
-    key = "".join(ch for ch in unicodedata.normalize("NFKD", content.replace("Đ", "D").replace("đ", "d"))
-                  if not unicodedata.combining(ch))
-    note = _CT_EN_NOTES.get(re.sub(r"\s+", " ", key).strip().lower())
-    return f"{content} ({note})" if note else content
 
 
 def detect_cong_thanh(text: str) -> bool:
@@ -5186,30 +5168,46 @@ def _ct_paid_on_behalf(rows: List[list]) -> Optional[Dict]:
         return None
     c_content, c_net, c_vat = cols.get("NỘI DUNG"), cols.get("TIỀN TRƯỚC THUẾ"), cols.get("VAT")
     c_total, c_inv, c_cont = cols.get("TOTAL"), cols.get("INV"), cols.get("CONT")
-    items = []
+    c_date, c_no, c_decl = cols.get("NGÀY"), cols.get("SỐ HÓA ĐƠN"), cols.get("TỜ KHAI")
+    items: List[Dict] = []
+    row_totals: Dict[str, float] = {}
     total = bill_total = None
-    line_totals = 0.0
     for row in rows[head_i + 1:]:
         if _vn_label(_vn_cell(row, 0)).startswith("TỔNG"):
             total, bill_total = _vn_num(_vn_cell(row, c_net)), _vn_num(_vn_cell(row, c_total))
             break
+        inv = _vn_text(_vn_cell(row, c_inv))
+        decl = _vn_text(_vn_cell(row, c_decl))
         amount = _vn_amount(_vn_cell(row, c_net))
         if amount is None:
-            continue  # 同一張第三方發票分攤到的其他出貨，只列單號沒有金額
-        line_totals += _vn_num(_vn_cell(row, c_total)) or 0
+            # 同一張第三方發票分攤到的其他出貨：只列 INV / 報關單號，併進上一張發票
+            if items:
+                for key, value in (("orders", inv), ("decls", decl)):
+                    if value and value not in items[-1][key]:
+                        items[-1][key].append(value)
+            continue
+        invoice_no = _vn_text(_vn_cell(row, c_no)) or header["invoice_no"]
+        row_totals[invoice_no] = row_totals.get(invoice_no, 0.0) + (_vn_num(_vn_cell(row, c_total)) or 0)
         items.append({
-            "description": _ct_with_english(_vn_text(_vn_cell(row, c_content))) or None,
+            "invoice_no": invoice_no,
+            "invoice_date": _vn_date(_vn_cell(row, c_date)) or header["invoice_date"],
+            "description": _vn_text(_vn_cell(row, c_content)) or None,
             "amount": amount, "vat": _vn_amount(_vn_cell(row, c_vat)),
-            "order_no": _vn_text(_vn_cell(row, c_inv)) or None,
             "container_no": _vn_container(_vn_cell(row, c_cont)),
+            "orders": [inv] if inv else [], "decls": [decl] if decl else [],
         })
-    # 勾稽三層：未稅合計 = TỔNG CỘNG 的未稅；明細 AMOUNT + VAT = 各列 TOTAL 的
-    # 加總 (含稅總額，±1)；明細 AMOUNT + VAT = TỔNG CỘNG 的 TOTAL (實付金額，
-    # 容許逐列四捨五入每列 0.5，超過就是帳單本身合計列的稅額不一致)
-    return {"header": header, "items": items,
-            "totals": {"total": total, "grand_total": round(line_totals, 2),
-                       "final_total": bill_total,
-                       "final_tolerance": max(1.0, 0.5 * len(items))}}
+    for item in items:
+        # Order No. = 這張發票的所有 INV；B/L NO. 與 MBL NO. = 所有報關單號 (Tờ khai)
+        item["order_no"] = ",".join(item.pop("orders")) or None
+        item["bl_no"] = item["mbl_no"] = ",".join(item.pop("decls")) or None
+    # 勾稽 (使用者提示)：每張發票 AMOUNT + VAT = 該列 TOTAL；整份清單的明細合計 =
+    # TỔNG CỘNG 的未稅與 TOTAL (容許逐列四捨五入每列 0.5，超過就是帳單合計列的
+    # 稅額不一致)
+    audit = [{"invoice_no": None, "total": total, "grand_total": None,
+              "final_total": bill_total, "final_tolerance": max(1.0, 0.5 * len(items))}]
+    audit += [{"invoice_no": inv, "total": None, "grand_total": round(value, 2),
+               "final_total": None} for inv, value in row_totals.items()]
+    return {"header": header, "items": items, "audit": audit}
 
 
 def _ct_parse_book(book) -> List[Dict]:
@@ -5228,8 +5226,13 @@ def parse_cong_thanh_sheets(book) -> List[Dict]:
 
 
 def _cong_thanh_totals(book) -> List[Dict]:
-    return [{"invoice_no": p["header"]["invoice_no"], **p["totals"]}
-            for p in _ct_parse_book(book)]
+    entries = []
+    for p in _ct_parse_book(book):
+        if "audit" in p:            # 代墊款清單：整份 + 每張第三方發票
+            entries.extend(p["audit"])
+        else:                       # 運費 / 服務費對帳單：一張對帳單一組合計
+            entries.append({"invoice_no": p["header"]["invoice_no"], **p["totals"]})
+    return entries
 
 
 register_supplier(

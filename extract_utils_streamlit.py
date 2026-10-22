@@ -481,6 +481,7 @@ _EN_PHRASES = (
     ("PHI DICH VU", "Service fee"), ("PHAT SINH", "Incurred charge"),
     ("PT HA BAI SOM", "Early drop-off fee"), ("NANG HA", "Lift on/off"),
     ("LUU BAI", "Storage"), ("LUU CONT", "Container detention"),
+    ("VE SINH CONT", "Container cleaning"),
     # 印尼文
     ("TOTAL BIAYA EKSTERNAL", "Total external cost"), ("TOTAL BIAYA REIMBURSEMENT",
                                                        "Total reimbursement cost"),
