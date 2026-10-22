@@ -88,6 +88,13 @@ KNOWN_SOURCE_ISSUES: Dict[str, Dict[Tuple[str, str], Tuple[str, Optional[set]]]]
         ("arrive_date", "DATE_FORMAT"): ("MAERSK 原帳單的 ETA 本身就是「--」", {"--"}),
         ("arrive_date", "DATE_ORDER"): ("MAERSK 原帳單的 ETA 本身就早於 ETD", None),
     },
+    "RONG_A_CHAU": {
+        ("invoice_date", "MISSING_REQUIRED"): ("RỒNG Á CHÂU 的 Excel 對帳表本身沒有發票日期", None),
+        # 擷取規則只在費用金額不為 0 時才轉成一列，金額空白的只會是使用者規定
+        # 「進口每筆出貨都要列」的 VAT / VAT PASS THROUGH 列 (稅額 0 時金額、稅額都 N/A)
+        ("amount", "MISSING_REQUIRED"): ("進口每筆出貨都列 VAT 列，VAT PASS THROUGH 為 0 時金額與稅額皆為 N/A", None),
+        ("bl_no", "ID_NO_DIGIT"): ("國內段 (Local) 出貨的提單欄本來就寫 LOCAL", {"LOCAL", "Local", "local"}),
+    },
 }
 
 # 日期合理範圍：早於這一年，或晚於今天 + 這麼多天，視為可疑

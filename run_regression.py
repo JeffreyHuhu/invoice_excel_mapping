@@ -7,6 +7,7 @@
 樣本存放慣例：test_samples/<SUPPLIER_KEY>/sampleN.pdf + sampleN_ref.xlsx
 (N 從 1 開始)，每次新增/修正一個樣本，記得把 (PDF, 正確答案 Excel) 這一組
 複製進對應資料夾，之後就會自動被這支工具納入回歸測試範圍。
+Excel 帳單供應商 (越南) 的樣本是 sampleN.xlsx / sampleN.xls + sampleN_ref.xlsx。
 
 用法：
     python3 run_regression.py                  # 測試全部供應商
@@ -46,12 +47,15 @@ def main():
     overall_ok = True
     for key in supplier_dirs:
         sdir = os.path.join(root, key)
-        pdfs = sorted(glob.glob(os.path.join(sdir, "sample*.pdf")))
+        pdfs = sorted(
+            p for p in glob.glob(os.path.join(sdir, "sample*.*"))
+            if p.lower().endswith((".pdf", ".xlsx", ".xls")) and not p.endswith("_ref.xlsx")
+        )
         if not pdfs:
             continue
         print(f"\n=== {key} ({len(pdfs)} 個樣本) ===")
         for pdf_path in pdfs:
-            ref_path = pdf_path.replace(".pdf", "_ref.xlsx")
+            ref_path = os.path.splitext(pdf_path)[0] + "_ref.xlsx"
             if not os.path.exists(ref_path):
                 print(f"  [略過] 找不到對應的正確答案: {ref_path}")
                 continue
