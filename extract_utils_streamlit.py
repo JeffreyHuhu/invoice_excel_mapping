@@ -505,7 +505,8 @@ def register_supplier(key: str, label: str,
     sheet_totals (Excel 帳單供應商用，可選)：從帳單本身的合計列抓總額，回傳
     [{"invoice_no":.., "total":.., "grand_total":.., "final_total":..}, ..]
     (不適用的項目給 None)，audit_invoice_totals() 拿來跟擷取到的明細加總勾稽；
-    可另帶 "grand_tolerance" 放寬含稅總額的容許誤差 (預設 ±1)。invoice_no 給
+    可另帶 "grand_tolerance" / "final_tolerance" 放寬含稅總額 / 實付金額的容許
+    誤差 (預設 ±1)。invoice_no 給
     None 代表「整份檔案的合計」，用全部明細勾稽並套用到檔案裡的每張發票。
 
     extract_total (可選)：從『一張發票』的原始文字裡抓出帳單本身寫的
@@ -1235,10 +1236,11 @@ def audit_invoice_totals(
         return add_total, deduct_total
 
     def _build_result(group_rows: List[Dict], invoice_total, grand_total, final_total,
-                      grand_tolerance: float = 1) -> Dict:
-        """grand_tolerance：含稅總額允許的誤差 (預設 ±1)。帳單合計的稅額若是
-        「未稅合計 × 稅率」、明細稅額卻是逐列四捨五入 (例如 CONG THANH 代墊款)，
-        Excel 供應商可透過 sheet_totals 放寬到「每列 0.5」。"""
+                      grand_tolerance: float = 1, final_tolerance: float = 1) -> Dict:
+        """grand_tolerance / final_tolerance：含稅總額 / 實付金額允許的誤差
+        (預設 ±1)。帳單合計的稅額若是「未稅合計 × 稅率」、明細稅額卻是逐列四捨
+        五入 (例如 CONG THANH 代墊款)，Excel 供應商可透過 sheet_totals 放寬到
+        「每列 0.5」。"""
         extracted_sum = _sum_rows(group_rows)
         vat_sum = deduction_sum = None
         if need_vat_split:
@@ -1249,7 +1251,7 @@ def audit_invoice_totals(
         extracted_final = (
             extracted_grand - deduction_sum
             if extracted_grand is not None and deduction_sum is not None
-            and extract_final_total_fn else None
+            and (extract_final_total_fn or sheet_totals_fn) else None
         )
         result = {
             "invoice_no": group_rows[0].get("invoice_no", NA),
@@ -1275,7 +1277,7 @@ def audit_invoice_totals(
                 if extracted_final is not None and final_total is not None else None
             ),
             "final_match": (
-                abs(extracted_final - final_total) <= 1
+                abs(extracted_final - final_total) <= final_tolerance
                 if extracted_final is not None and final_total is not None else None
             ),
         }
@@ -1289,7 +1291,7 @@ def audit_invoice_totals(
         groups = _group_rows_by_invoice(rows)
         for t in sheet_totals_fn(read_spreadsheet(pdf_path)):
             args = (t.get("total"), t.get("grand_total"), t.get("final_total"),
-                    t.get("grand_tolerance", 1))
+                    t.get("grand_tolerance", 1), t.get("final_tolerance", 1))
             if t.get("invoice_no") is None:
                 # 帳單只有整份檔案的合計 (沒有每張發票的合計)：用全部明細勾稽，
                 # 結果套用到檔案裡的每張發票

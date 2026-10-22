@@ -24,6 +24,7 @@ register_supplier() 呼叫順序的後面，因為 detect_supplier() 是依序�
 import os
 import re
 import datetime
+import unicodedata
 from typing import Dict, List, Optional, Tuple
 
 from extract_utils_streamlit import register_supplier, set_supplier_number
@@ -5061,11 +5062,35 @@ def _vn_container(value) -> Optional[str]:
 #      "CONG THANH 15/09/2026" 是對帳單日期。
 #   2. 「…-CHI HO.xls(x)」：代墊款 INVOICE LIST (第三方發票，例如 "Nang ha"
 #      吊櫃上下)，每筆代墊自帶 VAT 欄 (每品項自帶 VAT)，同一張第三方發票分攤
-#      到好幾筆出貨時，後面的出貨只列 INV/報關單號、沒有金額，不轉；合計
-#      列 "TỔNG CỘNG"。
+#      到好幾筆出貨時，後面的出貨只列 INV/報關單號、沒有金額，不轉 (使用者
+#      答案也只取第一筆 INV，報關單號不填)；合計列 "TỔNG CỘNG"。
+#      越南文的費用名稱 (Nội dung) 要加英文備註，例如 "Nang ha (Lift on/off)"。
+#      勾稽 (使用者提示)：各列 AMOUNT + VAT = 該列 TOTAL；TỔNG CỘNG 是三欄各自
+#      的合計。帳單 TỔNG CỘNG 的 VAT 常是「未稅合計 × 8%」，跟逐列四捨五入的
+#      VAT 加總會有幾元尾差，容許每列 0.5。
 # 辨識：賣方稅籍編號 0301434547。
 
 _CONG_THANH_TAX_ID = "0301434547"
+
+# 代墊款越南文費用名稱 (去掉聲調、轉小寫後比對) -> 英文備註；沒列到的照抄
+_CT_EN_NOTES = {
+    "nang ha": "Lift on/off",
+    "pt ha bai som": "Early drop-off fee",
+    "luu bai": "Storage",
+    "luu cont": "Container detention",
+    "ve sinh cont": "Container cleaning",
+    "phi cssh": "Port infrastructure fee",
+}
+
+
+def _ct_with_english(content: str) -> str:
+    """'Nang ha' -> 'Nang ha (Lift on/off)'；已經有括號備註或不認得的照抄。"""
+    if not content or "(" in content:
+        return content
+    key = "".join(ch for ch in unicodedata.normalize("NFKD", content.replace("Đ", "D").replace("đ", "d"))
+                  if not unicodedata.combining(ch))
+    note = _CT_EN_NOTES.get(re.sub(r"\s+", " ", key).strip().lower())
+    return f"{content} ({note})" if note else content
 
 
 def detect_cong_thanh(text: str) -> bool:
@@ -5162,25 +5187,29 @@ def _ct_paid_on_behalf(rows: List[list]) -> Optional[Dict]:
     c_content, c_net, c_vat = cols.get("NỘI DUNG"), cols.get("TIỀN TRƯỚC THUẾ"), cols.get("VAT")
     c_total, c_inv, c_cont = cols.get("TOTAL"), cols.get("INV"), cols.get("CONT")
     items = []
-    total = grand = None
+    total = bill_total = None
+    line_totals = 0.0
     for row in rows[head_i + 1:]:
         if _vn_label(_vn_cell(row, 0)).startswith("TỔNG"):
-            total, grand = _vn_num(_vn_cell(row, c_net)), _vn_num(_vn_cell(row, c_total))
+            total, bill_total = _vn_num(_vn_cell(row, c_net)), _vn_num(_vn_cell(row, c_total))
             break
         amount = _vn_amount(_vn_cell(row, c_net))
         if amount is None:
             continue  # 同一張第三方發票分攤到的其他出貨，只列單號沒有金額
+        line_totals += _vn_num(_vn_cell(row, c_total)) or 0
         items.append({
-            "description": _vn_text(_vn_cell(row, c_content)) or None,
+            "description": _ct_with_english(_vn_text(_vn_cell(row, c_content))) or None,
             "amount": amount, "vat": _vn_amount(_vn_cell(row, c_vat)),
             "order_no": _vn_text(_vn_cell(row, c_inv)) or None,
             "container_no": _vn_container(_vn_cell(row, c_cont)),
         })
-    # 合計列的 VAT 是「未稅合計 × 8%」，明細 VAT 是逐列四捨五入，含稅總額
-    # 勾稽容許每列 0.5 的尾差；超過就是帳單本身稅額不一致
+    # 勾稽三層：未稅合計 = TỔNG CỘNG 的未稅；明細 AMOUNT + VAT = 各列 TOTAL 的
+    # 加總 (含稅總額，±1)；明細 AMOUNT + VAT = TỔNG CỘNG 的 TOTAL (實付金額，
+    # 容許逐列四捨五入每列 0.5，超過就是帳單本身合計列的稅額不一致)
     return {"header": header, "items": items,
-            "totals": {"total": total, "grand_total": grand,
-                       "grand_tolerance": max(1.0, 0.5 * len(items))}}
+            "totals": {"total": total, "grand_total": round(line_totals, 2),
+                       "final_total": bill_total,
+                       "final_tolerance": max(1.0, 0.5 * len(items))}}
 
 
 def _ct_parse_book(book) -> List[Dict]:
@@ -5199,9 +5228,7 @@ def parse_cong_thanh_sheets(book) -> List[Dict]:
 
 
 def _cong_thanh_totals(book) -> List[Dict]:
-    return [{"invoice_no": p["header"]["invoice_no"], "total": p["totals"]["total"],
-             "grand_total": p["totals"]["grand_total"], "final_total": None,
-             "grand_tolerance": p["totals"].get("grand_tolerance", 1)}
+    return [{"invoice_no": p["header"]["invoice_no"], **p["totals"]}
             for p in _ct_parse_book(book)]
 
 
