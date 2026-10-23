@@ -524,6 +524,22 @@ _EN_FULL = {
     "CONG TY TNHH DICH VU GIAO NHAN VAN TAI VA THUONG MAI CONG THANH":
         "Cong Thanh Forwarding, Transport and Trading Service Co., Ltd.",
     "CONG TY TRACH NHIEM HUU HAN POU SUNG VIET NAM": "Pou Sung Vietnam Co., Ltd.",
+    # CONG THANH 對帳單的額外費用說明 (DEC 欄)
+    "10 KIEN HANG BI UOT HU HET GIAY, POUSUNG KHAC PHUC HAU QUA TOI DA CON PHAT SINH THEM "
+    "63.5USD (TY GIA: 26.241 NGAY 15/1/2026). CONG THANH TRA PHI PHAT SINH NAY (SU DUNG "
+    "INVOICE PSV0810666665 DE CAN TRU)":
+        "10 packages got wet and the shoes were damaged; after Pousung's mitigation an extra "
+        "63.5 USD remained (rate 26.241 on 15/1/2026). Cong Thanh pays this cost (offset "
+        "against invoice PSV0810666665)",
+    "XIN KIEM TAI KHO RIENG MAY CAT, MAY CANG LIEU : PS251205NO; VP26111Y11":
+        "Request for inspection at a private warehouse for cutting and fabric-stretching "
+        "machines: PS251205NO; VP26111Y11",
+    "DE XUAT HAI QUAN KIEM MAY XUAT BAN TAI NHA MAY INV VP26110N3S ; PS251205NO":
+        "Request for customs inspection at the factory of machines exported for sale, "
+        "inv VP26110N3S; PS251205NO",
+    "DIEU CHINH TO KHAI GIAM SO LUONG, SO KIEN, TRONG LUONG, TRI GIA...PSV0810686870":
+        "Customs declaration amendment to reduce quantity, packages, weight and value... "
+        "PSV0810686870",
 }
 # 詞組對照 (由長到短套用；越南文、印尼文常見帳單用語)
 _EN_PHRASES = (

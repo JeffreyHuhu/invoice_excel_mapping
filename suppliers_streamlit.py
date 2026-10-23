@@ -5163,9 +5163,11 @@ def _ct_statement(rows: List[list]) -> Optional[Dict]:
             continue
         if not so_inv:
             # 沒有 SO INV 但有金額：對帳單層級的調整 (例如貨損扣款
-            # "10 kiện hàng bị ướt…" -1,666,304)，記在對帳單號底下
+            # "10 kiện hàng bị ướt…" -1,666,304)，記在對帳單號底下。費用名稱用
+            # DEC 欄的說明文字 (寫入時加英文翻譯)；DEC 只是單號時寫 Additional charge
             if amount:
-                items.append({"description": "Additional charge", "amount": amount, "vat": None,
+                name = dec if " " in dec else "Additional charge"
+                items.append({"description": name, "amount": amount, "vat": None,
                               "invoice_no": header["invoice_no"],
                               "invoice_date": header["invoice_date"]})
             continue
@@ -5178,7 +5180,8 @@ def _ct_statement(rows: List[list]) -> Optional[Dict]:
         plate = _vn_text(_vn_cell(row, c_plate)) or (prev["plate"] if same_group else None)
         prev = {"date": ship_date, "remark": remark, "cont": cont, "plate": plate}
         items.append({
-            "description": charge, "amount": amount, "vat": None,
+            # 金額空白 = 原帳單漏填，視為 0 (使用者規定)
+            "description": charge, "amount": amount if amount is not None else 0.0, "vat": None,
             "invoice_no": so_inv, "invoice_date": ship_date,
             "order_no": dec or None,
             "arrive_date": ship_date, "onboard_date": ship_date,
@@ -5208,13 +5211,17 @@ def _ct_paid_on_behalf(rows: List[list]) -> Optional[Dict]:
     row_totals: Dict[str, float] = {}
     total = vat_total = bill_total = None
     for row in rows[head_i + 1:]:
-        if _vn_label(_vn_cell(row, 0)).startswith("TỔNG"):
-            total, vat_total, bill_total = (_vn_num(_vn_cell(row, c))
-                                            for c in (c_net, c_vat, c_total))
-            break
         inv = _vn_text(_vn_cell(row, c_inv))
         decl = _vn_text(_vn_cell(row, c_decl))
         amount = _vn_amount(_vn_cell(row, c_net))
+        # 合計列：通常 A 欄寫 TỔNG CỘNG；有的帳單漏寫 (例如 T01.2026 DOT1 第 119
+        # 列)，只有金額、沒有日期/發票號碼/內容/INV/報關單號的列也是合計列
+        no_text = not any(_vn_text(_vn_cell(row, c))
+                          for c in (c_date, c_no, c_content, c_inv, c_decl))
+        if _vn_label(_vn_cell(row, 0)).startswith("TỔNG") or (amount is not None and no_text):
+            total, vat_total, bill_total = (_vn_num(_vn_cell(row, c))
+                                            for c in (c_net, c_vat, c_total))
+            break
         if amount is None:
             # 同一張第三方發票分攤到的其他出貨：只列 INV / 報關單號，併進上一張發票
             if items:

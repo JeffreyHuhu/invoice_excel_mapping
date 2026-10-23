@@ -102,9 +102,10 @@ KNOWN_SOURCE_ISSUES: Dict[str, Dict[Tuple[str, str], Tuple[str, Optional[set]]]]
 # 供應商例外：這些 (欄位, 規則) 對該供應商不是問題，連附註都不列 (使用者規定)
 SUPPLIER_EXEMPTIONS: Dict[str, set] = {
     # CONG THANH 是拖車行：CONT/XE 欄是車牌或簡寫櫃號、Số xe (車號) 可能只有
-    # 數字、帳單上原本就是 0 的運費，都照抄原文
+    # 數字、帳單上原本就是 0 (或空白視為 0) 的費用，都照抄原文；負數是對帳單
+    # 層級的扣款 (例如貨損)，使用者確認正確
     "CONG_THANH": {("container_no", "CONTAINER_FORMAT"), ("vessel", "TEXT_NO_LETTER"),
-                   ("amount", "AMOUNT_ZERO")},
+                   ("amount", "AMOUNT_ZERO"), ("amount", "AMOUNT_NEGATIVE")},
 }
 
 # 日期合理範圍：早於這一年，或晚於今天 + 這麼多天，視為可疑
