@@ -107,6 +107,8 @@ _DWIHARTA_LABEL_WORDS = [
     r"Payment\s*can\s*be\s*Transfer\s*to", r"Bank\s*Information",
     r"I\s*N\s*V\s*O\s*I\s*C\s*E", r"Sub\s*Total", r"GRAND\s*TOTAL",
     r"V\s*A\s*T", r"E\.?\s*&\s*O\.?\s*E", r"Halaman", r"\bTO\b",
+    # 國內報關 (Shipment Type : Customs) 帳單的欄位
+    r"Domestic\s*Origin", r"Domestic\s*Dest", r"Doc\s*No\.?", r"Order\s*Date", r"Customer",
 ]
 _DWIHARTA_NEXT = "(?:" + "|".join(_DWIHARTA_LABEL_WORDS) + ")"
 _DWIHARTA_STOP = rf"(?=\s{{2,}}|\n|$|\s*{_DWIHARTA_NEXT}\b)"
@@ -194,7 +196,23 @@ def parse_dwiharta(text: str) -> Dict:
     # 一個空白，還原成一行完整的出貨方名稱。
     _shipper_m = re.search(r"Shipper\s*:\s*([\s\S]+?)\s*Container\s*No\.?\s*:", text)
     if _shipper_m:
-        header["shipper"] = re.sub(r"\s+", " ", _shipper_m.group(1)).strip()
+        shipper = _shipper_m.group(1)
+        # 國內報關帳單：Shipper 下一行是 "Doc No. : Consignee : ..." 等其他
+        # 欄位 (Container No. 在更下面)，遇到這些標籤就停
+        shipper = re.split(r"\n\s*(?:Doc\s*No\.?|Consignee|Domestic\s*(?:Origin|Dest))\s*:",
+                           shipper)[0]
+        header["shipper"] = re.sub(r"\s+", " ", shipper).strip()
+
+    # 國內報關 (Shipment Type : Customs) 帳單 (使用者提示)：啟運港 = Domestic
+    # Origin、目的港 = Domestic Dest；沒有 B/L，B/L NO. 與 MBL NO. 用 Order No.
+    if not header.get("port_of_loading"):
+        header["port_of_loading"] = _search(
+            rf"Domestic\s*Origin{_DWIHARTA_COLON}(.+?){_DWIHARTA_STOP}", text)
+    if not header.get("port_of_discharge"):
+        header["port_of_discharge"] = _search(
+            rf"Domestic\s*Dest{_DWIHARTA_COLON}(.+?){_DWIHARTA_STOP}", text)
+    if not header.get("bl_no") and not header.get("mbl_no") and header.get("order_no"):
+        header["bl_no"] = header["mbl_no"] = header["order_no"]
 
     items: List[Dict] = []
     for raw_line in text.splitlines():
