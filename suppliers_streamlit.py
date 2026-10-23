@@ -176,7 +176,12 @@ def _dwiharta_parse_indo_date(text: Optional[str]) -> Optional[str]:
 def parse_dwiharta(text: str) -> Dict:
     header: Dict[str, Optional[str]] = {}
     for code, pattern in _DWIHARTA_HEADER_PATTERNS.items():
-        header[code] = _search(pattern, text)
+        value = _search(pattern, text)
+        # 欄位空白時會抓到同一行的下一個欄位 (例如 "Arrive Date : Port Of
+        # Discharge : JAKARTA")，值以已知標籤開頭就當作沒有值
+        if value and re.match(rf"{_DWIHARTA_NEXT}\s*:", value):
+            value = None
+        header[code] = value
 
     header["volume"] = _dwiharta_clean_volume(header.get("volume"))
     for date_code in ("invoice_date", "arrive_date", "onboard_date"):
@@ -2846,6 +2851,22 @@ def _dwiharta_extract_total(text: str) -> Optional[int]:
     return int(m) if m.isdigit() else None
 
 
+def _dwiharta_amount(pattern: str, text: str) -> Optional[int]:
+    m = _search(pattern, text)
+    m = m.replace(",", "") if m else None
+    return int(m) if m and m.isdigit() else None
+
+
+def _dwiharta_extract_vat_total(text: str) -> Optional[int]:
+    """帳單合計區的 "V A T 201,348" (每筆費用各自的 VAT 欄加總)。"""
+    return _dwiharta_amount(r"(?m)^[ \t]*V\s?A\s?T[ \t]+([\d,]+)[ \t]*$", text)
+
+
+def _dwiharta_extract_grand_total(text: str) -> Optional[int]:
+    """"E.& O.E GRAND TOTAL 37,479,532" = Sub Total + V A T。"""
+    return _dwiharta_amount(r"GRAND\s*TOTAL\s+([\d,]+)", text)
+
+
 def _kn_extract_total(text: str) -> Optional[int]:
     # "SUBTOTAL IDR 1,521,098 167,321" 是 Sales Invoice 費用明細行上的英式
     # 數字 (逗號千分位、無小數)，要用 _kn_clean_amount_comma_thousands()，
@@ -2994,6 +3015,8 @@ def _evergreen_extract_total(text: str) -> Optional[int]:
 register_supplier(
     "DWIHARTA", "PT. DWIHARTA LOGISTINDO", detect_dwiharta, parse_dwiharta,
     extract_total=_dwiharta_extract_total,
+    extract_vat_total=_dwiharta_extract_vat_total,
+    extract_grand_total=_dwiharta_extract_grand_total,
 )
 register_supplier(
     "KUEHNE_NAGEL", "KUEHNE NAGEL INDONESIA", detect_kuehne_nagel, parse_kuehne_nagel,

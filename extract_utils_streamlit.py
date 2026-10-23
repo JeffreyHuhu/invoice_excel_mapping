@@ -712,8 +712,13 @@ def register_supplier(key: str, label: str,
                        audit_exclude: Tuple[str, ...] = (),
                        force_ocr: bool = False,
                        sheet_parse: Optional[Callable[["SheetBook"], List[Dict]]] = None,
-                       sheet_totals: Optional[Callable[["SheetBook"], List[Dict]]] = None) -> None:
+                       sheet_totals: Optional[Callable[["SheetBook"], List[Dict]]] = None,
+                       extract_vat_total: Optional[Callable[[str], Optional[float]]] = None) -> None:
     """註冊一家供應商。
+
+    extract_vat_total (可選，目前只用於單張發票的 PDF)：從原始文字抓帳單本身
+    寫的 VAT 合計 (例如 DWIHARTA 的 "V A T 201,348")，跟擷取到的 VAT 加總
+    勾稽 (vat_match)。
 
     sheet_parse (Excel 帳單供應商用)：有給就代表這家供應商的帳單是 Excel
     (見 read_spreadsheet())。detect_fn 一樣吃文字 (sheet_text() 的結果)，
@@ -776,6 +781,7 @@ def register_supplier(key: str, label: str,
         "extract_final_total": extract_final_total, "deduction_prefixes": deduction_prefixes,
         "audit_exclude": audit_exclude, "force_ocr": force_ocr,
         "sheet_parse": sheet_parse, "sheet_totals": sheet_totals,
+        "extract_vat_total": extract_vat_total,
         # Excel 供應商一份檔案可能有好幾張對帳單，比對時跟 multi_page 一樣用
         # invoice_no 分組
         "multi_page": multi_page or sheet_parse is not None,
@@ -1638,8 +1644,15 @@ def audit_invoice_totals(
                 final_total = extract_final_total_fn(text)
             except Exception:
                 final_total = None
+        vat_total = None
+        if entry.get("extract_vat_total"):
+            try:
+                vat_total = entry["extract_vat_total"](text)
+            except Exception:
+                vat_total = None
         if (invoice_total is not None or grand_total is not None or final_total is not None) and rows:
-            results.append(_build_result(rows, invoice_total, grand_total, final_total))
+            results.append(_build_result(rows, invoice_total, grand_total, final_total,
+                                         vat_total=vat_total))
     return results
 
 
