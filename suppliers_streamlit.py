@@ -139,11 +139,13 @@ _DWIHARTA_HEADER_PATTERNS: Dict[str, str] = {
 }
 
 _DWIHARTA_LINE_ITEM_PATTERN = re.compile(
-    r"^(?P<desc>.+?)\s+(?P<qty>\d+)\s+(?P<curr>IDR|USD)\s+"
+    # 幣別有時沒印 (例如 INJK-2504-0454 最後兩筆)，設為選填
+    r"^(?P<desc>.+?)\s+(?P<qty>\d+)\s+(?:(?P<curr>IDR|USD)\s+)?"
     r"(?P<rate>[\d,]+)\s+(?P<amount>[\d,]+)"
     r"(?:\s+(?P<vat>[\d,]+))?\s*$"
 )
-_DWIHARTA_EXCLUDE_KEYWORDS = ("Description", "Sub Total", "GRAND TOTAL", "V A T", "Payment Term")
+_DWIHARTA_EXCLUDE_KEYWORDS = ("Description", "Sub Total", "GRAND TOTAL", "V A T", "Payment Term",
+                              "A/C", "Halaman")  # 銀行帳號列、分頁字樣不是費用
 
 
 def _dwiharta_clean_volume(value: Optional[str]) -> Optional[str]:
@@ -180,8 +182,9 @@ def parse_dwiharta(text: str) -> Dict:
     for date_code in ("invoice_date", "arrive_date", "onboard_date"):
         header[date_code] = _dwiharta_parse_indo_date(header.get(date_code))
 
-    # 供應商名稱：取自 "Payment can be Transfer to :" 之後的第一個非空白行
-    m = re.search(r"Payment can be Transfer to\s*:?\s*\n\s*(.+)", text)
+    # 供應商名稱：取自 "Payment can be Transfer to :" 之後的第一個非空白行；
+    # 跨頁時中間會夾分頁字樣 "Halaman 1 dari 2" (例如 INJK-2508-0710)，跳過
+    m = re.search(r"Payment can be Transfer to\s*:?\s*\n(?:\s*Halaman\b.*\n)*\s*(.+)", text)
     if m:
         supplier_line = m.group(1).strip()
         stop_m = re.search(_DWIHARTA_STOP, supplier_line)
