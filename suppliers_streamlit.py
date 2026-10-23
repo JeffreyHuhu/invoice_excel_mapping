@@ -5139,7 +5139,21 @@ def _ct_statement(rows: List[list]) -> Optional[Dict]:
             total = summary
             continue
         so_inv = _vn_text(_vn_cell(row, c_inv))
+        dec = _vn_text(_vn_cell(row, c_dec))
         amount = _vn_num(_vn_cell(row, c_amount))
+        # DEC / SO INV 寫的是文字 (沒有數字) = 額外費用項目，例如
+        # "Phát sinh Giữ gác"：費用名稱用這段文字 (寫入時加英文翻譯)，
+        # 單號欄照抄原文，驗證層標示人工查核 (使用者規定)
+        extra = next((t for t in (dec, so_inv) if t and not re.search(r"\d", t)), None)
+        if extra and amount:
+            items.append({
+                "description": extra, "amount": amount, "vat": None,
+                "invoice_no": so_inv if re.search(r"\d", so_inv) else header["invoice_no"],
+                "invoice_date": _vn_date(_vn_cell(row, c_date)) or header["invoice_date"],
+                "order_no": dec or None, "bl_no": so_inv or None, "mbl_no": so_inv or None,
+                "port_of_loading": "VIETNAM", "port_of_discharge": "VIETNAM",
+            })
+            continue
         if not so_inv:
             # 沒有 SO INV 但有金額：對帳單層級的調整 (例如貨損扣款
             # "10 kiện hàng bị ướt…" -1,666,304)，記在對帳單號底下
@@ -5158,7 +5172,7 @@ def _ct_statement(rows: List[list]) -> Optional[Dict]:
         items.append({
             "description": charge, "amount": amount, "vat": None,
             "invoice_no": so_inv, "invoice_date": ship_date,
-            "order_no": _vn_text(_vn_cell(row, c_dec)) or None,
+            "order_no": dec or None,
             "arrive_date": ship_date, "onboard_date": ship_date,
             "bl_no": so_inv, "mbl_no": so_inv,
             # 越南境內拖車，啟運港 / 目的港一律 VIETNAM (使用者答案)

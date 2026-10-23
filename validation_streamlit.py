@@ -89,7 +89,10 @@ KNOWN_SOURCE_ISSUES: Dict[str, Dict[Tuple[str, str], Tuple[str, Optional[set]]]]
         ("arrive_date", "DATE_ORDER"): ("MAERSK 原帳單的 ETA 本身就早於 ETD", None),
     },
     "CONG_THANH": {
-        ("container_no", "CONTAINER_FORMAT"): ("CONG THANH 對帳單的 CONT/XE 欄是車牌或簡寫櫃號，照抄原文", None),
+        # 拖車行：貨櫃號碼欄可以不是「4 碼英文 + 7 碼數字」
+        ("container_no", "CONTAINER_FORMAT"): ("CONG THANH 是拖車行，CONT/XE 欄是車牌或簡寫櫃號，照抄原文", None),
+        ("vessel", "TEXT_NO_LETTER"): ("CONG THANH 對帳單的 Số xe (車號) 欄原文就是這個值", None),
+        ("amount", "AMOUNT_ZERO"): ("帳單上的金額原本就是 0", None),
     },
     "RONG_A_CHAU": {
         ("invoice_date", "MISSING_REQUIRED"): ("RỒNG Á CHÂU 的 Excel 對帳表本身沒有發票日期", None),
@@ -235,6 +238,24 @@ def _mark_known_source_issues(issues: List[Dict], supplier_key: Optional[str],
     return marked
 
 
+# 單號欄寫的是文字 (沒有數字) 代表「額外費用項目」的供應商：不報單號格式，
+# 改成逐筆標示人工查核 (費用名稱就是那段文字，使用者規定)
+EXTRA_CHARGE_ID_SUPPLIERS = {"CONG_THANH"}
+RULE_EXTRA_CHARGE = "EXTRA_CHARGE_REVIEW"
+
+
+def _check_extra_charges(group_rows: List[Dict]) -> List[Dict]:
+    issues = []
+    for idx, row in enumerate(group_rows, start=1):
+        texts = [str(row.get(code)) for code in ("order_no", "bl_no")
+                 if not _is_blank(row.get(code)) and not re.search(r"\d", str(row.get(code)))]
+        if texts:
+            issues.append(_issue(WARN, "description", RULE_EXTRA_CHARGE,
+                                 f"第 {idx} 筆費用「{row.get('description')}」是額外費用項目"
+                                 f" (單號欄寫的是費用名稱：{texts[0]})，請人工查核", idx - 1))
+    return issues
+
+
 def _check_items(group_rows: List[Dict]) -> List[Dict]:
     issues = []
     has_any_item = False
@@ -356,6 +377,9 @@ def validate_extraction(
         issues = list(base_issues)
         issues.extend(_check_header(group_rows[0]))
         issues.extend(_check_items(group_rows))
+        if supplier_key in EXTRA_CHARGE_ID_SUPPLIERS:
+            issues = [i for i in issues if i["rule"] != "ID_NO_DIGIT"]
+            issues.extend(_check_extra_charges(group_rows))
         issues.extend(_check_audit(audit_by_invoice.get(inv_key), supplier_key))
         issues = _explain_by_formula_issue(issues)
         issues = _mark_known_source_issues(issues, supplier_key, group_rows[0])

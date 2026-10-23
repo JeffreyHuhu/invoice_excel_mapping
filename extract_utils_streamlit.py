@@ -482,6 +482,13 @@ _EN_PHRASES = (
     ("PT HA BAI SOM", "Early drop-off fee"), ("NANG HA", "Lift on/off"),
     ("LUU BAI", "Storage"), ("LUU CONT", "Container detention"),
     ("VE SINH CONT", "Container cleaning"),
+    # CONG THANH 額外費用項目
+    ("XIN KIEM MAY TAI NHA MAY", "Machine inspection at factory request"),
+    ("XIN KIEM NHA MAY", "Factory inspection request"),
+    ("KHAI BAO MAY MOC", "Machinery declaration"), ("KIEM MAY MOC", "Machinery inspection"),
+    ("KHAI BO SUNG", "Supplementary declaration"), ("DAN TEM", "Label sticking"),
+    ("XIN GIU GAC VA DAN TEM", "Guard keeping and label sticking"),
+    ("GIU GAC", "Guard keeping"),
     # 印尼文
     ("TOTAL BIAYA EKSTERNAL", "Total external cost"), ("TOTAL BIAYA REIMBURSEMENT",
                                                        "Total reimbursement cost"),
