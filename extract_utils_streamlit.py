@@ -412,6 +412,7 @@ def excel_formula_issues(path: str) -> Optional[List[Dict]]:
                 continue
             filled: Dict[str, List[int]] = {}   # 欄 -> 有內容的列號
             sums = []                           # (列, 欄, 起, 迄, 公式)
+            formulas: Dict[Tuple[int, str], str] = {}   # (列, 欄) -> 公式
             for row in ws.iter_rows():
                 for cell in row:
                     v = getattr(cell, "value", None)
@@ -419,6 +420,8 @@ def excel_formula_issues(path: str) -> Optional[List[Dict]]:
                         continue
                     col = cell.column_letter
                     filled.setdefault(col, []).append(cell.row)
+                    if isinstance(v, str) and v.startswith("="):
+                        formulas[(cell.row, col)] = v.replace(" ", "")
                     m = sum_re.match(v) if isinstance(v, str) else None
                     if m and m.group(1).upper() == m.group(3).upper() == col:
                         sums.append((cell.row, col, int(m.group(2)), int(m.group(4)), v))
@@ -440,13 +443,59 @@ def excel_formula_issues(path: str) -> Optional[List[Dict]]:
                     "formula": formula, "missing": {}})
                 g["missing"][col] = missing
             issues.extend(grouped.values())
+            issues.extend(_rate_total_issues(ws.title, formulas, sums, grid))
     finally:
         wb.close()
     return issues
 
 
+# 合計列用「同一列其他欄 × 稅率」算的公式，例如 E360 '=D360*8%'
+_RATE_RE = re.compile(r"^=\+?(?:ROUND\()?\$?([A-Z]{1,3})\$?(\d+)\*([\d.]+%?)", re.I)
+
+
+def _rate_total_issues(sheet: str, formulas: Dict[Tuple[int, str], str],
+                       sums: List[tuple], grid: List[list]) -> List[Dict]:
+    """合計列的稅額用「淨額合計 × 稅率」算 (=D360*8%)，不是加總明細稅額：
+    明細有一列沒填稅額 (例如 E357 空白、D357 有金額) 時，合計稅額就跟
+    明細加總對不上。回傳 {"kind": "rate", "sheet", "row", "col", "formula",
+    "detail_sum", "total", "blank": [沒填稅額的儲存格]}。"""
+    from openpyxl.utils import column_index_from_string
+
+    def num(r, c):
+        v = grid[r - 1][c] if r - 1 < len(grid) and c < len(grid[r - 1]) else None
+        return v if isinstance(v, (int, float)) and not isinstance(v, bool) else None
+
+    issues = []
+    sum_range = {(r, col): (start, end) for r, col, start, end, _f in sums}
+    for (f_row, col), formula in formulas.items():
+        m = _RATE_RE.match(formula)
+        if not m or int(m.group(2)) != f_row or m.group(1).upper() == col:
+            continue
+        base = m.group(1).upper()
+        if (f_row, base) not in sum_range:
+            continue                      # 只看合計列 (淨額欄是 =SUM 的那一列)
+        start, end = sum_range[(f_row, base)]
+        c, b = column_index_from_string(col) - 1, column_index_from_string(base) - 1
+        detail = sum(num(r, c) or 0 for r in range(start, end + 1))
+        total = num(f_row, c)
+        if total is None or abs(total - detail) <= 1:
+            continue
+        blank = [f"{col}{r}" for r in range(start, end + 1)
+                 if num(r, b) and num(r, c) is None and (r, col) not in formulas]
+        issues.append({"kind": "rate", "sheet": sheet, "row": f_row, "col": col,
+                       "formula": formula, "detail_sum": detail, "total": total,
+                       "blank": blank})
+    return issues
+
+
 def format_formula_issue(issue: Dict) -> str:
     """公式問題 -> 說明文字 (給驗證異常、轉檔總表、查驗結果用)。"""
+    if issue.get("kind") == "rate":
+        blank = "、".join(issue["blank"][:5]) + (" 等" if len(issue["blank"]) > 5 else "")
+        return (f"Excel 合計列公式錯誤：[{issue['sheet'].strip()}] {issue['col']}{issue['row']} "
+                f"用 {issue['formula']} 計算，不是加總明細；合計 {issue['total']:,.2f}，"
+                f"明細加總 {issue['detail_sum']:,.2f}，差額 {issue['total'] - issue['detail_sum']:,.2f}"
+                + (f"；明細 {blank} 空白 (有淨額，沒有稅額)" if blank else ""))
     cols = list(issue["missing"])
     amounts = "、".join(f"{c} 欄 {v:,.2f}" for c, v in issue["missing"].items() if v)
     return (f"Excel 合計列公式漏算：[{issue['sheet'].strip()}] 第 {issue['row']} 列 "

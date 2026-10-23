@@ -5026,11 +5026,18 @@ def _vn_amount(value) -> Optional[float]:
 
 
 def _vn_date(value) -> Optional[str]:
-    """日期儲存格 (datetime) 或 'DD/MM/YYYY' 文字 -> 'DD Mon YYYY'。"""
+    """日期儲存格 (datetime)、'DD/MM/YYYY' 或 'YYYY-MM-DD 00:00:00.0' 文字
+    -> 'DD Mon YYYY'。"""
     if isinstance(value, (datetime.datetime, datetime.date)):
         return _format_date_en(value.day, value.month, value.year)
-    m = re.match(r"^(\d{1,2})[/.-](\d{1,2})[/.-](\d{4})$", _vn_text(value))
-    return _format_date_en(m.group(1), m.group(2), m.group(3)) if m else None
+    text = _vn_text(value)
+    m = re.match(r"^(\d{1,2})[/.-](\d{1,2})[/.-](\d{4})$", text)
+    if m:
+        return _format_date_en(m.group(1), m.group(2), m.group(3))
+    # 文字格式的日期時間，例如 '2026-08-03 00:00:00.0'、'20251202'
+    m = (re.match(r"^(\d{4})-(\d{1,2})-(\d{1,2})(?:[ T][\d:.]*)?$", text)
+         or re.match(r"^(20\d{2})(\d{2})(\d{2})(?:\.0)?$", text))
+    return _format_date_en(m.group(3), m.group(2), m.group(1)) if m else None
 
 
 def _vn_cell(row: list, col: Optional[int]):
@@ -5163,7 +5170,8 @@ def _ct_statement(rows: List[list]) -> Optional[Dict]:
                               "invoice_date": header["invoice_date"]})
             continue
         # 併車的出貨 (同一天、同一個送貨地點) 後面幾列常不重複填車牌，沿用上一列
-        ship_date = _vn_date(_vn_cell(row, c_date))
+        # SHIP DATE 是合併儲存格時，後面幾列空白：沿用上一列的日期
+        ship_date = _vn_date(_vn_cell(row, c_date)) or prev["date"]
         remark = _vn_text(_vn_cell(row, c_remark))
         same_group = (ship_date, remark) == (prev["date"], prev["remark"])
         cont = _vn_text(_vn_cell(row, c_cont)) or (prev["cont"] if same_group else None)
