@@ -215,9 +215,9 @@ def _explain_by_formula_issue(issues: List[Dict]) -> List[Dict]:
         return issues
     explained = []
     for issue in issues:
-        if issue["rule"] == "TOTAL_FINAL_MISMATCH":
+        if issue["rule"] in ("TOTAL_FINAL_MISMATCH", "TOTAL_VAT_MISMATCH", "TOTAL_GRAND_MISMATCH"):
             issue = dict(issue, severity=INFO,
-                         message=f"{issue['message']}（原因：帳單 Excel 合計列公式漏算，見公式錯誤）")
+                         message=f"{issue['message']}（原因：原帳單 Excel 合計列公式有誤，見公式錯誤）")
         explained.append(issue)
     return explained
 
@@ -260,8 +260,9 @@ def _check_extra_charges(group_rows: List[Dict], audit_passed: bool = False) -> 
         message = (f"第 {idx} 筆費用「{row.get('description')}」是額外費用項目"
                    f" (單號欄寫的是費用名稱：{texts[0]})")
         if audit_passed:
-            issues.append(_issue(INFO, "description", RULE_EXTRA_CHARGE,
-                                 message + "，已通過金額勾稽", idx - 1))
+            # 已通過金額勾稽：只是附註，也不扣信心分數 (使用者規定)
+            issues.append(dict(_issue(INFO, "description", RULE_EXTRA_CHARGE,
+                                      message + "，已通過金額勾稽", idx - 1), no_penalty=True))
         else:
             issues.append(_issue(WARN, "description", RULE_EXTRA_CHARGE,
                                  message + "，請人工查核", idx - 1))
@@ -330,6 +331,7 @@ def _check_audit(audit: Optional[Dict], supplier_key: Optional[str]) -> List[Dic
     issues = []
     checks = (
         ("match", "diff", "TOTAL_NET_MISMATCH", "費用加總 (未稅) 與帳單未稅總額不一致"),
+        ("vat_match", "vat_diff", "TOTAL_VAT_MISMATCH", "VAT 加總與帳單 VAT 合計不一致"),
         ("grand_match", "grand_diff", "TOTAL_GRAND_MISMATCH", "未稅 + 稅額與帳單含稅總額不一致"),
         ("final_match", "final_diff", "TOTAL_FINAL_MISMATCH",
          "含稅 - 代扣稅與帳單實付金額 (Excel 帳單為表格合計列) 不一致"),
@@ -341,9 +343,9 @@ def _check_audit(audit: Optional[Dict], supplier_key: Optional[str]) -> List[Dic
 
 
 def _confidence(issues: List[Dict]) -> float:
-    # 已知原帳單問題不是擷取錯誤，不扣分
+    # 已知原帳單問題不是擷取錯誤，不扣分；no_penalty 的附註也不扣分
     score = 1.0 - sum(_SEVERITY_PENALTY[i["severity"]] for i in issues
-                      if not i.get("known_source_issue"))
+                      if not (i.get("known_source_issue") or i.get("no_penalty")))
     return round(max(score, 0.0), 2)
 
 

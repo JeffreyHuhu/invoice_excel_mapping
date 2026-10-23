@@ -484,7 +484,7 @@ def _rate_total_issues(sheet: str, formulas: Dict[Tuple[int, str], str],
                  if num(r, b) and num(r, c) is None and (r, col) not in formulas]
         issues.append({"kind": "rate", "sheet": sheet, "row": f_row, "col": col,
                        "formula": formula, "detail_sum": detail, "total": total,
-                       "blank": blank})
+                       "blank": blank, "start": start, "end": end})
     return issues
 
 
@@ -492,13 +492,15 @@ def format_formula_issue(issue: Dict) -> str:
     """公式問題 -> 說明文字 (給驗證異常、轉檔總表、查驗結果用)。"""
     if issue.get("kind") == "rate":
         blank = "、".join(issue["blank"][:5]) + (" 等" if len(issue["blank"]) > 5 else "")
-        return (f"Excel 合計列公式錯誤：[{issue['sheet'].strip()}] {issue['col']}{issue['row']} "
-                f"用 {issue['formula']} 計算，不是加總明細；合計 {issue['total']:,.2f}，"
+        col, start, end = issue["col"], issue.get("start"), issue.get("end")
+        fix = f"，應為 =SUM({col}{start}:{col}{end})" if start and end else ""
+        return (f"原帳單問題 (Excel 公式有誤)：[{issue['sheet'].strip()}] {col}{issue['row']} "
+                f"用 {issue['formula']} 計算，不是加總明細稅額{fix}；合計 {issue['total']:,.2f}，"
                 f"明細加總 {issue['detail_sum']:,.2f}，差額 {issue['total'] - issue['detail_sum']:,.2f}"
                 + (f"；明細 {blank} 空白 (有淨額，沒有稅額)" if blank else ""))
     cols = list(issue["missing"])
     amounts = "、".join(f"{c} 欄 {v:,.2f}" for c, v in issue["missing"].items() if v)
-    return (f"Excel 合計列公式漏算：[{issue['sheet'].strip()}] 第 {issue['row']} 列 "
+    return (f"原帳單問題 (Excel 公式有誤)：[{issue['sheet'].strip()}] 第 {issue['row']} 列 "
             f"{'/'.join(cols)} 欄 (例 {issue['formula']}) 只加到第 {issue['end']} 列，"
             f"明細到第 {issue['last']} 列，第 {issue['end'] + 1}~{issue['last']} 列沒算進合計"
             + (f"；漏算 {amounts}" if amounts else ""))
@@ -1437,11 +1439,13 @@ def audit_invoice_totals(
         return add_total, deduct_total
 
     def _build_result(group_rows: List[Dict], invoice_total, grand_total, final_total,
-                      grand_tolerance: float = 1, final_tolerance: float = 1) -> Dict:
+                      grand_tolerance: float = 1, final_tolerance: float = 1,
+                      vat_total=None) -> Dict:
         """grand_tolerance / final_tolerance：含稅總額 / 實付金額允許的誤差
         (預設 ±1)。帳單合計的稅額若是「未稅合計 × 稅率」、明細稅額卻是逐列四捨
         五入 (例如 CONG THANH 代墊款)，Excel 供應商可透過 sheet_totals 放寬到
-        「每列 0.5」。"""
+        「每列 0.5」。vat_total：帳單本身的 VAT 合計 (Excel 帳單的合計列)，
+        跟擷取到的 VAT 加總勾稽 (容許誤差同 final_tolerance)。"""
         extracted_sum = _sum_rows(group_rows)
         vat_sum = deduction_sum = None
         if need_vat_split:
@@ -1461,6 +1465,11 @@ def audit_invoice_totals(
             "diff": extracted_sum - invoice_total if invoice_total is not None else None,
             "match": abs(extracted_sum - invoice_total) <= 1 if invoice_total is not None else None,
             "vat_sum": vat_sum,
+            "vat_total": vat_total,
+            "vat_diff": (vat_sum - vat_total
+                         if vat_sum is not None and vat_total is not None else None),
+            "vat_match": (abs(vat_sum - vat_total) <= final_tolerance
+                          if vat_sum is not None and vat_total is not None else None),
             "grand_total": grand_total,
             "grand_diff": (
                 extracted_grand - grand_total
@@ -1494,7 +1503,8 @@ def audit_invoice_totals(
         per_invoice: Dict[str, Dict] = {}
         for t in sheet_totals_fn(read_spreadsheet(pdf_path)):
             args = (t.get("total"), t.get("grand_total"), t.get("final_total"),
-                    t.get("grand_tolerance", 1), t.get("final_tolerance", 1))
+                    t.get("grand_tolerance", 1), t.get("final_tolerance", 1),
+                    t.get("vat_total"))
             if t.get("invoice_no") is None:
                 # 整份檔案的合計 (例如表格最後的合計列)：用全部明細勾稽
                 whole = _build_result(rows, *args)

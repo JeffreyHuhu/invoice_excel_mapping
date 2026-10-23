@@ -5192,7 +5192,7 @@ def _ct_statement(rows: List[list]) -> Optional[Dict]:
         items.append({"description": "VAT", "amount": None, "vat": round(vat, 2),
                       "invoice_no": header["invoice_no"], "invoice_date": header["invoice_date"]})
     return {"header": header, "items": items,
-            "totals": {"total": total, "grand_total": grand}}
+            "totals": {"total": total, "vat_total": vat, "grand_total": grand}}
 
 
 def _ct_paid_on_behalf(rows: List[list]) -> Optional[Dict]:
@@ -5206,10 +5206,11 @@ def _ct_paid_on_behalf(rows: List[list]) -> Optional[Dict]:
     c_date, c_no, c_decl = cols.get("NGÀY"), cols.get("SỐ HÓA ĐƠN"), cols.get("TỜ KHAI")
     items: List[Dict] = []
     row_totals: Dict[str, float] = {}
-    total = bill_total = None
+    total = vat_total = bill_total = None
     for row in rows[head_i + 1:]:
         if _vn_label(_vn_cell(row, 0)).startswith("TỔNG"):
-            total, bill_total = _vn_num(_vn_cell(row, c_net)), _vn_num(_vn_cell(row, c_total))
+            total, vat_total, bill_total = (_vn_num(_vn_cell(row, c))
+                                            for c in (c_net, c_vat, c_total))
             break
         inv = _vn_text(_vn_cell(row, c_inv))
         decl = _vn_text(_vn_cell(row, c_decl))
@@ -5238,7 +5239,7 @@ def _ct_paid_on_behalf(rows: List[list]) -> Optional[Dict]:
     # 勾稽 (使用者提示)：每張發票 AMOUNT + VAT = 該列 TOTAL；整份清單的明細合計 =
     # TỔNG CỘNG 的未稅與 TOTAL (容許逐列四捨五入每列 0.5，超過就是帳單合計列的
     # 稅額不一致)
-    audit = [{"invoice_no": None, "total": total, "grand_total": None,
+    audit = [{"invoice_no": None, "total": total, "vat_total": vat_total, "grand_total": None,
               "final_total": bill_total, "final_tolerance": max(1.0, 0.5 * len(items))}]
     audit += [{"invoice_no": inv, "total": None, "grand_total": round(value, 2),
                "final_total": None} for inv, value in row_totals.items()]
@@ -5262,7 +5263,7 @@ def parse_cong_thanh_sheets(book) -> List[Dict]:
 
 def _cong_thanh_totals(book) -> List[Dict]:
     entries = []
-    net = gross = None
+    net = vat = gross = None
     for p in _ct_parse_book(book):
         if "audit" in p:            # 代墊款清單：整份 + 每張第三方發票
             entries.extend(p["audit"])
@@ -5273,11 +5274,13 @@ def _cong_thanh_totals(book) -> List[Dict]:
         t = p["totals"]
         if t.get("total") is not None:
             net = (net or 0) + t["total"]
+        if t.get("vat_total") is not None:
+            vat = (vat or 0) + t["vat_total"]
         if t.get("grand_total") is not None:
             gross = (gross or 0) + t["grand_total"]
     if net is not None or gross is not None:
-        entries.append({"invoice_no": None, "total": net, "grand_total": gross,
-                        "final_total": None})
+        entries.append({"invoice_no": None, "total": net, "vat_total": vat,
+                        "grand_total": gross, "final_total": None})
     return entries
 
 
@@ -5556,7 +5559,7 @@ def _rac_parse_book(book) -> Optional[Dict]:
     header = {"invoice_date": None, "supplier": _RAC_SUPPLIER,
               "consignee": _rac_consignee(book.path)}
     return {"header": header, "items": items, "invoice_totals": invoice_totals,
-            "totals": {"total": total, "grand_total": total + vat_total}}
+            "totals": {"total": total, "vat_total": vat_total, "grand_total": total + vat_total}}
 
 
 def parse_rong_a_chau_sheets(book) -> List[Dict]:
@@ -5573,7 +5576,8 @@ def _rong_a_chau_totals(book) -> List[Dict]:
     if not parsed:
         return []
     net, gross = parsed["totals"]["total"], parsed["totals"]["grand_total"]
-    entries = [{"invoice_no": None, "total": net, "grand_total": None, "final_total": gross}]
+    entries = [{"invoice_no": None, "total": net, "vat_total": parsed["totals"]["vat_total"],
+                "grand_total": None, "final_total": gross}]
     entries += [{"invoice_no": inv, "total": None, "grand_total": value, "final_total": None}
                 for inv, value in parsed["invoice_totals"].items() if value is not None]
     return entries
