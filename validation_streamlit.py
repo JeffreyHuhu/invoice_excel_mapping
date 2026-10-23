@@ -89,10 +89,6 @@ KNOWN_SOURCE_ISSUES: Dict[str, Dict[Tuple[str, str], Tuple[str, Optional[set]]]]
         ("arrive_date", "DATE_ORDER"): ("MAERSK 原帳單的 ETA 本身就早於 ETD", None),
     },
     "CONG_THANH": {
-        # 拖車行：貨櫃號碼欄可以不是「4 碼英文 + 7 碼數字」
-        ("container_no", "CONTAINER_FORMAT"): ("CONG THANH 是拖車行，CONT/XE 欄是車牌或簡寫櫃號，照抄原文", None),
-        ("vessel", "TEXT_NO_LETTER"): ("CONG THANH 對帳單的 Số xe (車號) 欄原文就是這個值", None),
-        ("amount", "AMOUNT_ZERO"): ("帳單上的金額原本就是 0", None),
     },
     "RONG_A_CHAU": {
         ("invoice_date", "MISSING_REQUIRED"): ("RỒNG Á CHÂU 的 Excel 對帳表本身沒有發票日期", None),
@@ -101,6 +97,14 @@ KNOWN_SOURCE_ISSUES: Dict[str, Dict[Tuple[str, str], Tuple[str, Optional[set]]]]
         ("amount", "MISSING_REQUIRED"): ("進口每筆出貨都列 VAT 列，VAT PASS THROUGH 為 0 時金額與稅額皆為 N/A", None),
         ("bl_no", "ID_NO_DIGIT"): ("國內段 (Local) 出貨的提單欄本來就寫 LOCAL", {"LOCAL", "Local", "local"}),
     },
+}
+
+# 供應商例外：這些 (欄位, 規則) 對該供應商不是問題，連附註都不列 (使用者規定)
+SUPPLIER_EXEMPTIONS: Dict[str, set] = {
+    # CONG THANH 是拖車行：CONT/XE 欄是車牌或簡寫櫃號、Số xe (車號) 可能只有
+    # 數字、帳單上原本就是 0 的運費，都照抄原文
+    "CONG_THANH": {("container_no", "CONTAINER_FORMAT"), ("vessel", "TEXT_NO_LETTER"),
+                   ("amount", "AMOUNT_ZERO")},
 }
 
 # 日期合理範圍：早於這一年，或晚於今天 + 這麼多天，視為可疑
@@ -244,15 +248,23 @@ EXTRA_CHARGE_ID_SUPPLIERS = {"CONG_THANH"}
 RULE_EXTRA_CHARGE = "EXTRA_CHARGE_REVIEW"
 
 
-def _check_extra_charges(group_rows: List[Dict]) -> List[Dict]:
+def _check_extra_charges(group_rows: List[Dict], audit_passed: bool = False) -> List[Dict]:
+    """額外費用項目：金額勾稽沒通過 (或無法勾稽) 時 WARN 請人工查核；
+    已通過金額勾稽就只當附註 (使用者規定)。"""
     issues = []
     for idx, row in enumerate(group_rows, start=1):
         texts = [str(row.get(code)) for code in ("order_no", "bl_no")
                  if not _is_blank(row.get(code)) and not re.search(r"\d", str(row.get(code)))]
-        if texts:
+        if not texts:
+            continue
+        message = (f"第 {idx} 筆費用「{row.get('description')}」是額外費用項目"
+                   f" (單號欄寫的是費用名稱：{texts[0]})")
+        if audit_passed:
+            issues.append(_issue(INFO, "description", RULE_EXTRA_CHARGE,
+                                 message + "，已通過金額勾稽", idx - 1))
+        else:
             issues.append(_issue(WARN, "description", RULE_EXTRA_CHARGE,
-                                 f"第 {idx} 筆費用「{row.get('description')}」是額外費用項目"
-                                 f" (單號欄寫的是費用名稱：{texts[0]})，請人工查核", idx - 1))
+                                 message + "，請人工查核", idx - 1))
     return issues
 
 
@@ -377,10 +389,14 @@ def validate_extraction(
         issues = list(base_issues)
         issues.extend(_check_header(group_rows[0]))
         issues.extend(_check_items(group_rows))
+        audit_issues = _check_audit(audit_by_invoice.get(inv_key), supplier_key)
         if supplier_key in EXTRA_CHARGE_ID_SUPPLIERS:
             issues = [i for i in issues if i["rule"] != "ID_NO_DIGIT"]
-            issues.extend(_check_extra_charges(group_rows))
-        issues.extend(_check_audit(audit_by_invoice.get(inv_key), supplier_key))
+            issues.extend(_check_extra_charges(group_rows, audit_passed=(
+                inv_key in audit_by_invoice and not audit_issues)))
+        issues.extend(audit_issues)
+        exempt = SUPPLIER_EXEMPTIONS.get(supplier_key or "", set())
+        issues = [i for i in issues if (i["field"], i["rule"]) not in exempt]
         issues = _explain_by_formula_issue(issues)
         issues = _mark_known_source_issues(issues, supplier_key, group_rows[0])
         confidence = _confidence(issues)
