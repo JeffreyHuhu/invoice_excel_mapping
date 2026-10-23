@@ -89,8 +89,9 @@ KNOWN_SOURCE_ISSUES: Dict[str, Dict[Tuple[str, str], Tuple[str, Optional[set]]]]
         ("arrive_date", "DATE_ORDER"): ("MAERSK 原帳單的 ETA 本身就早於 ETD", None),
     },
     "DWIHARTA": {
-        # 國內報關帳單沒有船名，Vessel 欄印 ". / ." (使用者確認)
-        ("vessel", "TEXT_NO_LETTER"): ("DWIHARTA 國內報關帳單的 Vessel 欄原文就是「. / .」", {". / ."}),
+        # 沒有船名時 Vessel 欄印佔位符號 ". / ." (使用者確認)、"- / -"、"0 / 0"
+        ("vessel", "TEXT_NO_LETTER"): ("DWIHARTA 沒有船名時 Vessel 欄原文就是佔位符號",
+                                       {". / .", "- / -", "0 / 0"}),
     },
     "RONG_A_CHAU": {
         ("invoice_date", "MISSING_REQUIRED"): ("RỒNG Á CHÂU 的 Excel 對帳表本身沒有發票日期", None),
