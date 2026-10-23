@@ -88,6 +88,9 @@ KNOWN_SOURCE_ISSUES: Dict[str, Dict[Tuple[str, str], Tuple[str, Optional[set]]]]
         ("arrive_date", "DATE_FORMAT"): ("MAERSK 原帳單的 ETA 本身就是「--」", {"--"}),
         ("arrive_date", "DATE_ORDER"): ("MAERSK 原帳單的 ETA 本身就早於 ETD", None),
     },
+    "CONG_THANH": {
+        ("container_no", "CONTAINER_FORMAT"): ("CONG THANH 對帳單的 CONT/XE 欄是車牌或簡寫櫃號，照抄原文", None),
+    },
     "RONG_A_CHAU": {
         ("invoice_date", "MISSING_REQUIRED"): ("RỒNG Á CHÂU 的 Excel 對帳表本身沒有發票日期", None),
         # 擷取規則只在費用金額不為 0 時才轉成一列，金額空白的只會是使用者規定

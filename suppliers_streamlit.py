@@ -5107,7 +5107,7 @@ def _ct_columns(rows: List[list], start: int) -> Tuple[Optional[int], Dict[str, 
 
 def _ct_statement(rows: List[list]) -> Optional[Dict]:
     """運費 (VC) / 服務費 (DV) 對帳單。"""
-    header = _ct_header(rows[:15])
+    header = _ct_header(rows)  # 簽核欄 (對帳單日期) 在表格最下面
     title = next((_vn_text(r[0]) for r in rows[:15]
                   if r and _vn_label(r[0]).startswith("STATEMENT OF")), "")
     # "STATEMENT OF EXPORT  TRANPORTATION CHARGE  SEPTEMBER OF , 2026" -> 費用名稱
@@ -5117,12 +5117,12 @@ def _ct_statement(rows: List[list]) -> Optional[Dict]:
     if head_i is None or not charge:
         return None
     c_date, c_inv, c_cbm = cols.get("SHIP DATE"), cols.get("SO INV"), cols.get("CBM")
-    c_amount, c_remark = cols.get("TOTAL AMOUNT"), cols.get("REMARK")
-    c_cont, c_from = cols.get("CONT XE"), cols.get("ĐIỂM ĐI")
+    c_amount, c_remark, c_dec = cols.get("TOTAL AMOUNT"), cols.get("REMARK"), cols.get("DEC")
+    c_cont, c_plate = cols.get("CONT XE"), cols.get("SỐ XE")
 
     items = []
     total = vat = grand = None
-    vat_label = "VAT"
+    prev = {"date": None, "remark": None, "cont": None, "plate": None}
     for row in rows[head_i + 1:]:
         labels = [_vn_label(v) for v in row if isinstance(v, str) and _vn_label(v)]
         # 合計區 (TOTAL / Total / VAT: (8%) / Grand total)：金額不一定在明細的
@@ -5132,37 +5132,50 @@ def _ct_statement(rows: List[list]) -> Optional[Dict]:
         if "GRAND TOTAL" in labels:
             grand = summary
             break
-        vat_text = next((lb for lb in labels if lb.startswith("VAT")), None)
-        if vat_text:
+        if any(lb.startswith("VAT") for lb in labels):
             vat = summary
-            pct = re.search(r"(\d+(?:[.,]\d+)?)\s*%", vat_text)
-            vat_label = f"VAT ({pct.group(1)}%)" if pct else "VAT"
             continue
         if "TOTAL" in labels:
             total = summary
             continue
-        amount = _vn_amount(_vn_cell(row, c_amount))
-        order_no = _vn_text(_vn_cell(row, c_inv))
-        if amount is None or not order_no:
+        so_inv = _vn_text(_vn_cell(row, c_inv))
+        amount = _vn_num(_vn_cell(row, c_amount))
+        if not so_inv:
+            # 沒有 SO INV 但有金額：對帳單層級的調整 (例如貨損扣款
+            # "10 kiện hàng bị ướt…" -1,666,304)，記在對帳單號底下
+            if amount:
+                items.append({"description": "Additional charge", "amount": amount, "vat": None,
+                              "invoice_no": header["invoice_no"],
+                              "invoice_date": header["invoice_date"]})
             continue
+        # 併車的出貨 (同一天、同一個送貨地點) 後面幾列常不重複填車牌，沿用上一列
+        ship_date = _vn_date(_vn_cell(row, c_date))
+        remark = _vn_text(_vn_cell(row, c_remark))
+        same_group = (ship_date, remark) == (prev["date"], prev["remark"])
+        cont = _vn_text(_vn_cell(row, c_cont)) or (prev["cont"] if same_group else None)
+        plate = _vn_text(_vn_cell(row, c_plate)) or (prev["plate"] if same_group else None)
+        prev = {"date": ship_date, "remark": remark, "cont": cont, "plate": plate}
         items.append({
             "description": charge, "amount": amount, "vat": None,
-            "order_no": order_no,
-            "onboard_date": _vn_date(_vn_cell(row, c_date)),
+            "invoice_no": so_inv, "invoice_date": ship_date,
+            "order_no": _vn_text(_vn_cell(row, c_dec)) or None,
+            "arrive_date": ship_date, "onboard_date": ship_date,
+            "bl_no": so_inv, "mbl_no": so_inv,
+            # 越南境內拖車，啟運港 / 目的港一律 VIETNAM (使用者答案)
+            "port_of_loading": "VIETNAM", "port_of_discharge": "VIETNAM",
             "volume": _vn_num(_vn_cell(row, c_cbm)),
-            "container_no": _vn_container(_vn_cell(row, c_cont)),
-            "port_of_loading": _vn_text(_vn_cell(row, c_from)) or None,
-            "port_of_discharge": _vn_text(_vn_cell(row, c_remark)) or None,
+            "vessel": plate or None, "container_no": cont or None,
         })
     if vat:
-        items.append({"description": vat_label, "amount": None, "vat": round(vat, 2)})
+        items.append({"description": "VAT", "amount": None, "vat": round(vat, 2),
+                      "invoice_no": header["invoice_no"], "invoice_date": header["invoice_date"]})
     return {"header": header, "items": items,
             "totals": {"total": total, "grand_total": grand}}
 
 
 def _ct_paid_on_behalf(rows: List[list]) -> Optional[Dict]:
     """代墊款 (CHI HO) INVOICE LIST。"""
-    header = _ct_header(rows[:15])
+    header = _ct_header(rows)  # 簽核欄 (清單日期) 在表格最下面
     head_i, cols = _ct_columns(rows, 0)
     if head_i is None or "SỐ HÓA ĐƠN" not in cols:
         return None
@@ -5227,11 +5240,22 @@ def parse_cong_thanh_sheets(book) -> List[Dict]:
 
 def _cong_thanh_totals(book) -> List[Dict]:
     entries = []
+    net = gross = None
     for p in _ct_parse_book(book):
         if "audit" in p:            # 代墊款清單：整份 + 每張第三方發票
             entries.extend(p["audit"])
-        else:                       # 運費 / 服務費對帳單：一張對帳單一組合計
-            entries.append({"invoice_no": p["header"]["invoice_no"], **p["totals"]})
+            continue
+        # 運費 / 服務費對帳單：每列的 INVOICE NO 是各筆出貨的 SO INV，同一個檔案
+        # 的 VC / DV 兩張對帳單共用出貨單號，所以整份檔案一起勾稽：所有費用 +
+        # VAT = 各對帳單 Grand total 的加總 (使用者提示)
+        t = p["totals"]
+        if t.get("total") is not None:
+            net = (net or 0) + t["total"]
+        if t.get("grand_total") is not None:
+            gross = (gross or 0) + t["grand_total"]
+    if net is not None or gross is not None:
+        entries.append({"invoice_no": None, "total": net, "grand_total": gross,
+                        "final_total": None})
     return entries
 
 
