@@ -209,14 +209,16 @@ RULE_EXCEL_FORMULA = "EXCEL_FORMULA_RANGE"
 
 def _explain_by_formula_issue(issues: List[Dict]) -> List[Dict]:
     """Excel 帳單的查驗順序：先查 Excel 公式，再查每票，最後查整份帳單合計。
-    已經查到合計列公式錯誤時，整份帳單合計對不上就是這個錯誤造成的：保留
-    公式錯誤 (ERROR)，合計不一致改成 INFO 並註明原因，不重複算成兩個錯誤。"""
+    已經查到合計列公式錯誤時，整份帳單合計對不上就是這個錯誤造成的：合計
+    不一致註明原因。使用者原則：沒通過金額稽核一律是重大 ERROR，原因是原
+    帳單也一樣，所以不降級。"""
     if not any(i["rule"] == RULE_EXCEL_FORMULA for i in issues):
         return issues
     explained = []
     for issue in issues:
-        if issue["rule"] in ("TOTAL_FINAL_MISMATCH", "TOTAL_VAT_MISMATCH", "TOTAL_GRAND_MISMATCH"):
-            issue = dict(issue, severity=INFO,
+        if issue["rule"] in ("TOTAL_NET_MISMATCH", "TOTAL_FINAL_MISMATCH", "TOTAL_VAT_MISMATCH",
+                             "TOTAL_GRAND_MISMATCH"):
+            issue = dict(issue,
                          message=f"{issue['message']}（原因：原帳單 Excel 合計列公式有誤，見公式錯誤）")
         explained.append(issue)
     return explained
@@ -338,7 +340,9 @@ def _check_audit(audit: Optional[Dict], supplier_key: Optional[str]) -> List[Dic
     )
     for match_key, diff_key, rule, message in checks:
         if audit.get(match_key) is False:
-            issues.append(_issue(ERROR, "total", rule, f"{message} (差額 {audit.get(diff_key)})"))
+            diff = audit.get(diff_key)
+            diff_text = f"{diff:,.2f}" if isinstance(diff, (int, float)) else diff
+            issues.append(_issue(ERROR, "total", rule, f"{message} (差額 {diff_text})"))
     return issues
 
 
