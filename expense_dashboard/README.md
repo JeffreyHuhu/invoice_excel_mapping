@@ -23,7 +23,7 @@ EXE 不含資料；資料是另一個檔案 `expenses.duckdb` (MAERSK 2025–202
 | 方式 | 做法 | 適合 |
 |---|---|---|
 | **共用資料夾 (建議)** | 把 `expenses.duckdb` 放在公司共用磁碟/NAS；每個人第一次開 EXE 時在「資料管理」指定一次路徑。資料由一人更新，大家看到的都是最新的。 | 團隊多人使用 |
-| **跟 EXE 一起發** | 資料夾裡放 `expense_dashboard.exe` + `data\expenses.duckdb`，壓縮後發給同事。EXE 預設就讀旁邊的 `data\expenses.duckdb`。 | 離線、少數人 |
+| **跟 EXE 一起發** | 資料夾裡放 `expense_dashboard.exe` + `_internal\` + `data\expenses.duckdb`，壓縮後發給同事。EXE 預設就讀旁邊的 `data\expenses.duckdb`。 | 離線、少數人 |
 
 注意：拿到資料庫檔就能看到全部發票資料，只在公司內部流通，不要放進公開的 GitHub repo (repo 已 gitignore `data/`)。
 同一時間只能有一個人更新資料；更新期間其他人的儀表板會提示「資料庫正在更新中」，稍後重新整理即可。
@@ -34,8 +34,11 @@ EXE 不含資料；資料是另一個檔案 `expenses.duckdb` (MAERSK 2025–202
 pip install -r requirements.txt
 streamlit run app.py                      # 開發時直接跑網頁
 python process_data.py "<轉檔結果所在資料夾>" [--supplier-folder MAERSK] [--full]
-python -m PyInstaller --noconfirm expense_dashboard.spec   # 打包 dist\expense_dashboard.exe
+python -m PyInstaller --noconfirm expense_dashboard.spec   # 打包 dist\expense_dashboard\ (EXE + _internal\)
 ```
+
+打包用 onedir 模式：EXE 執行時不解壓縮到 `%TEMP%`，啟動較快，也不會留下 `_MEIxxxx` 暫存資料夾。
+發佈時把 `dist\expense_dashboard\` 裡的內容整份複製過去，EXE 與 `_internal\` 要放同一層。
 
 | 檔案 | 內容 |
 |---|---|

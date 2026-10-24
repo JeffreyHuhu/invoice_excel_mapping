@@ -1,6 +1,8 @@
 # -*- mode: python ; coding: utf-8 -*-
 # PyInstaller 打包設定：python -m PyInstaller --noconfirm expense_dashboard.spec
-# 產生 dist\expense_dashboard.exe (單一檔案，內含 Python 與所有套件)。
+# 產生 dist\expense_dashboard\ 資料夾 (onedir 模式)：expense_dashboard.exe + _internal\。
+# 不用 onefile：onefile 每次啟動都解壓縮到 %TEMP%\_MEIxxxx，被強制關閉時不會清掉。
+# 發佈時把資料夾內容整份複製到 EXE 的位置 (EXE 與 _internal 放同一層)。
 from PyInstaller.utils.hooks import collect_data_files, collect_submodules, copy_metadata
 
 # 頁面以 .py 檔案交給 Streamlit 執行，要放進 EXE 解壓縮後的根目錄
@@ -34,20 +36,26 @@ pyz = PYZ(a.pure)
 exe = EXE(
     pyz,
     a.scripts,
-    a.binaries,
-    a.datas,
     [],
+    exclude_binaries=True,      # 套件與 DLL 放 _internal，由 COLLECT 收
     name='expense_dashboard',
     debug=False,
     bootloader_ignore_signals=False,
     strip=False,
-    upx=True,
-    upx_exclude=[],
-    runtime_tmpdir=None,
+    upx=False,                  # UPX 會讓每次載入 DLL 都要解壓縮，耗 CPU
     console=True,   # 保留黑色視窗：顯示啟動狀態，關掉它就結束程式
     disable_windowed_traceback=False,
     argv_emulation=False,
     target_arch=None,
     codesign_identity=None,
     entitlements_file=None,
+)
+
+coll = COLLECT(
+    exe,
+    a.binaries,
+    a.datas,
+    strip=False,
+    upx=False,
+    name='expense_dashboard',
 )
