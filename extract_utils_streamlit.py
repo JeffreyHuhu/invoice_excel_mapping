@@ -163,6 +163,55 @@ def _ocr_page_text(pdf_path: str, page_index: int, page) -> str:
     return text
 
 
+# 掃描檔省算力 (使用者規定，所有供應商適用)：掃描頁先用低解析度、不做轉向
+# 偵測快速 OCR；認得出是帳單頁的才用 _ocr_page_text() 高解析度重做，其他頁
+# (提單、條款、領料單等附件) 直接用低解析度的文字。
+_OCR_FAST_DPI = 150
+_OCR_FAST_CACHE: Dict[Tuple[str, int], Tuple[str, bool]] = {}
+
+
+def _ocr_page_fast(pdf_path: str, page_index: int, page) -> Tuple[str, bool]:
+    """低解析度 OCR，回傳 (文字, 是否轉向)。轉向的頁 (例如 DHL 第 2 頁) 低解析度
+    讀出來是亂碼、判斷不了，呼叫端一律改用高解析度。"""
+    cache_key = (pdf_path, page_index)
+    if cache_key not in _OCR_FAST_CACHE:
+        text, rotated = "", False
+        if _OCR_AVAILABLE:
+            try:
+                image = page.to_image(resolution=_OCR_FAST_DPI).original
+                text = pytesseract.image_to_string(image) or ""
+                # 轉向偵測每頁約 1 秒，比低解析度 OCR 還貴：只有讀出來像亂碼
+                # 的頁才做
+                if _looks_garbled(text):
+                    try:
+                        m = re.search(r"Rotate:\s*(\d+)", pytesseract.image_to_osd(image))
+                        rotated = bool(m and int(m.group(1)))
+                    except Exception:
+                        rotated = False
+            except Exception:
+                text = ""
+        _OCR_FAST_CACHE[cache_key] = (text, rotated)
+    return _OCR_FAST_CACHE[cache_key]
+
+
+def _looks_garbled(text: str) -> bool:
+    """OCR 文字像亂碼：有一定字數，但「3 個字母以上的英文字」不到一半 (轉向頁
+    讀出來多是 "S3XV1"、"O6L'E" 這種片段)。"""
+    tokens = text.split()
+    if len(tokens) < 20:
+        return False
+    words = sum(1 for t in tokens if re.fullmatch(r"[A-Za-z]{3,}[.,:;]?", t))
+    return words / len(tokens) < 0.5
+
+
+def _page_needs_full_ocr(fast: Tuple[str, bool]) -> bool:
+    """要用高解析度重做的頁：轉向的頁 (低解析度判斷不了)，以及低解析度就認得
+    出供應商或抬頭是 Faktur Pajak 的頁 (擷取與稅務發票判斷要用)。"""
+    text, rotated = fast
+    return (rotated or detect_supplier(text) is not None
+            or text.upper().lstrip().startswith("FAKTUR PAJAK"))
+
+
 def extract_text_from_pdf(pdf_path: str, **pdfplumber_kwargs) -> str:
     """讀取 PDF 全部頁面文字並合併成一個字串。
 
@@ -314,11 +363,22 @@ def extract_pages_from_pdf(pdf_path: str, **pdfplumber_kwargs) -> List[str]:
 
     pages_text = []
     with pdfplumber.open(pdf_path) as pdf:
+        scanned = []
         for i, page in enumerate(pdf.pages):
             text = page.extract_text(**pdfplumber_kwargs) or ""
             if not text.strip():
-                text = _ocr_page_text(pdf_path, i, page)
+                scanned.append(i)
             pages_text.append(text)
+        if scanned:
+            # 沒有文字層的掃描頁：先低解析度，認得出是帳單頁的再高解析度重做；
+            # 低解析度一頁都認不出 (例如整份掃歪) 時全部用高解析度，跟以前一樣
+            fast = {i: _ocr_page_fast(pdf_path, i, pdf.pages[i]) for i in scanned}
+            full = [i for i in scanned if _page_needs_full_ocr(fast[i])]
+            if not any(detect_supplier(fast[i][0]) for i in scanned):
+                full = scanned
+            for i in scanned:
+                pages_text[i] = (_ocr_page_text(pdf_path, i, pdf.pages[i]) if i in full
+                                 else fast[i][0])
 
     _PAGES_CACHE[key] = pages_text
     while len(_PAGES_CACHE) > _PAGES_CACHE_SIZE:
