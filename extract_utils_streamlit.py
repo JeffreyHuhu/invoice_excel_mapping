@@ -877,9 +877,20 @@ _FOLDER_UNSAFE_RE = re.compile(r'[<>:"/\\|?*\x00-\x1f]')
 
 
 def _is_faktur_first_page(text: str) -> bool:
-    upper = (text or "").upper()
-    return (upper.lstrip().startswith("FAKTUR PAJAK")
-            and "KODE DAN NOMOR SERI FAKTUR PAJAK" in upper)
+    """第一頁的抬頭就是 Faktur Pajak。只看抬頭：掃描檔 OCR 常把其他字樣讀錯
+    (例如 'Kode dan Nomor Seri' 讀成 'Kode dan Nomet Se')，不能靠它們判斷。"""
+    return (text or "").upper().lstrip().startswith("FAKTUR PAJAK")
+
+
+def _faktur_seller_by_line(text: str) -> Optional[str]:
+    """OCR 讀不出「Pengusaha Kena Pajak」標籤時的備援：抬頭附近 (前 10 行)
+    第一個能被已註冊供應商認出的行就是賣方 (例如 'Narna: MAERSK LOGISTICS
+    INDONESIA')。逐行判斷，避開 detect 對整份稅務發票的排除規則。"""
+    for line in (text or "").splitlines()[1:11]:
+        key = detect_supplier(line)
+        if key:
+            return key
+    return None
 
 
 def standalone_tax_invoice_owner(pdf_path: str, text: str) -> Optional[str]:
@@ -895,14 +906,23 @@ def standalone_tax_invoice_owner(pdf_path: str, text: str) -> Optional[str]:
     """
     if not _is_faktur_first_page(text):
         return None
+    # 頁面已經在快取裡 (擷取時讀過/OCR 過)，不會重讀。每一頁都要是稅務發票的
+    # 內容，或至少不是供應商帳單 (掃描檔背面的條款頁 OCR 常是亂碼，沒有任何
+    # 稅務發票關鍵字)；有一頁認得出是供應商帳單就不是「單獨一份」
     pages = extract_pages_from_pdf(pdf_path)
-    if not all(any(m in p.upper() for m in _FAKTUR_PAGE_MARKERS) for p in pages):
-        return None
+    for page in pages:
+        has_marker = any(m in page.upper() for m in _FAKTUR_PAGE_MARKERS)
+        if not has_marker and detect_supplier(page):
+            return None
 
     m = _FAKTUR_SELLER_RE.search(text)
     seller = m.group(1).strip() if m else ""
     if seller:
         key = detect_supplier(seller)
+        if key:
+            return key
+    else:
+        key = _faktur_seller_by_line(text)
         if key:
             return key
     return _FOLDER_UNSAFE_RE.sub(" ", seller).strip(" .")

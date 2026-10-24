@@ -943,8 +943,8 @@ def detect_maersk(text: str) -> bool:
     注意：正常 MAERSK 帳單後面也可能附一頁 Faktur Pajak，所以只排除
     「一開頭就是 Faktur Pajak」的單獨電子稅務發票。"""
     upper = text.upper()
-    if (upper.lstrip().startswith("FAKTUR PAJAK")
-            and "KODE DAN NOMOR SERI FAKTUR PAJAK" in upper):
+    # 只看抬頭：掃描檔 OCR 常把 "Kode dan Nomor Seri" 讀錯，不能靠它判斷
+    if upper.lstrip().startswith("FAKTUR PAJAK"):
         return False
     return "MAERSK LOGISTICS" in upper
 
@@ -1009,8 +1009,9 @@ def _maersk_clean_amount(text: Optional[str]) -> Optional[int]:
 #   "VAT 25,830"
 #   "Min. Quantity Price 2,348.19 234,819"       -> 最後一個數字才是金額
 # 用逐行掃描處理這些不固定的情況。
+# 掃描檔 OCR 常把項次讀成 "3." (多一個句點)，所以句點設為選填
 _MAERSK_ITEM_START_PATTERN = re.compile(
-    r"^(?P<num>\d+)\s+(?P<desc>.+?)\s+(?P<qty>\d+(?:\.\d+)?)\s+"
+    r"^(?P<num>\d+)\.?\s+(?P<desc>.+?)\s+(?P<qty>\d+(?:\.\d+)?)\s+"
     r"(?P<uom>[A-Za-z][A-Za-z0-9]*)(?:\s+(?P<amount>[\d,]+))?\s*$"
 )
 _MAERSK_VAT_LINE_PATTERN = re.compile(r"^VAT\s+([\d,]+)\s*$")
@@ -1021,7 +1022,8 @@ _MAERSK_TABLE_END_PATTERN = re.compile(r"^[\d,]+$")
 
 def _maersk_extract_items(block: str) -> Tuple[List[Dict], Optional[str]]:
     """擷取一個 FCR 區塊的費用明細，回傳 (items, 該區塊 M3 數量)。"""
-    m = re.search(r"ItemDescription of Charges[^\n]*\n(.*)", block, re.DOTALL)
+    # 文字層是 "ItemDescription"，掃描檔 OCR 是 "Item Description"
+    m = re.search(r"Item\s*Description\s+of\s+Charges[^\n]*\n(.*)", block, re.DOTALL)
     if not m:
         return [], None
     lines = []
