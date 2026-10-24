@@ -713,8 +713,13 @@ def register_supplier(key: str, label: str,
                        force_ocr: bool = False,
                        sheet_parse: Optional[Callable[["SheetBook"], List[Dict]]] = None,
                        sheet_totals: Optional[Callable[["SheetBook"], List[Dict]]] = None,
-                       extract_vat_total: Optional[Callable[[str], Optional[float]]] = None) -> None:
+                       extract_vat_total: Optional[Callable[[str], Optional[float]]] = None,
+                       invoice_page: Optional[Callable[[str], bool]] = None) -> None:
     """註冊一家供應商。
+
+    invoice_page (可選，非 multi_page 供應商用)：判斷某一頁是不是這家的帳單
+    頁。有給時只擷取/勾稽帳單頁，其他頁 (提單、條款、其他公司的發票等雜訊)
+    當附件，見 invoice_text()；查驗結果會列出附件頁。
 
     extract_vat_total (可選，目前只用於單張發票的 PDF)：從原始文字抓帳單本身
     寫的 VAT 合計 (例如 DWIHARTA 的 "V A T 201,348")，跟擷取到的 VAT 加總
@@ -781,7 +786,7 @@ def register_supplier(key: str, label: str,
         "extract_final_total": extract_final_total, "deduction_prefixes": deduction_prefixes,
         "audit_exclude": audit_exclude, "force_ocr": force_ocr,
         "sheet_parse": sheet_parse, "sheet_totals": sheet_totals,
-        "extract_vat_total": extract_vat_total,
+        "extract_vat_total": extract_vat_total, "invoice_page": invoice_page,
         # Excel 供應商一份檔案可能有好幾張對帳單，比對時跟 multi_page 一樣用
         # invoice_no 分組
         "multi_page": multi_page or sheet_parse is not None,
@@ -994,6 +999,21 @@ def _parse_multi_page_pdf(pdf_path: str, key: str, **pdfplumber_kwargs) -> List[
     return rows
 
 
+def invoice_text(pdf_path: str, key: Optional[str],
+                 **pdfplumber_kwargs) -> Tuple[str, List[int]]:
+    """帳單常夾帶雜訊頁 (提單、條款、其他公司的發票…)。供應商有登記
+    invoice_page (register_supplier()) 時，只把「帳單頁」合併成擷取用的文字，
+    回傳 (文字, 附件頁的頁碼 (1 起算))；沒有登記或一頁都不符合時用全部頁面。"""
+    pages = extract_pages_from_pdf(pdf_path, **pdfplumber_kwargs)
+    entry = SUPPLIER_REGISTRY.get(key) if key else None
+    check = entry.get("invoice_page") if entry else None
+    keep = [i for i, p in enumerate(pages) if check(p)] if check else []
+    if not keep:
+        return "\n".join(pages), []
+    noise = [i + 1 for i in range(len(pages)) if i not in keep]
+    return "\n".join(pages[i] for i in keep), noise
+
+
 def parse_invoice_pdf(pdf_path: str, supplier_key: Optional[str] = None,
                        **pdfplumber_kwargs) -> Tuple[Optional[str], List[Dict], str]:
     """讀取PDF、自動判斷供應商 (若未指定)、用對應規則擷取欄位。
@@ -1019,7 +1039,7 @@ def parse_invoice_pdf(pdf_path: str, supplier_key: Optional[str] = None,
         return key, rows, text
 
     if key and key in SUPPLIER_REGISTRY:
-        parsed = SUPPLIER_REGISTRY[key]["parse"](text)
+        parsed = SUPPLIER_REGISTRY[key]["parse"](invoice_text(pdf_path, key, **pdfplumber_kwargs)[0])
     else:
         parsed = {"header": {}, "items": [{}]}
     rows = expand_to_rows(parsed)
@@ -1146,8 +1166,9 @@ def normalize_value(value) -> str:
     # 時有時候又存成真正的 Excel 日期型別（上面的 datetime 分支會轉成
     # "DD Mon YYYY"）。兩種情況都要能跟系統擷取出來的日期值比對成功，所以
     # 純文字的 "DD/MM/YYYY" 也統一轉成跟 datetime 分支一樣的 "DD Mon YYYY"
-    # 格式，不要只是單純大寫比較文字。
-    slash_date_m = re.fullmatch(r"(\d{1,2})/(\d{1,2})/(\d{4})", text)
+    # 格式，不要只是單純大寫比較文字。句點分隔的 "DD.MM.YYYY" (例如 KN 空運
+    # 答案 "10.06.2025") 也一樣。
+    slash_date_m = re.fullmatch(r"(\d{1,2})[/.](\d{1,2})[/.](\d{4})", text)
     if slash_date_m:
         try:
             day_i, month_i, year_i = (int(g) for g in slash_date_m.groups())
@@ -1645,7 +1666,8 @@ def audit_invoice_totals(
                 final_totals_found.get(inv_key),
             ))
     else:
-        text = extract_text_from_pdf(pdf_path, **pdfplumber_kwargs)
+        # 只用帳單頁勾稽 (附件頁的金額不算，見 invoice_text())
+        text = invoice_text(pdf_path, supplier_key, **pdfplumber_kwargs)[0]
         invoice_total = None
         grand_total = None
         final_total = None
@@ -1765,7 +1787,7 @@ def find_best_extraction(
             text = extract_text_from_pdf(pdf_path, **cfg)
             key = supplier_key or detect_supplier(text)
             if key and key in SUPPLIER_REGISTRY:
-                parsed = SUPPLIER_REGISTRY[key]["parse"](text)
+                parsed = SUPPLIER_REGISTRY[key]["parse"](invoice_text(pdf_path, key, **cfg)[0])
             else:
                 parsed = {"header": {}, "items": [{}]}
             rows = expand_to_rows(parsed)

@@ -266,6 +266,51 @@ def detect_kuehne_nagel(text: str) -> bool:
     return "KUEHNE" in upper and "NAGEL" in upper
 
 
+def kn_invoice_page(page: str) -> bool:
+    """KN 帳單頁 = Sales Invoice (有 "SALES INVOICE" 與 "INVOICE NO.")。同一份
+    PDF 常夾帶空運提單 (Air Waybill)、承運條款、代墊廠商發票等附件，上面也
+    印了 Kuehne Nagel，但不是帳單 (使用者規定只擷取帳單頁)。"""
+    upper = page.upper()
+    return "SALES INVOICE" in upper and "INVOICE NO." in upper
+
+
+# 空運 Sales Invoice (使用者 2026-10 樣本 JKT1402378、JKT1406381)：
+#   "AWB NO(S) : 1066557183 / 910-18077076 FLIGHT NO(S) : WY/850; WY/117"
+#   "ORIGIN AIRPORT : JAKARTA DEST. AIRPORT : NEW YORK, NY"
+#   "FLIGHT DATE : 06.07.2025 ARRIVAL DATE : 07.07.2025"
+#   貨物行 "236 ADIZERO ... 1,823.00 27.136 4523.00" (毛重、材積 CBM、計費重)
+#   費用 "OUTLAYS GARUDA 14,503,404 Z" (代墊費，名稱只寫 OUTLAYS，使用者規定)
+
+
+def _kn_parse_air(text: str, header: Dict) -> List[Dict]:
+    """空運帳單：覆寫運輸相關抬頭欄位，回傳費用明細。"""
+    charge_line = re.compile(
+        rf"^(?P<desc>[A-Z][^\n]*?)\s+(?P<amount>{_KN_AMOUNT})\s+[A-Z0-9]\s*$", re.MULTILINE)
+    awb = re.search(r"AWB NO\(S\)\s*:\s*(\S+)\s*/\s*(\S+)", text)
+    if awb:
+        header["bl_no"], header["mbl_no"] = awb.group(1), awb.group(2)
+    header["vessel"] = _search(r"FLIGHT NO\(S\)\s*:\s*(.+?)\s*$", text)
+    header["port_of_loading"] = _search(r"ORIGIN AIRPORT\s*:\s*(.+?)\s+DEST\.\s*AIRPORT", text)
+    header["port_of_discharge"] = _search(r"DEST\.\s*AIRPORT\s*:\s*(.+?)\s*$", text)
+    for code, label in (("onboard_date", "FLIGHT DATE"), ("arrive_date", "ARRIVAL DATE")):
+        m = re.search(rf"{label}\s*:\s*(\d{{1,2}})\.(\d{{1,2}})\.(\d{{4}})", text)
+        header[code] = _format_date_en(*m.groups()) if m else None
+    cargo = re.search(r"VOLUME / CBM[^\n]*\n[^\n]*?([\d,]+\.\d+)\s+([\d.]+)\s+([\d.]+)\s*$",
+                      text, re.MULTILINE)
+    header["volume"] = cargo.group(2) if cargo else None
+    header["container_no"] = None
+    items = []
+    for m in charge_line.finditer(text):
+        desc = m.group("desc").strip()
+        if desc.upper().startswith(("VAT TOTAL", "SUBTOTAL", "TOTAL")):
+            continue
+        if desc.upper().startswith("OUTLAYS"):
+            desc = "OUTLAYS"   # 代墊廠商名稱不寫 (使用者規定)
+        items.append({"description": desc,
+                      "amount": _kn_clean_amount_comma_thousands(m.group("amount"))})
+    return items
+
+
 _KN_LABEL_WORDS = [
     r"INVOICE TO", r"SALES INVOICE", r"KN TRACKING NO\.?", r"KN ACCOUNTING NO\.?",
     r"ACCOUNT NO\.?", r"INVOICE NO\.?\s*/\s*DATE", r"DUE DATE", r"CONSIGNEE", r"SHIPPER",
@@ -356,7 +401,7 @@ def _kn_clean_amount_comma_thousands(text: Optional[str]):
 #   "SUBTOTAL IDR 12,244,622 1,346,908"   (未稅合計 + VAT 合計)
 #   "INVOICE TOTAL IDR 13,591,530"         (含稅總額；有些國家寫 AMOUNT DUE)
 _KN_SUBTOTAL_PATTERN = r"SUBTOTAL\s+[A-Z]{3}\s+([\d,.]+)\s+([\d,.]+)"
-_KN_GRAND_TOTAL_PATTERN = r"(?:INVOICE\s+TOTAL|AMOUNT\s+DUE)\s+[A-Z]{3}\s+([\d,.]+)"
+_KN_GRAND_TOTAL_PATTERN = r"(?:INVOICE\s+TOTAL|AMOUNT\s+DUE|TOTAL\s+DUE)\s+[A-Z]{3}\s+([\d,.]+)"
 
 
 # SUPPLIER：以 KN 帳單「右下角」的公司名稱為準 (稅務發票不是每份 PDF 都有)。
@@ -551,7 +596,10 @@ def parse_kuehne_nagel(text: str) -> Dict:
     # 這種帳單沒有主提單，留空給 expand_to_rows() 補 N/A
     header["mbl_no"] = None
 
-    items = _kn_extract_charge_items(text)
+    if "AWB NO(S)" in text.upper():
+        items = _kn_parse_air(text, header)
+    else:
+        items = _kn_extract_charge_items(text)
     # 這家供應商的 PDF 常常把同一張 Sales Invoice「整份內容」重複印兩次
     # (ORIGINAL 跟 DIGITAL COPY 各一份，直排在頁面兩側當水印文字，肉眼看
     # 不出來，但 pdfplumber 把兩份內容前後接在一起)，導致費用明細行數量
@@ -3038,6 +3086,7 @@ register_supplier(
 register_supplier(
     "KUEHNE_NAGEL", "KUEHNE NAGEL INDONESIA", detect_kuehne_nagel, parse_kuehne_nagel,
     extract_total=_kn_extract_total, extract_grand_total=_kn_extract_grand_total,
+    invoice_page=kn_invoice_page,
 )
 register_supplier(
     "INDOPROSTIME", "PT. INDO PROSTIME EXPRESS", detect_indoprostime, parse_indoprostime,
