@@ -194,6 +194,36 @@ def _ocr_page_fast(pdf_path: str, page_index: int, page) -> Tuple[str, bool]:
     return _OCR_FAST_CACHE[cache_key]
 
 
+_OCR_PSM_CACHE: Dict[Tuple[str, int, int], str] = {}
+
+
+def _ocr_page_with_psm(pdf_path: str, page_index: int, psm: int) -> str:
+    """用指定的版面分析模式 (tesseract --psm) 高解析度重新 OCR 一頁。例如
+    GALUH 的金額欄跟費用名稱分得很開，預設模式會漏掉整欄金額，psm 6 (整頁
+    當成一個文字區塊) 才讀得到。供應商用 register_supplier(ocr_psm=6) 指定。"""
+    cache_key = (pdf_path, page_index, psm)
+    if cache_key not in _OCR_PSM_CACHE:
+        text = ""
+        if _OCR_AVAILABLE:
+            try:
+                with pdfplumber.open(pdf_path) as pdf:
+                    image = pdf.pages[page_index].to_image(resolution=300).original
+                text = pytesseract.image_to_string(image, config=f"--psm {psm}") or ""
+            except Exception:
+                text = ""
+        _OCR_PSM_CACHE[cache_key] = text
+    return _OCR_PSM_CACHE[cache_key]
+
+
+def _scanned_page_indexes(pdf_path: str) -> List[int]:
+    """沒有文字層的頁 (掃描頁)。"""
+    try:
+        with pdfplumber.open(pdf_path) as pdf:
+            return [i for i, p in enumerate(pdf.pages) if not (p.extract_text() or "").strip()]
+    except Exception:
+        return []
+
+
 def _looks_garbled(text: str) -> bool:
     """OCR 文字像亂碼：有一定字數，但「3 個字母以上的英文字」不到一半 (轉向頁
     讀出來多是 "S3XV1"、"O6L'E" 這種片段)。"""
@@ -774,8 +804,12 @@ def register_supplier(key: str, label: str,
                        sheet_parse: Optional[Callable[["SheetBook"], List[Dict]]] = None,
                        sheet_totals: Optional[Callable[["SheetBook"], List[Dict]]] = None,
                        extract_vat_total: Optional[Callable[[str], Optional[float]]] = None,
-                       invoice_page: Optional[Callable[[str], bool]] = None) -> None:
+                       invoice_page: Optional[Callable[[str], bool]] = None,
+                       ocr_psm: Optional[int] = None) -> None:
     """註冊一家供應商。
+
+    ocr_psm (可選，非 multi_page 供應商用)：這家的掃描帳單頁改用指定的
+    tesseract 版面分析模式重新 OCR (例如 GALUH 用 6，預設模式會漏掉金額欄)。
 
     invoice_page (可選，非 multi_page 供應商用)：判斷某一頁是不是這家的帳單
     頁。有給時只擷取/勾稽帳單頁，其他頁 (提單、條款、其他公司的發票等雜訊)
@@ -847,6 +881,7 @@ def register_supplier(key: str, label: str,
         "audit_exclude": audit_exclude, "force_ocr": force_ocr,
         "sheet_parse": sheet_parse, "sheet_totals": sheet_totals,
         "extract_vat_total": extract_vat_total, "invoice_page": invoice_page,
+        "ocr_psm": ocr_psm,
         # Excel 供應商一份檔案可能有好幾張對帳單，比對時跟 multi_page 一樣用
         # invoice_no 分組
         "multi_page": multi_page or sheet_parse is not None,
@@ -1066,6 +1101,13 @@ def invoice_text(pdf_path: str, key: Optional[str],
     回傳 (文字, 附件頁的頁碼 (1 起算))；沒有登記或一頁都不符合時用全部頁面。"""
     pages = extract_pages_from_pdf(pdf_path, **pdfplumber_kwargs)
     entry = SUPPLIER_REGISTRY.get(key) if key else None
+    psm = entry.get("ocr_psm") if entry else None
+    if psm and not is_spreadsheet(pdf_path):
+        # 這家供應商的掃描頁要用指定的 OCR 模式 (只重做認得出供應商的頁)
+        pages = list(pages)
+        for i in _scanned_page_indexes(pdf_path):
+            if detect_supplier(pages[i]) == key:
+                pages[i] = _ocr_page_with_psm(pdf_path, i, psm)
     check = entry.get("invoice_page") if entry else None
     keep = [i for i, p in enumerate(pages) if check(p)] if check else []
     if not keep:

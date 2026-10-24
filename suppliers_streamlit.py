@@ -4314,10 +4314,17 @@ _GALUH_BLOCK_PATTERN = re.compile(
     r"No\.\s*KETERANGAN\s*JUMLAH\s*\n(.*?)\nTotal\s+[\d.,]+\s*$",
     re.DOTALL | re.MULTILINE,
 )
-_GALUH_TAX_LINE_PATTERN = re.compile(r"^(?P<desc>PP[Nh]\s+\d+%)\s+(?P<amount>-?[\d.]+)\s*$")
+# 掃描檔 OCR 會把千分位句點讀成逗號 ("-2.528,800")，金額接受兩種符號
+_GALUH_TAX_LINE_PATTERN = re.compile(r"^(?P<desc>PP[Nh]\s+\d+%)\s+(?P<amount>-?[\d.,]+)\s*$")
 _GALUH_ITEM_LINE_PATTERN = re.compile(
     r"^\d+\s+(?P<desc>.+?)\s+(?P<amount>\d{1,3}(?:\.\d{3})*)\s*$"
 )
+# 掃描版：從 "Tgl. Invoice" 那行之後到 "Terbilang" (金額大寫) 為止。表頭
+# "KETERANGAN JUMLAH" 有時 OCR 讀不到，Total 那行常是亂碼，都不當邊界
+_GALUH_SCAN_BLOCK_PATTERN = re.compile(
+    r"Tgl\.\s*Invoice[^\n]*\n(.*?)\n[^\n]*Terbilang", re.DOTALL | re.IGNORECASE)
+_GALUH_SCAN_ITEM_LINE_PATTERN = re.compile(
+    r"^(?P<desc>[A-Za-z].+?)\s+(?P<amount>\d{1,3}(?:\.\d{3})+)\s*$")
 _GALUH_MONTH_NAMES = (
     "Januari|Februari|Maret|April|Mei|Juni|Juli|Agustus|September|"
     "Oktober|November|Desember"
@@ -4363,6 +4370,11 @@ def _galuh_rejoin_split_tax_lines(block: str) -> str:
 
 def _galuh_extract_items(text: str) -> List[Dict]:
     block_m = _GALUH_BLOCK_PATTERN.search(text)
+    item_pattern = _GALUH_ITEM_LINE_PATTERN
+    if not block_m:
+        # 掃描檔 (使用者 2026-10 樣本 0500084/KWTGIB/2025)
+        block_m = _GALUH_SCAN_BLOCK_PATTERN.search(text)
+        item_pattern = _GALUH_SCAN_ITEM_LINE_PATTERN
     if not block_m:
         return []
     block = _galuh_rejoin_split_tax_lines(block_m.group(1))
@@ -4371,6 +4383,9 @@ def _galuh_extract_items(text: str) -> List[Dict]:
         line = line.strip()
         if not line:
             continue
+        if item_pattern is _GALUH_SCAN_ITEM_LINE_PATTERN:
+            # 掃描版 OCR 會帶出表格線與序號 ("1 |TRUCKING ..."、"| PPh 2% ...")
+            line = re.sub(r"^(?:\d+\s*)?\|+\s*", "", line)
         tax_m = _GALUH_TAX_LINE_PATTERN.match(line)
         if tax_m:
             items.append({
@@ -4379,7 +4394,7 @@ def _galuh_extract_items(text: str) -> List[Dict]:
                 "vat": _galuh_clean_amount(tax_m.group("amount")),
             })
             continue
-        item_m = _GALUH_ITEM_LINE_PATTERN.match(line)
+        item_m = item_pattern.match(line)
         if item_m:
             items.append({
                 "description": _galuh_strip_date_suffix(item_m.group("desc").strip()),
@@ -4396,10 +4411,14 @@ def _galuh_extract_grand_total(text: str) -> Optional[int]:
 def parse_galuh(text: str) -> Dict:
     header: Dict[str, Optional[str]] = {}
 
-    header["supplier"] = _search(r"^(PT\.\s*GALUH\s*INTI\s*BAHARI)", text)
-    header["invoice_no"] = _search(r"No\.\s*Invoice\s*:\s*(\S+)", text)
+    # 統一輸出正式名稱：掃描檔 OCR 常少空格、前面黏 logo 文字
+    # ("PT. GALUH INTIBAHARI"、"“GALUH PT. GALUH INTI BAHARI")
+    header["supplier"] = ("PT. GALUH INTI BAHARI"
+                          if re.search(r"PT[.,]\s*GALUH\s*INTI\s*BAHARI", text) else None)
+    # 掃描檔 OCR 常把標點讀錯 ("No, Invoice ; 0500084/KWTGIB/2025")
+    header["invoice_no"] = _search(r"No[.,]\s*Invoice\s*[:;]\s*(\S+)", text)
 
-    _galuh_date_m = re.search(r"Tgl\.\s*Invoice\s*:\s*(\d{1,2})\s+(\w+)\s+(\d{4})", text)
+    _galuh_date_m = re.search(r"Tgl\.\s*Invoice\s*[:;]\s*(\d{1,2})\s+(\w+)\s+(\d{4})", text)
     header["invoice_date"] = (
         _galuh_parse_date(*_galuh_date_m.groups()) if _galuh_date_m else None
     )
@@ -4410,7 +4429,7 @@ def parse_galuh(text: str) -> Dict:
     if _galuh_rekap_m:
         header["consignee"] = _galuh_rekap_m.group(1).strip()
     else:
-        header["consignee"] = _search(r"\bTO\s+(.+?)\s+No\.\s*Invoice", text)
+        header["consignee"] = _search(r"\bTO\s+(.+?)\s+No[.,]\s*Invoice", text)
 
     # 這張帳單沒有訂單編號/到貨日/開船日/提單號/主提單號/啟運港/目的港/
     # 材積/船名/貨櫃號/出貨方資訊，留空給 expand_to_rows() 補 N/A。
@@ -4436,6 +4455,8 @@ def parse_galuh(text: str) -> Dict:
 register_supplier(
     "GALUH", "PT. GALUH INTI BAHARI", detect_galuh, parse_galuh,
     extract_grand_total=_galuh_extract_grand_total,
+    # 掃描帳單的金額欄跟名稱分得很開，預設 OCR 模式會漏掉整欄金額
+    ocr_psm=6,
 )
 
 
