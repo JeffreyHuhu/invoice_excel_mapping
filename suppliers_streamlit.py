@@ -709,7 +709,8 @@ def _indo_format_date(day, month, year) -> Optional[str]:
         d, m, y = int(day), int(month), int(year)
     except (TypeError, ValueError):
         return None
-    if not 1 <= m <= 12:
+    # 帳單打錯的年份 (例如 FLIGHT "CX3245/19020025" 的 0025) 不輸出錯誤日期
+    if not 1 <= m <= 12 or y < 2000:
         return None
     return f"{y}-{_INDO_MONTH_ABBR_UPPER[m - 1]}-{d:02d}"
 
@@ -1007,10 +1008,12 @@ _MAERSK_NEXT = "(?:" + "|".join(_MAERSK_LABEL_WORDS) + ")"
 # 停止，不能靠連續空白判斷。
 _MAERSK_STOP = rf"(?=\s+{_MAERSK_NEXT}\b|\n|$)"
 
-# 英文月份縮寫對照表 (後面其他供應商也共用這份)
+# 英文月份縮寫對照表 (後面其他供應商也共用這份)；也收印尼文縮寫
+# (Mei/Agt/Okt/Des，例如 TRANS DAYA PRIMA "21 Agt 2025")
 _EN_MONTHS_ABBR = {
     "jan": 1, "feb": 2, "mar": 3, "apr": 4, "may": 5, "jun": 6,
     "jul": 7, "aug": 8, "sep": 9, "oct": 10, "nov": 11, "dec": 12,
+    "mei": 5, "agt": 8, "agu": 8, "okt": 10, "des": 12,
 }
 
 
@@ -3810,7 +3813,14 @@ register_supplier(
 # 的是 "CHARGES IN IDR" 這一欄 (行尾最後一個數字)，不是前面的
 # "PPN IN IDR" 那一欄。
 def detect_dsv(text: str) -> bool:
-    return "CHARGES IN IDR" in text.upper()
+    """每張發票除了正本 ("INVOICE ID610286388 ORIGINAL") 還附一頁內容相同的
+    副本 ("… COPY")。只有副本的頁不算 (逐頁擷取時會略過)，不然發票號碼抓
+    不到、費用也會重複算一次。"""
+    if "CHARGES IN IDR" not in text.upper():
+        return False
+    copy_only = (re.search(r"^INVOICE\s+\S+\s+COPY\b", text, re.MULTILINE)
+                 and not re.search(r"^INVOICE\s+\S+\s+ORIGINAL\b", text, re.MULTILINE))
+    return not copy_only
 
 
 _DSV_ITEM_PATTERN = re.compile(
@@ -4640,6 +4650,8 @@ def parse_ecomet(text: str) -> Dict:
     )
     header["onboard_date"] = _ecomet_parse_date(m_eta.group(1)) if m_eta else None
     header["arrive_date"] = _ecomet_parse_date(m_eta.group(2)) if m_eta else None
+    # 帳單整頁沒有發票日期：使用者規定用 ETD (開船日) 當發票日期
+    header["invoice_date"] = header["onboard_date"]
 
     header["bl_no"] = _search(r"HB/L\s*No\s+(\S+)", flat)
     header["mbl_no"] = _search(r"MB/L\s*No\s+(\S+)", flat)
@@ -4698,14 +4710,23 @@ _HANDAL_NON_ITEM_PREFIXES = (
     "FOR AND ON BEHALF", "TOTAL", "#", "RIBU RUPIAH", "JUTA",
     "JL RAYA", "JL.", "KAWASAN INDUSTRI", "SERANG", "TAMBAK",
     "KAB ", "RAYA SERANG",
+    # 收件地址 (例如 GLOSTAR 的 "BOJONG CIKEMBAR SUKABUMI JAWA BARAT," 與
+    # 單獨一行的 "INDONESIA")，不是費用項目
+    "JL ", "BOJONG", "INDONESIA",
 )
 
 _HANDAL_CODE_RE = re.compile(r'\b([A-Z]{4,8}\d{6,10})\b')
 _HANDAL_ORDER_NO_RE = re.compile(r'(?<![A-Z])([A-Z])(\d{5,7})(?!\d)')
-_HANDAL_INVOICE_NO_RE = re.compile(r'\bHG\d{8}\b')
+# 發票號碼後面可能多一個字母，例如 "HG01240125S"
+_HANDAL_INVOICE_NO_RE = re.compile(r'\bHG\d{8}[A-Z]?\b')
 _HANDAL_INVOICE_DATE_RE = re.compile(r'\b(\d{1,2}\s+[A-Za-z]+\s+\d{4})\b')
 _HANDAL_ROUTE_RE = re.compile(r'([A-Z][A-Z ]*?) *- *([A-Z][A-Z ]*?) *- *(\d{1,2}/\d{1,2}/\d{4})')
-_HANDAL_VOLUME_RE = re.compile(r'\b(\d{1,2}X\d{2,3})\b')
+# 多種櫃型用逗號連起來，例如 "1X20,6X40"
+_HANDAL_VOLUME_RE = re.compile(r'\b(\d{1,2}X\d{2,3}(?:,\s*\d{1,2}X\d{2,3})*)\b')
+# 沒有欄位標籤的版型 (使用者 2026-10 樣本 HG02360225)：B/L 是獨立一行
+# "250162C (000177)"，MBL 是 B/L 上面某一行的單一代碼 ("EGLV149411233840"、
+# "002FX00666")，發票日期+號碼的下一行是「船名 航次 Order No.」
+_HANDAL_BL_LINE_RE = re.compile(r'^\s*(\d{6}[A-Z]\s*\(\d{6}\))\s*$', re.MULTILINE)
 _HANDAL_CONSIGNEE_RE = re.compile(r'\b([A-Z][A-Z\s]{2,40}\.\s*PT)\b')
 _HANDAL_TOTAL_RE = re.compile(r'(\d{1,3}(?:,\d{3})+)\s*\n+\s*#')
 _HANDAL_GROUPED_NUM_RE = re.compile(r'\d{1,3}(?:,\d{3})+')
@@ -4836,7 +4857,9 @@ def _handal_extract_header(text: str) -> Dict:
         h['port_of_loading'] = h['port_of_discharge'] = h['onboard_date'] = None
 
     m = _HANDAL_VOLUME_RE.search(text)
-    h['volume'] = m.group(1) if m else None
+    # 散貨 (LCL) 沒有櫃型，材積欄寫重量 (例如 "614KG")
+    m_kg = None if m else re.search(r'\b(\d[\d,.]*\s?KG)\b', text)
+    h['volume'] = m.group(1) if m else (m_kg.group(1) if m_kg else None)
 
     m = _HANDAL_CODE_RE.search(text)
     code = m.group(1) if m else None
@@ -4853,6 +4876,21 @@ def _handal_extract_header(text: str) -> Dict:
     h['order_no'] = (m.group(1) + m.group(2)) if m else None
 
     h['vessel'] = _handal_extract_vessel(text, h['order_no'])
+
+    bl_m = _HANDAL_BL_LINE_RE.search(text)
+    if bl_m:
+        # 沒有欄位標籤的版型：依位置抓
+        h['bl_no'] = re.sub(r'\s+', ' ', bl_m.group(1))
+        before = [ln.strip() for ln in text[:bl_m.start()].splitlines() if ln.strip()]
+        codes = [ln for ln in before if re.fullmatch(r'[A-Z0-9]{8,20}', ln) and re.search(r'\d', ln)]
+        h['mbl_no'] = codes[-1] if codes else None
+        lines = text.splitlines()
+        for i, ln in enumerate(lines):
+            if _HANDAL_INVOICE_NO_RE.search(ln) and i + 1 < len(lines):
+                vm = re.match(r'^\s*(.+?)\s+(\d{6})\s*$', lines[i + 1])
+                if vm:
+                    h['vessel'], h['order_no'] = vm.group(1).strip(), vm.group(2)
+                break
 
     h['supplier'] = "PT. Handal Mandiri Transindo"
     h['arrive_date'] = None
@@ -4920,13 +4958,14 @@ def _handal_extract_items(text: str):
 
 
 def detect_handal(text: str) -> bool:
+    """有些 HANDAL 帳單沒有供應商名稱，用發票號碼格式 "HG" + 8 位數字辨認
+    (使用者提示)；再要求有印尼文金額大寫結尾 "… Rupiah #"，避免其他文件剛好
+    出現類似號碼。舊規則要 "CUSTOM CLEARANCE"，帳單寫 "CUSTOMS CLEARANCE"
+    時會漏認。"""
     upper = text.upper()
     if "HANDAL MANDIRI TRANSINDO" in upper or "HANDAL" in upper:
         return True
-    if (_HANDAL_INVOICE_NO_RE.search(text) and "SEGEL" in upper
-            and "CUSTOM CLEARANCE" in upper):
-        return True
-    return False
+    return bool(_HANDAL_INVOICE_NO_RE.search(text) and re.search(r"RUPIAH\s*#", upper))
 
 
 def parse_handal(text: str) -> Dict:
