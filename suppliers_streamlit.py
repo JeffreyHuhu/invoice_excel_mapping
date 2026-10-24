@@ -5024,6 +5024,13 @@ def parse_putra_sejahtera_sentosa(text: str) -> Dict:
         _pss_format_date(date_m.group(1), date_m.group(2), date_m.group(3))
         if date_m else None
     )
+    if not header["invoice_date"]:
+        # 抬頭的 Date 讀不到時，改抓右下角簽署日期 "JAKARTA, 11 AGUSTUS 2026"
+        # (使用者提示)
+        sign_m = re.search(r"JAKARTA,\s*(\d{1,2})\s+([A-Za-z]+)\s+(\d{4})", text, re.IGNORECASE)
+        month = INDO_MONTHS.get(sign_m.group(2).lower()) if sign_m else None
+        if month:
+            header["invoice_date"] = _pss_format_date(sign_m.group(1), month, sign_m.group(3))
 
     header["supplier"] = _search(r"(?i)^\s*(PT\.\s*PUTRA SEJAHTERA SENTOSA)", text)
     # 抬頭的 "TO : PT. XXX (ADIDAS ADCI) Invoice No. : ..." 後面括號裡的
@@ -5058,6 +5065,15 @@ def parse_putra_sejahtera_sentosa(text: str) -> Dict:
             "amount": reimb_amount,
             "vat": None,
         })
+
+    # 其他費用合計行，例如 "TOTAL BIAYA LAINNYA ` 1,785,000 1,785,000"、
+    # "TOTAL BIAYA KETERLAMBATAN Rp. 5,000,000" (名稱後面可能夾 "`"、"Rp.")；
+    # 金額 > 0 才列 (使用者 2026-10 樣本)
+    for m in re.finditer(r"(?m)^(TOTAL BIAYA (?!TRUCKING|REIMBURSEMENT)[A-Z ]+?)\s+[`'\s]*"
+                         r"(?:Rp\.?\s*)?([\d,]+)", text):
+        amount = _pss_clean_amount(m.group(2))
+        if amount:
+            items.append({"description": m.group(1).strip(), "amount": amount, "vat": None})
 
     # PPN (加值稅)：描述照抄 PDF 原文的 "PPN x %" 標籤，百分比動態抓出來。
     ppn_m = re.search(r"\bPPN\s+(\d[\d,]*\s*%)\s+([\d,]+)", text)
@@ -5106,8 +5122,10 @@ def _pss_extract_dpp(text: str) -> Optional[int]:
 
 
 def _pss_extract_grand_total(text: str) -> Optional[int]:
-    """含稅總額，稽核第 1 段 (DPP + PPN = GRAND TOTAL) 用。"""
-    m = re.search(r"GRAND TOTAL\s+([\d,]+)", text)
+    """含稅總額，稽核第 1 段 (DPP + PPN = GRAND TOTAL) 用。延遲費這類沒有
+    GRAND TOTAL 的帳單，改用 "TOTAL Rp. 5,000,000"。"""
+    m = (re.search(r"GRAND TOTAL\s+([\d,]+)", text)
+         or re.search(r"(?<!BIAYA )\bTOTAL\s+Rp\.?\s*([\d,]+)", text))
     return _pss_clean_amount(m.group(1)) if m else None
 
 
