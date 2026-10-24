@@ -107,6 +107,8 @@ SUPPLIER_EXEMPTIONS: Dict[str, set] = {
     # CONG THANH 是拖車行：CONT/XE 欄是車牌或簡寫櫃號、Số xe (車號) 可能只有
     # 數字、帳單上原本就是 0 (或空白視為 0) 的費用，都照抄原文；負數是對帳單
     # 層級的扣款 (例如貨損)，使用者確認正確
+    # PANCARAN：沒有船名時 VESSEL NAME 印 ". / ." "- / -" (使用者確認，不列入)
+    "PANCARAN": {("vessel", "TEXT_NO_LETTER")},
     # MAERSK：ETA 日期不合理 (例如 5617816192 的 ETA 26-Feb-2027) 是原帳單本身寫錯
     "MAERSK": {("arrive_date", "DATE_OUT_OF_RANGE")},
     # DWIHARTA：到達日早於開船日是原帳單本身寫錯 (使用者確認，例如 INJK-2503-1051)

@@ -3375,6 +3375,10 @@ def parse_pancaran(text: str) -> Dict:
     header["order_no"] = _pancaran_extract_order_no(text)
     header["container_no"] = _pancaran_extract_container_no(text)
     header["bl_no"] = _search(r"JOB\s+NO\.\s*:\s*(\S+)", text)
+    # REFERENCE NO. 只寫裝載方式 (例如 "LCL"，沒有任何數字) 時不是單號，
+    # Order No. 改用 JOB NO. (使用者提示，例如 INV.2509.0051)
+    if header["order_no"] and not re.search(r"\d", header["order_no"]):
+        header["order_no"] = header["bl_no"]
     header["volume"] = _pancaran_extract_volume(text)
     header["shipper"] = _search(r"(?m)^SHIPPER\s*:\s*(.+?)(?:;|\s*$)", text)
 
@@ -3387,10 +3391,9 @@ def parse_pancaran(text: str) -> Dict:
         header["port_of_loading"] = pol_pod
         header["port_of_discharge"] = None
 
-    vessel = _search(r"(?m)^VESSEL\s+NAME\s*:\s*(.+)$", text)
-    if vessel and re.fullmatch(r"[.\s/]+", vessel):
-        vessel = None
-    header["vessel"] = vessel
+    # 沒有船名時帳單印 ". / ." 或 "- / -"：照抄原文 (使用者答案)，驗證層把
+    # 「船名沒有文字」列為 PANCARAN 的例外
+    header["vessel"] = _search(r"(?m)^VESSEL\s+NAME\s*:\s*(.+)$", text)
 
     # 這種帳單沒有到達日/開船日/主提單號碼，留空給 expand_to_rows() 補 N/A。
     for code in ("arrive_date", "onboard_date", "mbl_no"):
