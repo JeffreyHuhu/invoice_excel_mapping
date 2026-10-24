@@ -26,6 +26,19 @@ LOG_PATH = os.path.join(LOG_DIR, "invoice_processing.log")
 _LOGGER_NAME = "invoice_excel_mapping"
 
 
+class _SharedRotatingFileHandler(RotatingFileHandler):
+    """平行轉檔時好幾個程序同時開著同一個 log 檔，Windows 不能改檔名，
+    輪替會丟出 PermissionError 並印一大串錯誤。輪替失敗時繼續寫原本的
+    檔案，等之後沒有程序佔用時再輪替，不中斷也不洗版。"""
+
+    def doRollover(self):
+        try:
+            super().doRollover()
+        except OSError:
+            if self.stream is None:
+                self.stream = self._open()
+
+
 def get_logger() -> logging.Logger:
     """取得共用 logger。重複呼叫不會重複掛 handler (Streamlit 每次互動都會
     重新執行整支 app.py，不檢查的話同一筆 log 會被寫好幾次)。
@@ -40,7 +53,7 @@ def get_logger() -> logging.Logger:
     formatter = logging.Formatter("%(asctime)s [%(levelname)s] %(message)s")
     try:
         os.makedirs(LOG_DIR, exist_ok=True)
-        handler: logging.Handler = RotatingFileHandler(
+        handler: logging.Handler = _SharedRotatingFileHandler(
             LOG_PATH, maxBytes=1_000_000, backupCount=5, encoding="utf-8"
         )
     except OSError:
