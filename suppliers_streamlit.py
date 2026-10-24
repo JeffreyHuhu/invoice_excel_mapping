@@ -4121,21 +4121,32 @@ def detect_apl(text: str) -> bool:
     return "APL LOGISTICS" in text.upper()
 
 
+def apl_invoice_page(page: str) -> bool:
+    """APL 帳單頁 = 有 "BILLED TO" 的頁。同一份 PDF 常夾帶 Faktur Pajak、
+    寶成的領料單 (Items release form) 等附件 (使用者 2026-10 樣本 2025-1217-0135)。"""
+    upper = page.upper()
+    return "BILLED TO" in upper and not upper.lstrip().startswith("FAKTUR PAJAK")
+
+
+# 名稱可能有 "%" (例如 "OVERNIGHT 100%")
 _APL_ITEM_PATTERN = re.compile(
-    r"^(?P<desc>[A-Z][A-Z0-9 /\-\.]*?)\s+(?:[\d,]+\.\d{2}\s+)?(?P<amount>[\d,]+\.\d{2})\s*$",
+    r"^(?P<desc>[A-Z][A-Z0-9 /\-\.%]*?)\s+(?:[\d,]+\.\d{2}\s+)?(?P<amount>[\d,]+\.\d{2})\s*$",
     re.MULTILINE,
 )
 
 
-def _apl_clean_amount(text: Optional[str]) -> Optional[int]:
-    """英式數字 '700,000.00' (逗號千分位、小數點) -> 700000。"""
+def _apl_clean_amount(text: Optional[str]):
+    """英式數字 '700,000.00' -> 700000；有小數時保留 ('180,995.52' ->
+    180995.52)：雙貨幣排版的 IDR 金額常有小數，逐筆四捨五入會讓加總跟
+    Subtotal 差幾元 (例如 2025 年 FCR 131065 那張差 2 元)。"""
     if not text:
         return None
     text = text.strip().replace(",", "")
     try:
-        return round(float(text))
+        value = round(float(text), 2)
     except ValueError:
         return None
+    return int(value) if value.is_integer() else value
 
 
 def _apl_extract_items(text: str) -> List[Dict]:
@@ -4170,7 +4181,8 @@ def _apl_extract_grand_total(text: str) -> Optional[int]:
 def parse_apl(text: str) -> Dict:
     header: Dict[str, Optional[str]] = {}
 
-    header["supplier"] = _search(r"^(PT\.\s*APL\s*LOGISTICS)", text)
+    # 掃描檔 OCR 會把 logo 讀成同一行 ("APL PT. APL LOGISTICS")，不限行首
+    header["supplier"] = _search(r"(PT\.\s*APL\s*LOGISTICS)", text)
 
     m = re.search(r"BILLED TO\s*:\s*\n(.+?)\s+NO\.\s*(\S+)", text)
     header["consignee"] = m.group(1).strip() if m else None
@@ -4225,6 +4237,7 @@ def parse_apl(text: str) -> Dict:
 register_supplier(
     "APL", "PT. APL LOGISTICS", detect_apl, parse_apl,
     extract_total=_apl_extract_total, extract_grand_total=_apl_extract_grand_total,
+    invoice_page=apl_invoice_page,
 )
 
 
