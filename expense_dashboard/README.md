@@ -49,6 +49,6 @@ python -m PyInstaller --noconfirm expense_dashboard.spec   # 打包 dist\expense
 
 ### 幣別與匯率
 
-- 每筆明細記錄原幣別：金額文字帶幣別 (USD、Rp…) 就用它，否則用 `SUPPLIER_CURRENCY`，再沒有就用預設 IDR (目前 18 家印尼供應商的轉檔結果金額都是 IDR)。
+- 每筆明細記錄原幣別：金額文字帶幣別 (USD、Rp…) 就用它，否則用 `SUPPLIER_CURRENCY`，再來依供應商國別用該國幣別 (`COUNTRY_CURRENCY`：名稱有 CÔNG TY/CTY/TNHH/越南文字母 → VND；PT/CV 開頭或含 INDONESIA → IDR)，再沒有就用預設 IDR。
 - 匯率表 `fx_rates`：每幣別每月一筆「1 USD = ?」，來源為歐洲央行 (Frankfurter API) 每日參考匯率的月平均；只送出幣別與日期，不送任何發票資料。當月沒有匯率時用最近一個月。
 - 修改費用名稱對照規則後要「完整重建」(`--full`)；完整重建會開新檔 (避免資料庫越用越大)，手動輸入的匯率會保留。

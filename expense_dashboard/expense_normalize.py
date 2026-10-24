@@ -331,6 +331,29 @@ SUPPLIER_CURRENCY: dict = {
     "CÔNG TY TNHH DỊCH VỤ GIAO NHẬN VẬN TẢI VÀ THƯƠNG MẠI CÔNG THÀNH": "VND",
 }
 
+# 原則：哪個國家的供應商就用哪個國家的幣別。SUPPLIER_CURRENCY 沒列到的
+# 供應商，依公司名稱的國別特徵判斷 (依序比對，先符合的為準)
+COUNTRY_CURRENCY = {"VN": "VND", "ID": "IDR"}
+_COUNTRY_NAME_RES = (
+    # 越南：CÔNG TY / CTY (公司)、TNHH (有限責任)、越南文字母
+    ("VN", re.compile(r"\bC[ÔO]NG\s*TY\b|\bCTY\b|TNHH|[ĂÂĐÊÔƠƯăâđêôơư]|VIET\s*NAM",
+                      re.IGNORECASE)),
+    # 印尼：PT / CV 開頭、名稱含 INDONESIA
+    ("ID", re.compile(r"^(PT|CV)\b\.?|INDONESIA", re.IGNORECASE)),
+)
+
+
+def supplier_country(supplier) -> Optional[str]:
+    """供應商名稱 -> 國別代碼 (VN/ID)；看不出來回傳 None。"""
+    text = clean_text(supplier)
+    if not text:
+        return None
+    for country, pattern in _COUNTRY_NAME_RES:
+        if pattern.search(text):
+            return country
+    return None
+
+
 _CURRENCY_RES = (
     ("USD", re.compile(r"\bUSD\b|US\$|^\s*\$")),
     ("IDR", re.compile(r"\bIDR\b|\bRP\.?", re.IGNORECASE)),
@@ -343,7 +366,7 @@ _CURRENCY_RES = (
 
 def detect_currency(amount_raw, supplier, default: str = DEFAULT_CURRENCY) -> str:
     """金額幣別：金額文字帶幣別 (例如 'USD 1,234'、'Rp 50.000') 優先，
-    其次 SUPPLIER_CURRENCY，最後 default。"""
+    其次 SUPPLIER_CURRENCY，再來依供應商國別 (COUNTRY_CURRENCY)，最後 default。"""
     if isinstance(amount_raw, str):
         for code, pattern in _CURRENCY_RES:
             if pattern.search(amount_raw):
@@ -354,6 +377,9 @@ def detect_currency(amount_raw, supplier, default: str = DEFAULT_CURRENCY) -> st
         sup = re.sub(r"\s*\([^()]*\)\s*$", "", sup)
     if sup and sup.upper() in SUPPLIER_CURRENCY:
         return SUPPLIER_CURRENCY[sup.upper()]
+    country = supplier_country(sup)
+    if country in COUNTRY_CURRENCY:
+        return COUNTRY_CURRENCY[country]
     return default
 
 
