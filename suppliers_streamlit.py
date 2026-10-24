@@ -5643,12 +5643,127 @@ register_supplier(
 
 
 # ===========================================================================
+# 供應商 ID08：OPL (ORIENTAL POWER LOGISTICS，廠商代號 100004377)
+# ===========================================================================
+# 印尼端由 PT. NCL INTER LOGISTIK INDONESIA 開立 "SALES REIMBURSEMENT"
+# (CUSTOMER CODE : ORIPOLO02 = Oriental Power)。版面左右兩欄並排，每個欄位
+# 抓到下一個已知標籤就停：
+#   INV NO. / INV DATE (17/Sep/2026) / YOUR REF (= Order No.，使用者提示)
+#   SHIPPER / CONSIGNEE / AWB/BL NO. / MAWB/OBL NO. / POL / POD / VESSEL
+#   ATD (開船日) / ETA (到達日) / CONTAINER NO / 20'/40'/45' : 1 / 0 / 0 (材積 1X20G)
+# 費用明細：DESCRIPTION QTY UNIT RATE CUR EX-RATE VAT AMOUNT，VAT 欄是稅率
+# (0%)，每筆稅額 = 金額 × 稅率；合計區 SUB TOTAL / VAT / TOTAL : IDR 做勾稽。
+
+def detect_opl(text: str) -> bool:
+    """同一家也會附提單 (B/L) 文件，上面也有 NCL 名稱但不是請款單，所以
+    要同時有 "INV NO." 才算。"""
+    upper = text.upper()
+    return "NCL INTER LOGISTIK" in upper and re.search(r"\bINV\s*NO\.", upper) is not None
+
+
+_OPL_LABELS = [
+    r"CUSTOMER\s*CODE", r"INV\s*NO\.", r"INV\s*DATE", r"JOB\s*NO\.", r"TERM", r"SALESMAN",
+    r"REF\s*JOB\s*NO\.", r"ATTN", r"SHIPPER", r"VESSEL", r"CONSIGNEE", r"POL", r"POD",
+    r"AWB/BL\s*NO\.", r"MAWB/OBL\s*NO\.", r"GROSS\s*WT", r"ATD", r"VOLUME", r"ETA",
+    r"NO\.\s*OF\s*PKGS", r"CARRIER", r"YOUR\s*REF", r"CONTAINER\s*NO", r"INCOTERM",
+]
+_OPL_STOP = r"(?=\s+(?:" + "|".join(_OPL_LABELS) + r")\s*:|\s*\n|\s*$)"
+
+
+def _opl_field(label: str, text: str) -> Optional[str]:
+    return _search(rf"(?<![A-Z/]){label}\s*:[ \t]*(\S.*?){_OPL_STOP}", text)
+
+
+def _opl_amount(value: Optional[str]) -> Optional[float]:
+    if not value:
+        return None
+    try:
+        return float(value.replace(",", ""))
+    except ValueError:
+        return None
+
+
+_OPL_ITEM_RE = re.compile(
+    r"^(?P<desc>[A-Z].*?)\s+(?P<qty>[\d.]+)\s+(?P<unit>\S+)\s+(?P<rate>[\d,.]+)\s+"
+    r"(?P<cur>[A-Z]{3})\s+(?P<ex>[\d,.]+)\s+(?P<vat>[\d.]+)%\s+(?P<amount>[\d,.]+)\s*$")
+
+
+def _opl_volume(text: str) -> Optional[str]:
+    """"20'/40'/45' : 1 / 0 / 0" -> "1X20G" (有數量的櫃型才列，多種用逗號)。"""
+    m = re.search(r"20'/40'/45'\s*:\s*(\d+)\s*/\s*(\d+)\s*/\s*(\d+)", text)
+    if not m:
+        return None
+    parts = [f"{n}X{size}G" for n, size in zip(m.groups(), ("20", "40", "45")) if int(n)]
+    return ",".join(parts) or None
+
+
+def _opl_date(value: Optional[str]) -> Optional[str]:
+    """INV DATE '17/Sep/2026' -> '17 Sep 2026'；ATD/ETA '04/09/2026' 原樣保留。"""
+    m = re.match(r"(\d{1,2})/([A-Za-z]{3})/(\d{4})$", value or "")
+    return _format_date_en_from_month_name(*m.groups()) if m else value
+
+
+def parse_opl(text: str) -> Dict:
+    lines = [ln.strip() for ln in text.splitlines() if ln.strip()]
+    header = {
+        "supplier": lines[0] if lines else None,
+        "invoice_no": _opl_field(r"INV\s*NO\.", text),
+        "invoice_date": _opl_date(_opl_field(r"INV\s*DATE", text)),
+        "consignee": _opl_field(r"CONSIGNEE", text),
+        "order_no": _opl_field(r"YOUR\s*REF", text),
+        "arrive_date": _opl_field(r"ETA", text),
+        "onboard_date": _opl_field(r"ATD", text),
+        "bl_no": _opl_field(r"AWB/BL\s*NO\.", text),
+        "mbl_no": _opl_field(r"MAWB/OBL\s*NO\.", text),
+        "port_of_loading": _opl_field(r"POL", text),
+        "port_of_discharge": _opl_field(r"POD", text),
+        "volume": _opl_volume(text),
+        "vessel": _opl_field(r"VESSEL", text),
+        "container_no": _opl_field(r"CONTAINER\s*NO", text),
+        "shipper": _opl_field(r"SHIPPER", text),
+    }
+    items = []
+    for ln in lines:
+        m = _OPL_ITEM_RE.match(ln)
+        if m:
+            amount = _opl_amount(m.group("amount"))
+            rate = float(m.group("vat"))
+            items.append({"description": m.group("desc"), "amount": amount,
+                          "vat": round(amount * rate / 100, 2) if amount is not None else None})
+    vat_total = _opl_vat_total(text)
+    if items and vat_total is not None:
+        # 合計區的 VAT 另列一筆 (使用者答案)
+        items.append({"description": "VAT", "amount": None, "vat": vat_total})
+    return {"header": header, "items": items}
+
+
+def _opl_extract_total(text: str) -> Optional[float]:
+    return _opl_amount(_search(r"SUB\s*TOTAL\s*:\s*([\d,.]+)", text))
+
+
+def _opl_vat_total(text: str) -> Optional[float]:
+    return _opl_amount(_search(r"(?m)^\s*VAT\s*:\s*([\d,.]+)", text))
+
+
+def _opl_extract_grand_total(text: str) -> Optional[float]:
+    return _opl_amount(_search(r"(?<!SUB )TOTAL\s*:\s*IDR\s*([\d,.]+)", text))
+
+
+register_supplier(
+    "OPL", "ORIENTAL POWER LOGISTICS", detect_opl, parse_opl,
+    extract_total=_opl_extract_total,
+    extract_vat_total=_opl_vat_total,
+    extract_grand_total=_opl_extract_grand_total,
+)
+
+
+# ===========================================================================
 # 供應商編號 (依進度管控的 Top 供應商清單)
 # ===========================================================================
 # 印尼：Desktop\印尼進度管控 的「Indonesia Supplier Top 15, 2025-2026.xlsx」
 # 與「印尼進度管控表」占比工作表 (2025-2026 請款金額排名 + 廠商代號)。
 #   ID01~ID15 = 印尼 TOP15；TOP15 以外沿用同一份排名 (例如 FEMARIA 第 18 名
-#   = ID18)。TOP15 只剩 ID08 ORIENTAL POWER LOGISTICS (100004377) 還沒建規則。
+#   = ID18)。ID08 ORIENTAL POWER LOGISTICS 的 key 是 OPL (2026-10 建立)。
 # 越南：Desktop\越南進度管控 的「Vietnam Supplier Top 20.xlsx」(01~20，資料夾
 #   名稱「編號-廠商代號 公司名」)，建好規則後一樣在這裡登記 VN01~VN20。
 # 編號只是對照資料 (顯示在網頁清單、轉檔畫面與轉檔總表)，不影響辨識順序。
@@ -5661,6 +5776,7 @@ SUPPLIER_NUMBERS = {
     "KUEHNE_NAGEL": ("ID05", "100019143", "PT. KUEHNE NAGEL INDONESIA"),
     "DSV": ("ID06", "100023151", "PT. DSV TRANSPORT INDONESIA"),
     "INDOPROSTIME_TRANSPORT": ("ID07", "100019300", "PT. INDOPROSTIME TRANSPORT"),
+    "OPL": ("ID08", "100004377", "ORIENTAL POWER LOGISTICS"),
     "DWIHARTA": ("ID09", "100019242", "PT. DWIHARTA LOGISTINDO"),
     "TRANS_DAYA_PRIMA": ("ID10", "100019488", "PT. TRANS DAYA PRIMA"),
     "GALUH": ("ID11", "100019600", "PT.GALUH INTI BAHARI"),
