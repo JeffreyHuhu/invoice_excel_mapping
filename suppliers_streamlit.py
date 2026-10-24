@@ -1659,10 +1659,14 @@ def _tata_receipt_clean_amount(text: Optional[str]) -> Optional[int]:
 #   "2 REIMBURSEMENT - INVOICE CENTURY LOGISTICS CO.,LTD. 4.125.420" (沒有
 #   "X" 標記，REIMBURSEMENT 類的費用單行時常常沒有這個標記)。
 # "X" 不是每筆都有，所以設成可有可無。
+# 名稱可能有單引號、分號等任何符號 (例如 "LIFT OFF 1x20'"、"INT'L"、
+# "MITRA; (LIFT OFF")，所以名稱不限字元；先判斷下面的「項次 (X) 金額」行
 _TATA_RECEIPT_FULL_ITEM_LINE = re.compile(
-    r"^\d+\s+(?P<desc>[A-Za-z][A-Za-z0-9 /\-.,()=@]*?)\s+(?:X\s+)?(?P<amount>[\d.]+)\s*$"
+    r"^\d+\s+(?P<desc>[A-Za-z].*?)\s+(?:X\s+)?(?P<amount>[\d.]+)\s*$"
 )
-_TATA_RECEIPT_NUM_AMOUNT_ONLY_LINE = re.compile(r"^(?P<num>\d+)\s+(?P<amount>[\d.]+)\s*$")
+# 名稱換行時的金額行：「項次 金額」或「項次 X 金額」(例如 "4 X 600.000")
+_TATA_RECEIPT_NUM_AMOUNT_ONLY_LINE = re.compile(
+    r"^(?P<num>\d+)\s+(?:X\s+)?(?P<amount>[\d.]+)\s*$")
 
 
 def _tata_receipt_extract_items(text: str) -> List[Dict]:
@@ -1685,8 +1689,8 @@ def _tata_receipt_extract_items(text: str) -> List[Dict]:
         if not line:
             i += 1
             continue
-        m_full = _TATA_RECEIPT_FULL_ITEM_LINE.match(line)
         m_num_only = _TATA_RECEIPT_NUM_AMOUNT_ONLY_LINE.match(line)
+        m_full = None if m_num_only else _TATA_RECEIPT_FULL_ITEM_LINE.match(line)
         if m_full:
             items.append({
                 "description": m_full.group("desc").strip(),
@@ -1770,14 +1774,25 @@ def parse_tata_receipt(text: str) -> Dict:
     _volume_m = _TATA_RECEIPT_VOLUME_RE.search(text)
     header["volume"] = _volume_m.group(1).strip() if _volume_m else None
 
-    # 這種帳單沒有 Order No./到達日/開船日/裝卸貨港/貨櫃資訊，留空給
-    # expand_to_rows() 補 N/A
+    # 海運 (使用者提示，例如 SC2608-1058)：表格下方印 "HB/L:" "MB/L:"
+    # "SHIPPER:" "ORIGIN:" "VESSEL: ... Total 43.332.814" (右欄 Total 擠在同一行)
+    # 與每櫃一行的 "FCL 1x20': EGHU3354377"
+    header["bl_no"] = header["bl_no"] or _search(r"\bHB/L\s*:\s*(.+?)\s*\n", text)
+    header["mbl_no"] = header["mbl_no"] or _search(r"\bMB/L\s*:\s*(.+?)\s*\n", text)
+    header["shipper"] = header["shipper"] or _search(
+        r"\bSHIPPER\s*:\s*(.+?)(?:\s+(?:Bayar|Total)\b|\s*\n)", text)
+    header["vessel"] = header["vessel"] or _search(
+        r"\bVESSEL\s*:\s*(.+?)(?:\s+(?:Bayar|Total)\b|\s*\n)", text)
+    header["port_of_loading"] = _search(
+        r"\bORIGIN\s*:\s*(.+?)(?:\s+(?:Bayar|Total)\b|\s*\n)", text)
+    containers = re.findall(r"(?m)^\s*(?:FCL|LCL)\s+[^:\n]*:\s*([A-Z]{4}\d{7})", text)
+    header["container_no"] = ", ".join(containers) or None
+
+    # 這種帳單沒有 Order No./到達日/開船日/目的港，留空給 expand_to_rows() 補 N/A
     header["order_no"] = None
     header["arrive_date"] = None
     header["onboard_date"] = None
-    header["port_of_loading"] = None
     header["port_of_discharge"] = None
-    header["container_no"] = None
 
     items = _tata_receipt_extract_items(text)
     if not items:
