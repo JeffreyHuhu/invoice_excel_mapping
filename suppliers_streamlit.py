@@ -4720,10 +4720,14 @@ def parse_ecomet(text: str) -> Dict:
     # 不能用 flat (整頁合併成一行) 去抓到 Tipe 當結尾，國家名稱本身都是
     # 單一個字 (THAILAND/CIKANDE/ITALIA/VIETNAM/JAPAN)，直接抓下一個空白
     # 前的單字即可。
-    header["port_of_loading"] = _search(r"Negara\s*Asal\s+(\S+)", flat)
+    # 標籤也可能被值切開："Negara KOREA" / "Asal :"、"Nett 3412" / "Weight :"
+    # (使用者 2026-10 樣本 C25-03-0200)
+    header["port_of_loading"] = (_search(r"Negara\s*Asal\s+(\S+)", flat)
+                                 or _search(r"Negara\s+(\S+)\s+Asal\b", flat))
     header["port_of_discharge"] = "INDONESIA"
 
-    m_weight = re.search(r"Nett\s*Weight\s+([\d.,]+)", flat)
+    m_weight = (re.search(r"Nett\s*Weight\s+([\d.,]+)", flat)
+                or re.search(r"Nett\s+([\d.,]+)\s+Weight\b", flat))
     header["volume"] = f"{m_weight.group(1)} KG" if m_weight else None
 
     flight = _search(r"Flight\s+(.+?)\s+Gross", flat)
@@ -4739,9 +4743,18 @@ def parse_ecomet(text: str) -> Dict:
     return {"header": header, "items": items}
 
 
+def _ecomet_extract_grand_total(text: str) -> Optional[int]:
+    """金額稽核：費用 + 代墊 (Reimbursement) + PPN = Grand Total (使用者 2026-10-25
+    要求)。沒有代墊表時帳單只印 "Total Rp …"。"""
+    t = text.replace(":", "")
+    m = (re.search(r"Grand\s*Total\s+Rp\.?\s*([\d,.]+)", t, re.IGNORECASE)
+         or re.search(r"^\s*Total\s+Rp\.?\s*([\d,.]+)", t, re.MULTILINE | re.IGNORECASE))
+    return _ecomet_clean_amount(m.group(1)) if m else None
+
+
 register_supplier(
     "ECOMET", "PT. TRANS ECOMET GLOBAL", detect_ecomet, parse_ecomet,
-    multi_page=True,
+    multi_page=True, extract_grand_total=_ecomet_extract_grand_total,
 )
 
 
