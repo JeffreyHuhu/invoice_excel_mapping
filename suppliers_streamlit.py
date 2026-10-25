@@ -4715,6 +4715,11 @@ def parse_ecomet(text: str) -> Dict:
     header["invoice_date"] = header["onboard_date"]
 
     header["bl_no"] = _search(r"HB/L\s*No\s+(\S+)", flat)
+    # 冒號後面多一個空白時，拿掉冒號會變成兩段 ("BSWCG: K260717" -> BSWCGK260717，
+    # 使用者 2026-10-25 確認)
+    m_split = re.search(r"HB/L\s*No\s+([A-Z0-9]+):\s+([A-Z0-9]*\d[A-Z0-9]*)\b", text)
+    if m_split:
+        header["bl_no"] = m_split.group(1) + m_split.group(2)
     header["mbl_no"] = _search(r"MB/L\s*No\s+(\S+)", flat)
     # Negara Asal 跟 Tipe 分別在不同的物理行 (右欄位逐行往下錯開一列)，
     # 不能用 flat (整頁合併成一行) 去抓到 Tipe 當結尾，國家名稱本身都是
@@ -4729,6 +4734,12 @@ def parse_ecomet(text: str) -> Dict:
     m_weight = (re.search(r"Nett\s*Weight\s+([\d.,]+)", flat)
                 or re.search(r"Nett\s+([\d.,]+)\s+Weight\b", flat))
     header["volume"] = f"{m_weight.group(1)} KG" if m_weight else None
+    # 有櫃型時材積寫櫃型，照帳單原文 ("Tipe : FCL // 1X40'HC COLLECT" -> 1X40'HC、
+    # "LCL - 2X40' + 1X20' N/N" -> 2X40' + 1X20')；沒有櫃型才寫 KG (使用者 2026-10-25)
+    tipe = _search(r"Tipe\s+([^\n]*)", text.replace(":", ""))
+    m_box = re.search(r"\d+X\d{2}'(?:HC)?(?:\s*\+?\s*\d+X\d{2}'(?:HC)?)*", tipe or "")
+    if m_box:
+        header["volume"] = m_box.group(0)
 
     flight = _search(r"Flight\s+(.+?)\s+Gross", flat)
     voyage = _search(r"Voyage\s+(.+?)\s+CBM", flat)
