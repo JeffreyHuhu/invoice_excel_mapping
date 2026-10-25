@@ -50,6 +50,7 @@ from expense_normalize import (
     DEFAULT_CURRENCY,
     clean_text,
     detect_currency,
+    folder_currency,
     normalize_expense,
     normalize_port,
     parse_amount,
@@ -230,6 +231,8 @@ def load_file(task: Tuple[str, str, str]) -> Tuple[str, List[tuple], Optional[st
     """讀一份 Excel 並清洗，回傳 (路徑, 明細列 tuple 清單, 錯誤原因)。
     任何例外都轉成錯誤原因回傳，不讓單一壞檔中斷整批。"""
     path, folder, default_currency = task
+    # 帳單和供應商都看不出幣別時，用國家資料夾的幣別 (供應商轉檔結果\越南\... -> VND)
+    default_currency = folder_currency(path) or default_currency
     try:
         rows = _read_rows(path)
         header_index, mapping = _find_header(rows)

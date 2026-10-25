@@ -10,8 +10,8 @@ expense_normalize.py
   - parse_float()      ：材積等一般小數 (點一律當小數點)
   - normalize_expense():費用名稱正規化，回傳 (標準費用項目, 費用大類)
   - normalize_port()   ：港口名稱統一大小寫與空白
-  - detect_currency()  ：金額幣別 (金額文字裡有幣別就用它，否則用供應商預設，
-                         再沒有就用 DEFAULT_CURRENCY)
+  - detect_currency()  ：金額幣別 (帳單上的幣別 > 供應商 > 國家資料夾
+                         folder_currency() > DEFAULT_CURRENCY)
   - clean_text()       ：一般文字欄位去空白，N/A / - / 空字串一律變成 None
 
 要新增「同性質費用合併」的對照，改 EXPENSE_ALIASES 即可；要調整費用大類，
@@ -331,20 +331,54 @@ SUPPLIER_CURRENCY: dict = {
     "CÔNG TY TNHH DỊCH VỤ GIAO NHẬN VẬN TẢI VÀ THƯƠNG MẠI CÔNG THÀNH": "VND",
 }
 
-# 原則：哪個國家的供應商就用哪個國家的幣別。SUPPLIER_CURRENCY 沒列到的
-# 供應商，依公司名稱的國別特徵判斷 (依序比對，先符合的為準)
-COUNTRY_CURRENCY = {"VN": "VND", "ID": "IDR"}
+# 幣別判斷順序 (使用者 2026-10-25 指定)：
+#   1. 帳單上的幣別 (金額文字裡的幣別代碼/符號，_CURRENCY_RES)
+#   2. 供應商 (SUPPLIER_CURRENCY 指定名稱 -> 公司名稱的國別特徵)
+#   3. 國家資料夾 (供應商轉檔結果\<國家>\...，COUNTRY_FOLDER_CURRENCY)
+#   4. DEFAULT_CURRENCY
+# 目前帳單只有中國、東南亞、印度、台灣；新增其他國家時再補規則。
+COUNTRY_CURRENCY = {
+    "CN": "CNY", "TW": "TWD", "IN": "INR", "ID": "IDR", "VN": "VND", "TH": "THB",
+    "MY": "MYR", "SG": "SGD", "PH": "PHP", "KH": "KHR", "LA": "LAK", "MM": "MMK",
+    "BN": "BND", "TL": "USD",  # 東帝汶通用美元
+}
+# 公司名稱的國別特徵 (依序比對，先符合的為準)
 _COUNTRY_NAME_RES = (
     # 越南：CÔNG TY / CTY (公司)、TNHH (有限責任)、越南文字母
     ("VN", re.compile(r"\bC[ÔO]NG\s*TY\b|\bCTY\b|TNHH|[ĂÂĐÊÔƠƯăâđêôơư]|VIET\s*NAM",
                       re.IGNORECASE)),
+    # 泰國：泰文字母
+    ("TH", re.compile(r"[฀-๿]")),
     # 印尼：PT / CV 開頭、名稱含 INDONESIA
     ("ID", re.compile(r"^(PT|CV)\b\.?|INDONESIA", re.IGNORECASE)),
+    # 馬來西亞：SDN. BHD.
+    ("MY", re.compile(r"\bSDN\.?\s*BHD\b", re.IGNORECASE)),
+    # 新加坡：PTE. LTD.
+    ("SG", re.compile(r"\bPTE\.?\s*LTD\b", re.IGNORECASE)),
+    # 印度：PVT. LTD. / PRIVATE LIMITED
+    ("IN", re.compile(r"\bPVT\.?\s*LTD\b|\bPRIVATE\s+LIMITED\b", re.IGNORECASE)),
 )
+# 國家資料夾名稱 -> 幣別 (路徑中任一層資料夾名稱完全相同才算)
+COUNTRY_FOLDER_CURRENCY = {
+    "中國": "CNY", "中国": "CNY", "大陸": "CNY", "台灣": "TWD", "臺灣": "TWD",
+    "印度": "INR", "印尼": "IDR", "越南": "VND", "泰國": "THB", "馬來西亞": "MYR",
+    "新加坡": "SGD", "菲律賓": "PHP", "柬埔寨": "KHR", "寮國": "LAK", "緬甸": "MMK",
+    "汶萊": "BND", "東帝汶": "USD",
+}
+
+
+def folder_currency(path) -> Optional[str]:
+    """檔案路徑 -> 國家資料夾的幣別 (離檔案最近的國家資料夾為準)；沒有回傳 None。"""
+    if not path:
+        return None
+    for part in reversed(re.split(r"[\\/]", str(path))):
+        if part.strip() in COUNTRY_FOLDER_CURRENCY:
+            return COUNTRY_FOLDER_CURRENCY[part.strip()]
+    return None
 
 
 def supplier_country(supplier) -> Optional[str]:
-    """供應商名稱 -> 國別代碼 (VN/ID)；看不出來回傳 None。"""
+    """供應商名稱 -> 國別代碼 (COUNTRY_CURRENCY 的 key)；看不出來回傳 None。"""
     text = clean_text(supplier)
     if not text:
         return None
@@ -354,19 +388,31 @@ def supplier_country(supplier) -> Optional[str]:
     return None
 
 
+# 帳單上的幣別代碼/符號 (依序比對；USD 要在 SGD/BND 前面，US$ 才不會被當成 S$；
+# TWD 要在 CNY 前面，「新台幣…元」才不會被當成人民幣)
 _CURRENCY_RES = (
     ("USD", re.compile(r"\bUSD\b|US\$|^\s*\$")),
     ("IDR", re.compile(r"\bIDR\b|\bRP\.?", re.IGNORECASE)),
+    ("VND", re.compile(r"\bVND\b|\bVNĐ\b|₫|\bĐỒNG\b", re.IGNORECASE)),
     ("SGD", re.compile(r"\bSGD\b|S\$")),
+    ("BND", re.compile(r"\bBND\b|B\$")),
+    ("MYR", re.compile(r"\bMYR\b|\bRM\s*\d")),
+    ("THB", re.compile(r"\bTHB\b|฿|\bBAHT\b", re.IGNORECASE)),
+    ("PHP", re.compile(r"\bPHP\b|₱")),
+    ("KHR", re.compile(r"\bKHR\b|៛|\bRIEL\b", re.IGNORECASE)),
+    ("LAK", re.compile(r"\bLAK\b|₭|\bKIP\b", re.IGNORECASE)),
+    ("MMK", re.compile(r"\bMMK\b|\bKYAT\b", re.IGNORECASE)),
+    ("INR", re.compile(r"\bINR\b|₹|\bRS\.?\s*\d", re.IGNORECASE)),
     ("EUR", re.compile(r"\bEUR\b|€")),
-    ("CNY", re.compile(r"\bCNY\b|\bRMB\b")),
-    ("TWD", re.compile(r"\bTWD\b|\bNTD?\$?")),
+    ("TWD", re.compile(r"\bTWD\b|\bNTD?\$?|新[台臺]幣")),
+    ("CNY", re.compile(r"\bCNY\b|\bRMB\b|人民[币幣]|[¥￥]")),
 )
 
 
 def detect_currency(amount_raw, supplier, default: str = DEFAULT_CURRENCY) -> str:
-    """金額幣別：金額文字帶幣別 (例如 'USD 1,234'、'Rp 50.000') 優先，
-    其次 SUPPLIER_CURRENCY，再來依供應商國別 (COUNTRY_CURRENCY)，最後 default。"""
+    """金額幣別：帳單上的幣別 (金額文字，例如 'USD 1,234'、'Rp 50.000') 優先，
+    其次供應商 (SUPPLIER_CURRENCY -> 名稱國別 COUNTRY_CURRENCY)，最後 default
+    (呼叫端傳國家資料夾的幣別，見 folder_currency())。"""
     if isinstance(amount_raw, str):
         for code, pattern in _CURRENCY_RES:
             if pattern.search(amount_raw):
