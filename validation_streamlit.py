@@ -117,6 +117,13 @@ SUPPLIER_EXEMPTIONS: Dict[str, set] = {
                    ("amount", "AMOUNT_ZERO"), ("amount", "AMOUNT_NEGATIVE")},
 }
 
+# 只對特定值的供應商例外 (同樣連附註都不列)
+SUPPLIER_VALUE_EXEMPTIONS: Dict[str, Dict[Tuple[str, str], set]] = {
+    # INDOPROSTIME 空運直送收貨人，HAWB 欄印 "DIRECT TO CON"，照抄 (使用者 2026-10-25 確認)
+    "INDOPROSTIME": {("bl_no", "ID_NO_DIGIT"): {"DIRECT TO CON"}},
+    "INDOPROSTIME_TRANSPORT": {("bl_no", "ID_NO_DIGIT"): {"DIRECT TO CON"}},
+}
+
 # 日期合理範圍：早於這一年，或晚於今天 + 這麼多天，視為可疑
 _MIN_REASONABLE_YEAR = 2015
 _MAX_FUTURE_DAYS = 60
@@ -413,6 +420,10 @@ def validate_extraction(
         issues.extend(audit_issues)
         exempt = SUPPLIER_EXEMPTIONS.get(supplier_key or "", set())
         issues = [i for i in issues if (i["field"], i["rule"]) not in exempt]
+        value_exempt = SUPPLIER_VALUE_EXEMPTIONS.get(supplier_key or "", {})
+        issues = [i for i in issues
+                  if str(group_rows[0].get(i["field"], "")).strip()
+                  not in value_exempt.get((i["field"], i["rule"]), ())]
         issues = _explain_by_formula_issue(issues)
         issues = _mark_known_source_issues(issues, supplier_key, group_rows[0])
         confidence = _confidence(issues)

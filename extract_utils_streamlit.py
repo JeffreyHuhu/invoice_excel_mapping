@@ -195,6 +195,9 @@ def _ocr_page_fast(pdf_path: str, page_index: int, page) -> Tuple[str, bool]:
 
 
 _OCR_PSM_CACHE: Dict[Tuple[str, int, int], str] = {}
+# 指定 psm 的頁用 400 dpi：GALUH 掃描帳單在 300 dpi 會把 117.580.000 讀成
+# 417.580.000、整欄金額讀不到 (使用者 2026-10-25 要求掃描檔也要到等級高)
+_OCR_PSM_DPI = 400
 
 
 def _ocr_page_with_psm(pdf_path: str, page_index: int, psm: int) -> str:
@@ -207,7 +210,7 @@ def _ocr_page_with_psm(pdf_path: str, page_index: int, psm: int) -> str:
         if _OCR_AVAILABLE:
             try:
                 with pdfplumber.open(pdf_path) as pdf:
-                    image = pdf.pages[page_index].to_image(resolution=300).original
+                    image = pdf.pages[page_index].to_image(resolution=_OCR_PSM_DPI).original
                 text = pytesseract.image_to_string(image, config=f"--psm {psm}") or ""
             except Exception:
                 text = ""

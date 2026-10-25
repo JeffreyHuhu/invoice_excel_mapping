@@ -3924,17 +3924,18 @@ def parse_dsv(text: str) -> Dict:
 
     header["order_no"] = _search(r"OWNER'S REFERENCE\s*\n\s*(\S+)", text)
 
-    # ETA 可能沒有印 ("IDJKT = Jakarta, Java, Indonesia 28-Feb-25 ZAJNB = Johannesburg,
-    # South Africa"，使用者 2026-10 樣本 ID610160512)
+    # 港口照抄整段 "IDJKT = Jakarta, Java, Indonesia" (使用者 2026-10-25 規定)。
+    # ETA 可能沒有印 ("… 28-Feb-25 ZAJNB = Johannesburg, South Africa"，樣本 ID610160512)
     m = re.search(
-        r"=\s*([^,\n]+),[^\n]*?(\d{1,2}-[A-Za-z]{3}-\d{2})\s+\S+\s*=\s*([^,\n]+),[^\n]*?"
-        r"(\d{1,2}-[A-Za-z]{3}-\d{2})?\s*$",
+        r"^([A-Z]{5}\s*=\s*[^\n]+?)\s+(\d{1,2}-[A-Za-z]{3}-\d{2})\s+([A-Z]{5}\s*=\s*[^\n]+?)"
+        r"(?:\s+(\d{1,2}-[A-Za-z]{3}-\d{2}))?\s*$",
         text, re.MULTILINE,
     )
     if m:
-        header["port_of_loading"] = m.group(1).strip()
+        # 名稱太長會換行，行尾留下逗號 ("MYPKG = Port Klang (Pelabuhan Klang),")
+        header["port_of_loading"] = m.group(1).strip(" ,")
         header["onboard_date"] = _dsv_parse_date(m.group(2))
-        header["port_of_discharge"] = m.group(3).strip()
+        header["port_of_discharge"] = m.group(3).strip(" ,")
         header["arrive_date"] = _dsv_parse_date(m.group(4))
     else:
         header["port_of_loading"] = None
@@ -4448,6 +4449,9 @@ def _galuh_extract_items(text: str) -> List[Dict]:
             })
             continue
         item_m = item_pattern.match(line)
+        # 掃描版的範圍到 Terbilang 為止，會包含 "Total 184.730.049" 那行
+        if item_m and re.fullmatch(r"total", item_m.group("desc").strip(), re.IGNORECASE):
+            continue
         if item_m:
             items.append({
                 "description": _galuh_strip_date_suffix(item_m.group("desc").strip()),
