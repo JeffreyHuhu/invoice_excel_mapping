@@ -323,7 +323,7 @@ def mark_duplicates(con: duckdb.DuckDBPyConnection) -> int:
 
 
 def _drop_db_keep_manual_rates(db_path: Path) -> List[tuple]:
-    """完整重建用：記下手動輸入的匯率後刪掉整個資料庫檔。DuckDB 刪除資料
+    """完整重建用：記下手動輸入與台灣銀行的匯率後刪掉整個資料庫檔。DuckDB 刪除資料
     不會縮小檔案，直接開新檔才不會越用越肥 (資料庫要放共用資料夾給大家讀)。"""
     if not db_path.exists():
         return []
@@ -331,7 +331,7 @@ def _drop_db_keep_manual_rates(db_path: Path) -> List[tuple]:
     try:
         fx.ensure_table(con)
         rows = con.execute("SELECT currency, year, month, per_usd, source FROM fx_rates "
-                           "WHERE source = ?", [fx.SOURCE_MANUAL]).fetchall()
+                           "WHERE source IN (?, ?)", [fx.SOURCE_MANUAL, fx.SOURCE_BOT]).fetchall()
     finally:
         con.close()
     for path in (db_path, db_path.with_name(db_path.name + ".wal")):

@@ -6,8 +6,13 @@ fx_rates 資料表：每個幣別、每個月一筆「1 USD = 多少該幣別」
   - 自動：update_fx_rates() 依資料庫裡出現的幣別與發票日期範圍，向
           Frankfurter (歐洲央行 ECB 公布的每日參考匯率) 抓每日匯率，取每月
           平均。只送出幣別代碼與日期，不會送出任何發票資料。
+  - 台灣銀行：source = '台灣銀行 月平均' 的列 (主要來源，使用者 2026-10-25
+          指定)。台銀網站有防機器人驗證，由 invoice-expense-db skill 用
+          Claude in Chrome 抓牌告匯率 (即期買賣中價，沒有即期改用現金中價)，
+          再用 import_rates() 寫入。ECB 只補台灣銀行沒有的幣別或月份。
   - 手動：source = '手動' 的列 (在儀表板「資料管理」頁修改的) 不會被自動
           更新覆蓋。
+優先順序：手動 > 台灣銀行 > ECB (自動更新不會覆蓋前面兩種)。
 換算時找不到當月匯率 (例如本月 ECB 還沒公布) 就用該幣別最近一個月的匯率。
 """
 
@@ -23,6 +28,7 @@ API_URL = "https://api.frankfurter.dev/v1/{start}..{end}?base=USD&symbols={symbo
 CURRENCIES_URL = "https://api.frankfurter.dev/v1/currencies"
 SOURCE_ECB = "ECB 月平均"
 SOURCE_MANUAL = "手動"
+SOURCE_BOT = "台灣銀行 月平均"
 TIMEOUT = 20
 
 
@@ -79,17 +85,31 @@ def update_fx_rates(con: duckdb.DuckDBPyConnection) -> str:
     monthly, missing = fetch_monthly_rates(sorted(currencies), start, end)
     rows = [(cur, y, m, rate, SOURCE_ECB) for (cur, y, m), rate in monthly.items()]
     if rows:
-        # 手動輸入的匯率不覆蓋
+        # 手動輸入、台灣銀行的匯率不覆蓋
         con.executemany(f"""
             INSERT INTO fx_rates (currency, year, month, per_usd, source) VALUES (?, ?, ?, ?, ?)
             ON CONFLICT (currency, year, month) DO UPDATE
               SET per_usd = excluded.per_usd, source = excluded.source,
                   updated_at = now()
-              WHERE fx_rates.source <> '{SOURCE_MANUAL}'""", rows)
+              WHERE fx_rates.source NOT IN ('{SOURCE_MANUAL}', '{SOURCE_BOT}')""", rows)
     msg = f"已更新 {len(rows)} 筆月平均匯率 ({', '.join(sorted(currencies))}，{start:%Y-%m} ~ {end:%Y-%m})"
     if missing:
         msg += f"；ECB 沒有提供 {', '.join(missing)}，請在匯率表手動輸入"
     return msg
+
+
+def import_rates(con: duckdb.DuckDBPyConnection, rows: List[Tuple[str, int, int, float]],
+                 source: str = SOURCE_BOT) -> int:
+    """寫入外部來源 (台灣銀行) 的月平均匯率 [(幣別, 年, 月, 1 USD 兌換數)]，
+    覆蓋 ECB 的匯率，但不覆蓋手動輸入的。回傳寫入筆數。"""
+    ensure_table(con)
+    con.executemany(f"""
+        INSERT INTO fx_rates (currency, year, month, per_usd, source) VALUES (?, ?, ?, ?, ?)
+        ON CONFLICT (currency, year, month) DO UPDATE
+          SET per_usd = excluded.per_usd, source = excluded.source, updated_at = now()
+          WHERE fx_rates.source <> '{SOURCE_MANUAL}'""",
+                    [(c.upper(), int(y), int(m), float(r), source) for c, y, m, r in rows])
+    return len(rows)
 
 
 def rate_sql(fixed: Dict[str, float] = None) -> Tuple[str, list]:

@@ -53,5 +53,5 @@ python -m PyInstaller --noconfirm expense_dashboard.spec   # 打包 dist\expense
 ### 幣別與匯率
 
 - 每筆明細記錄原幣別，判斷順序：1. 帳單上的幣別 (金額文字的代碼/符號：USD、Rp、₫、RM、฿、₹、NT$、¥…)；2. 供應商 (`SUPPLIER_CURRENCY` 指定名稱 → 公司名稱國別特徵，例如 CÔNG TY/TNHH → VND、PT → IDR、SDN BHD → MYR)；3. 國家資料夾 (`供應商轉檔結果\<國家>\`，`COUNTRY_FOLDER_CURRENCY`)；4. 都判斷不出來：幣別留空，再詢問使用者 (`invoice-expense-db` 會列出清單)。目前支援中國、東南亞、印度、台灣；新增國家要補 `expense_normalize.py` 的規則。
-- 匯率表 `fx_rates`：每幣別每月一筆「1 USD = ?」，來源為歐洲央行 (Frankfurter API) 每日參考匯率的月平均；只送出幣別與日期，不送任何發票資料。當月沒有匯率時用最近一個月。
-- 修改費用名稱對照規則後要「完整重建」(`--full`)；完整重建會開新檔 (避免資料庫越用越大)，手動輸入的匯率會保留。
+- 匯率表 `fx_rates`：每幣別每月一筆「1 USD = ?」。主要來源是**台灣銀行**牌告匯率的月平均 (即期買賣中價；沒有即期報價的幣別如 IDR、VND 改用現金中價)。台銀網站有防機器人驗證，由 `invoice-expense-db` skill 用 Claude in Chrome 抓取，再用 `fx.import_rates()` 寫入。台灣銀行沒有的幣別或月份，由歐洲央行 (Frankfurter API) 月平均補上；只送出幣別與日期，不送任何發票資料。優先順序：手動 > 台灣銀行 > ECB。當月沒有匯率時用最近一個月。
+- 修改費用名稱對照規則後要「完整重建」(`--full`)；完整重建會開新檔 (避免資料庫越用越大)，手動輸入與台灣銀行的匯率會保留。
