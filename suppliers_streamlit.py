@@ -4194,7 +4194,8 @@ def parse_apl(text: str) -> Dict:
     # 掃描檔 OCR 會把 logo 讀成同一行 ("APL PT. APL LOGISTICS")，不限行首
     header["supplier"] = _search(r"(PT\.\s*APL\s*LOGISTICS)", text)
 
-    m = re.search(r"BILLED TO\s*:\s*\n(.+?)\s+NO\.\s*(\S+)", text)
+    # 掃描檔 OCR 會在 "BILLED TO:" 後面多讀出雜訊 ("BILLED TO: “et :")
+    m = re.search(r"BILLED TO\s*:[^\n]*\n\s*(.+?)\s+NO\.\s*(\S+)", text)
     header["consignee"] = m.group(1).strip() if m else None
     header["invoice_no"] = m.group(2).strip() if m else None
 
@@ -4325,7 +4326,8 @@ _GALUH_BLOCK_PATTERN = re.compile(
     re.DOTALL | re.MULTILINE,
 )
 # 掃描檔 OCR 會把千分位句點讀成逗號 ("-2.528,800")，金額接受兩種符號
-_GALUH_TAX_LINE_PATTERN = re.compile(r"^(?P<desc>PP[Nh]\s+\d+%)\s+(?P<amount>-?[\d.,]+)\s*$")
+# 稅額名稱大小寫不一定 ("PPN 11%"、"PPn 11%"、"PPh 2%")
+_GALUH_TAX_LINE_PATTERN = re.compile(r"^(?P<desc>PP[NnHh]\s+\d+%)\s+(?P<amount>-?[\d.,]+)\s*$")
 _GALUH_ITEM_LINE_PATTERN = re.compile(
     r"^\d+\s+(?P<desc>.+?)\s+(?P<amount>\d{1,3}(?:\.\d{3})*)\s*$"
 )
@@ -4351,7 +4353,8 @@ def _galuh_strip_date_suffix(desc: Optional[str]) -> Optional[str]:
         return desc
     desc = re.sub(r"\s+(?:PER\s+)?TGL\b.*$", "", desc, flags=re.IGNORECASE)
     desc = re.sub(
-        rf"\s+\d{{1,2}}\s+(?:{_GALUH_MONTH_NAMES})\s+\d{{4}}.*$",
+        # 也去掉日期區間 ("Trucking 06 - 14 April 2026")
+        rf"\s+\d{{1,2}}(?:\s*-\s*\d{{1,2}})?\s+(?:{_GALUH_MONTH_NAMES})\s+\d{{4}}.*$",
         "", desc, flags=re.IGNORECASE,
     )
     return desc.strip()
@@ -4371,7 +4374,7 @@ def _galuh_rejoin_split_tax_lines(block: str) -> str:
     「金額跟名稱被拆開」的情況另外特判。
     """
     return re.sub(
-        r"^(-?[\d.]+)\s*\n\s*(PP[Nh]\s+\d+%)\s*$",
+        r"^(-?[\d.]+)\s*\n\s*(PP[NnHh]\s+\d+%)\s*$",
         r"\2 \1",
         block,
         flags=re.MULTILINE,
@@ -4396,6 +4399,7 @@ def _galuh_extract_items(text: str) -> List[Dict]:
         if item_pattern is _GALUH_SCAN_ITEM_LINE_PATTERN:
             # 掃描版 OCR 會帶出表格線與序號 ("1 |TRUCKING ..."、"| PPh 2% ...")
             line = re.sub(r"^(?:\d+\s*)?\|+\s*", "", line)
+            line = re.sub(r"\s*\|+\s*$", "", line)
         tax_m = _GALUH_TAX_LINE_PATTERN.match(line)
         if tax_m:
             items.append({
@@ -4415,7 +4419,12 @@ def _galuh_extract_items(text: str) -> List[Dict]:
 
 
 def _galuh_extract_grand_total(text: str) -> Optional[int]:
-    return _galuh_clean_amount(_search(r"^Total\s+([\d.,]+)\s*$", text))
+    total = _galuh_clean_amount(_search(r"^Total\s+([\d.,]+)\s*$", text))
+    if total is None:
+        # 掃描檔 OCR 常漏掉 Total 那行，用金額大寫 "Terbilang: ... rupiah" 換算
+        words = _search(r"Terbilang\s*:\s*\|?\s*([A-Za-z ]+?)\s+rupiah", text)
+        total = _indo_words_to_int(words) if words else None
+    return total
 
 
 def parse_galuh(text: str) -> Dict:
@@ -4428,7 +4437,8 @@ def parse_galuh(text: str) -> Dict:
     # 掃描檔 OCR 常把標點讀錯 ("No, Invoice ; 0500084/KWTGIB/2025")
     header["invoice_no"] = _search(r"No[.,]\s*Invoice\s*[:;]\s*(\S+)", text)
 
-    _galuh_date_m = re.search(r"Tgl\.\s*Invoice\s*[:;]\s*(\d{1,2})\s+(\w+)\s+(\d{4})", text)
+    # 掃描檔 OCR 常把日、月黏在一起 ("Tgl. Invoice ; 03Jan 2025")
+    _galuh_date_m = re.search(r"Tgl\.\s*Invoice\s*[:;]\s*(\d{1,2})\s*([A-Za-z]+)\s+(\d{4})", text)
     header["invoice_date"] = (
         _galuh_parse_date(*_galuh_date_m.groups()) if _galuh_date_m else None
     )
@@ -4728,7 +4738,46 @@ _HANDAL_VOLUME_RE = re.compile(r'\b(\d{1,2}X\d{2,3}(?:,\s*\d{1,2}X\d{2,3})*)\b')
 # "002FX00666")，發票日期+號碼的下一行是「船名 航次 Order No.」
 _HANDAL_BL_LINE_RE = re.compile(r'^\s*(\d{6}[A-Z]\s*\(\d{6}\))\s*$', re.MULTILINE)
 _HANDAL_CONSIGNEE_RE = re.compile(r'\b([A-Z][A-Z\s]{2,40}\.\s*PT)\b')
-_HANDAL_TOTAL_RE = re.compile(r'(\d{1,3}(?:,\d{3})+)\s*\n+\s*#')
+# 總額要自己一行：掃描檔 OCR 常漏掉總額那行，舊規則會把最後一筆費用
+# ("COLLECTION FEE 701,000 701,000") 的金額當成總額 (使用者 2026-10 樣本 NIKO-MEI 2025)
+_HANDAL_TOTAL_RE = re.compile(r'^\s*(\d{1,3}(?:,\d{3})+)\s*\n+\s*#', re.MULTILINE)
+# 金額大寫 "# Tiga Puluh Dua Juta ... Rupiah #"
+_HANDAL_WORDS_RE = re.compile(r'^\s*#\s*([A-Za-z ]+?)\s+Rupiah\s*#', re.MULTILINE | re.IGNORECASE)
+_INDO_DIGITS = {"satu": 1, "dua": 2, "tiga": 3, "empat": 4, "lima": 5, "enam": 6,
+                "tujuh": 7, "delapan": 8, "sembilan": 9}
+_INDO_SCALES = {"ribu": 1_000, "juta": 1_000_000, "milyar": 10 ** 9, "miliar": 10 ** 9}
+
+
+def _indo_words_to_int(words: str) -> Optional[int]:
+    """印尼文金額大寫轉數字，例如 'Tiga Puluh Dua Juta Dua Ribu' -> 32002000。
+    有不認得的字 (OCR 雜訊) 就回傳 None，不猜。"""
+    total = group = num = 0
+    for w in words.lower().split():
+        if w in _INDO_DIGITS:
+            num += _INDO_DIGITS[w]
+        elif w == "sepuluh":
+            num += 10
+        elif w == "sebelas":
+            num += 11
+        elif w == "seratus":
+            group += 100
+        elif w == "seribu":
+            total += 1000
+        elif w == "belas":
+            num += 10
+        elif w == "puluh":
+            group += num * 10
+            num = 0
+        elif w == "ratus":
+            group += num * 100
+            num = 0
+        elif w in _INDO_SCALES:
+            total += (group + num) * _INDO_SCALES[w]
+            group = num = 0
+        else:
+            return None
+    value = total + group + num
+    return value or None
 _HANDAL_GROUPED_NUM_RE = re.compile(r'\d{1,3}(?:,\d{3})+')
 
 
@@ -4747,6 +4796,10 @@ def _looks_like_handal_item_desc(line: str) -> bool:
         if upper.startswith(prefix):
             return False
     if re.search(r'\.\s*PT\b', upper):
+        return False
+    # 掃描檔的雜訊行：船名那行的 "MESSRS" 標籤 (OCR 讀成 "MSS)"、"MESS 55]")、
+    # 印花稅票 "SEPULUH RIBU RUPIAH" / "METERAI"
+    if re.match(r'^(?:MESSRS|M[ES]{1,6}[\W\d])', upper) or re.search(r'RUPIA|SEPULUH|^METE', upper):
         return False
     if re.search(r'\d{1,2}/\d{1,2}/\d{4}', text):
         return False
@@ -4900,24 +4953,76 @@ def _handal_extract_header(text: str) -> Dict:
     return h
 
 
+def _handal_words_total(text: str) -> Optional[int]:
+    m = _HANDAL_WORDS_RE.search(text)
+    return _indo_words_to_int(m.group(1)) if m else None
+
+
 def _handal_item_region(text: str) -> str:
     """只取『總金額數字出現以前』的文字範圍來找費用項目，把發票下方的簽名、
-    銀行帳號、電話、地址等雜訊文字整段排除，避免被誤判成費用項目。"""
+    銀行帳號、電話、地址等雜訊文字整段排除，避免被誤判成費用項目。
+    總額數字跟金額大寫不一致時，那個數字其實是最後一筆費用 (欄位分開的
+    掃描版)，改在金額大寫那行切。"""
     m = _HANDAL_TOTAL_RE.search(text)
-    if m:
+    words = _handal_words_total(text)
+    if m and (words is None or _handal_amount_to_int(m.group(1)) == words):
         return text[:m.start()]
-    return text
+    m = _HANDAL_WORDS_RE.search(text)
+    return text[:m.start()] if m else text
+
+
+def _handal_pair_blocks(nums: List) -> Optional[List]:
+    """欄位分開的掃描版：單價欄、金額欄一段一段交錯 (4 個單價、4 個金額、
+    3 個單價、3 個金額…)，每段單價跟金額一樣。找出一對對相同的段落，取金額段。"""
+    out, i = [], 0
+    while i < len(nums):
+        for k in range(1, (len(nums) - i) // 2 + 1):
+            if nums[i:i + k] == nums[i + k:i + 2 * k]:
+                out += nums[i + k:i + 2 * k]
+                i += 2 * k
+                break
+        else:
+            return None
+    return out
+
+
+def _handal_pick_amounts(nums: List, n: int, target: Optional[int]) -> List:
+    """名稱跟數字分開時，從數字清單挑出 n 筆金額；有總額時挑加總相符的排法。"""
+    cands = []
+    if len(nums) == n:
+        cands.append(nums)
+    elif len(nums) == 2 * n:
+        cands += [nums[1::2], nums[n:]]
+        blocks = _handal_pair_blocks(nums)
+        if blocks and len(blocks) == n:
+            cands.append(blocks)
+    for c in cands:
+        if target is not None and None not in c and sum(c) == target:
+            return c
+    return cands[0] if cands else (nums + [None] * n)[:n]
 
 
 def _handal_extract_items(text: str):
     region = _handal_item_region(text)
+    # 有 "DESCRIPTION" 表頭時從表頭開始 (上面的船名行不是費用)；
+    # "For and on behalf" (簽名欄) 之後只收數字 (欄位分開的掃描版金額在後面)
+    head = re.search(r'^\s*DESCRIPTION.*$', region, re.MULTILINE)
+    if head:
+        region = region[head.end():]
     lines = [l.strip() for l in region.splitlines()]
     items = []
     pending_descs = []
     pending_numbers = []
+    in_sign = False
 
     for line in lines:
+        # 掃描檔 OCR 會帶出表格線 ("SEGEL | 25,000 25,000")
+        line = re.sub(r'\s*\|\s*', ' ', line).strip()
         if not line:
+            continue
+        if re.match(r'for and on', line, re.IGNORECASE):
+            in_sign = True
+        if in_sign and not re.match(r'^[\d,.\s]+$', line):
             continue
 
         m = _HANDAL_COMBINED_ITEM_RE.match(line)
@@ -4944,13 +5049,12 @@ def _handal_extract_items(text: str):
             continue
 
     if pending_descs:
-        n = len(pending_descs)
-        if len(pending_numbers) == n:
-            amounts = pending_numbers
-        elif len(pending_numbers) == 2 * n:
-            amounts = [pending_numbers[i * 2 + 1] for i in range(n)]
-        else:
-            amounts = (pending_numbers + [None] * n)[:n]
+        total = _handal_extract_total(text)
+        done = sum(it["amount"] or 0 for it in items)
+        if pending_numbers and total is not None and pending_numbers[-1] == total:
+            pending_numbers = pending_numbers[:-1]   # 總額那行 (金額欄最後)
+        amounts = _handal_pick_amounts(pending_numbers, len(pending_descs),
+                                       None if total is None else total - done)
         for desc, amount in zip(pending_descs, amounts):
             items.append({"description": desc, "amount": amount, "vat": None})
 
@@ -4977,10 +5081,12 @@ def parse_handal(text: str) -> Dict:
 
 
 def _handal_extract_total(text: str):
+    # 金額大寫比數字可靠：OCR 漏掉總額那行時，金額前一行是最後一筆費用
+    words = _handal_words_total(text)
+    if words is not None:
+        return words
     m = _HANDAL_TOTAL_RE.search(text)
-    if not m:
-        return None
-    return _handal_amount_to_int(m.group(1))
+    return _handal_amount_to_int(m.group(1)) if m else None
 
 
 register_supplier(
