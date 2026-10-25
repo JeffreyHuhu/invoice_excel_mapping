@@ -21,6 +21,7 @@ register_supplier() 呼叫順序的後面，因為 detect_supplier() 是依序�
 第一個回傳 True 的就採用。
 """
 
+import difflib
 import os
 import re
 import datetime
@@ -373,9 +374,12 @@ _KN_AMOUNT = r"\d{1,3}(?:,\d{3})+(?:\.\d{2})?|\d{1,3}\.\d{2}"
 _KN_CHARGE_LINE_PATTERN = re.compile(
     r"^(?P<desc>[A-Z][A-Za-z0-9 /\-\.,()&]+?)\s+"
     r"(?:[\d,]+\.\d{2}\s*[A-Z]{3}\s+)?"
-    rf"(?P<amount>{_KN_AMOUNT})\s+\d\s*$",
+    # 行尾是 VAT 代碼：數字，或 "Z" (N/A OUT OF SCOPE OF VAT，使用者 2026-10 樣本 JKT1394609)
+    rf"(?P<amount>{_KN_AMOUNT})\s+(?:\d|Z)\s*$",
     re.MULTILINE,
 )
+# 不含稅的帳單 VAT 合計是 "0"，合計行剛好也像費用行，要排除
+_KN_TOTAL_LINE_DESC = re.compile(r"^(?:SUBTOTAL|INVOICE\s+(?:VAT\s+)?TOTAL)\b")
 
 
 def _kn_clean_amount_comma_thousands(text: Optional[str]):
@@ -480,6 +484,8 @@ def _kn_extract_charge_items(text: str) -> List[Dict]:
     """
     items = []
     for m in _KN_CHARGE_LINE_PATTERN.finditer(text):
+        if _KN_TOTAL_LINE_DESC.match(m.group("desc")):
+            continue
         amount = _kn_clean_amount_comma_thousands(m.group("amount"))
         items.append({"description": m.group("desc").strip(), "amount": amount})
     return items
@@ -3303,6 +3309,12 @@ def _pancaran_extract_container_no(text: str) -> Optional[str]:
         if not m:
             continue
         parts = [m.group(1).strip()]
+        prev = lines[i - 1].strip() if i else ""
+        if (re.match(r"\d{7}\b", parts[0]) and re.fullmatch(r"[A-Z0-9,]+", prev)
+                and re.search(r"[A-Z]{4}$", prev)):
+            # 貨櫃清單在 JOB NO. 上一行，最後一個號碼被切開
+            # ("…,DENU9999888,TCLU" + "JOB NO. : EXPJK25110020 6576305,"，使用者 2026-10 樣本 INV.2511.0045)
+            parts = [(prev + parts[0]).rstrip(",")]
         j = i + 1
         while j < len(lines):
             nxt = lines[j].strip()
@@ -3858,9 +3870,22 @@ def _dsv_clean_amount(text: Optional[str]) -> Optional[int]:
     return int(text) if text.isdigit() else None
 
 
+# 有些費用名稱後面沒有 " - 說明" ("Detention 598.541 5.441.280"，使用者 2026-10
+# 樣本 ID610196477)；只在 CHARGES 表格裡用，避免抓到其他兩個數字結尾的行
+_DSV_ITEM_PLAIN_PATTERN = re.compile(
+    # 免稅費用的 PPN 欄寫 "Exempt" ("Reimbursement Storage JAS Exempt 265.243")
+    r"^(?P<desc>[A-Za-z].*?)\s+(?P<ppn>\d{1,3}(?:\.\d{3})*|Exempt)\s+(?P<amount>\d{1,3}(?:\.\d{3})*)$",
+    re.MULTILINE,
+)
+
+
 def _dsv_extract_items(text: str) -> List[Dict]:
     items: List[Dict] = []
-    for m in _DSV_ITEM_PATTERN.finditer(text):
+    matches = list(_DSV_ITEM_PATTERN.finditer(text))
+    if not matches:
+        sec = re.search(r"CHARGES IN IDR\s*\n(.*?)\n\s*TOTAL CHARGES", text, re.DOTALL)
+        matches = list(_DSV_ITEM_PLAIN_PATTERN.finditer(sec.group(1))) if sec else []
+    for m in matches:
         items.append({
             "description": m.group("desc").strip(),
             "amount": _dsv_clean_amount(m.group("amount")),
@@ -4709,7 +4734,8 @@ register_supplier(
 _HANDAL_NUM = r'\d{1,3}(?:,\d{3})+'  # 要求至少一個千分位逗號 (>=1000)，避免把
 # 描述文字裡本來就有的小數字 (例如 "TRUCKING LAUT 40 (PPH 23)" 裡的 40、23，
 # 或 "CUSTOM CLEARANCE (PART OFF 10)" 裡的 10) 誤判成金額
-_HANDAL_SEP = r'[\s.,;]*'
+# 掃描檔 OCR 會把數量 "3" 讀成 "-" ("SEGEL 25,000 - 75,000")
+_HANDAL_SEP = r'[\s.,;+\-]*'
 
 _HANDAL_NON_ITEM_PREFIXES = (
     "DESCRIPTION", "QTY", "UNIT PRICE", "AMOUNT", "NO.", "NO ",
@@ -4791,6 +4817,9 @@ def _looks_like_handal_item_desc(line: str) -> bool:
     # VESSEL 欄位等雜訊文字誤讀成英數混合的殘留，不是費用項目。
     if re.search(r'[a-z]', text):
         return False
+    # 船名行常有 OCR 底線 ("SINAR SANUR 136S_")；"INVIOCE" 標籤會被讀成 "NVI"、"VMIOCE"
+    if '_' in text or difflib.SequenceMatcher(None, text, "INVOICE").ratio() >= 0.6:
+        return False
     upper = text.upper()
     for prefix in _HANDAL_NON_ITEM_PREFIXES:
         if upper.startswith(prefix):
@@ -4862,7 +4891,8 @@ def _handal_clean_port(s: str) -> str:
 
 
 _HANDAL_COMBINED_ITEM_RE = re.compile(
-    rf'^(?:\d+\s+)?(?P<desc>[A-Z][A-Za-z0-9 /().=*\-]*?)[\s,]+(?:\d+[\s,]+)?'
+    # 名稱後面可能有 OCR 讀出的標點雜訊 ("SEGEL , ; 25,000 25,000")
+    rf'^(?:\d+\s+)?(?P<desc>[A-Z][A-Za-z0-9 /().=*\-]*?)[\s,;:]+(?:\d+[\s,;:]+)?'
     rf'(?P<unit>{_HANDAL_NUM}){_HANDAL_SEP}(?P<amount>{_HANDAL_NUM})(?!\d)[^\n0-9]*$'
 )
 _HANDAL_PAIR_ONLY_RE = re.compile(
@@ -5006,7 +5036,7 @@ def _handal_extract_items(text: str):
     region = _handal_item_region(text)
     # 有 "DESCRIPTION" 表頭時從表頭開始 (上面的船名行不是費用)；
     # "For and on behalf" (簽名欄) 之後只收數字 (欄位分開的掃描版金額在後面)
-    head = re.search(r'^\s*DESCRIPTION.*$', region, re.MULTILINE)
+    head = re.search(r'^\s*DESCRIPTION\b.*$', region, re.MULTILINE)
     if head:
         region = region[head.end():]
     lines = [l.strip() for l in region.splitlines()]
@@ -5037,6 +5067,12 @@ def _handal_extract_items(text: str):
         m2 = _HANDAL_PAIR_ONLY_RE.match(line)
         if m2:
             pending_numbers.append(_handal_amount_to_int(m2.group('amount')))
+            continue
+
+        # 名稱只接單價、金額欄在別處 ("THC 3,168,000")：只留名稱，金額從數字欄配
+        mu = re.match(rf'^(?P<desc>.+?)\s+{_HANDAL_NUM}$', line)
+        if mu and _looks_like_handal_item_desc(mu.group('desc')):
+            pending_descs.append(mu.group('desc').strip())
             continue
 
         if _looks_like_handal_item_desc(line):
