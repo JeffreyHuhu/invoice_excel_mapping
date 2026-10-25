@@ -11,7 +11,7 @@ expense_normalize.py
   - normalize_expense():費用名稱正規化，回傳 (標準費用項目, 費用大類)
   - normalize_port()   ：港口名稱統一大小寫與空白
   - detect_currency()  ：金額幣別 (帳單上的幣別 > 供應商 > 國家資料夾
-                         folder_currency() > DEFAULT_CURRENCY)
+                         folder_currency()；都判斷不出來回傳 None，詢問使用者)
   - clean_text()       ：一般文字欄位去空白，N/A / - / 空字串一律變成 None
 
 要新增「同性質費用合併」的對照，改 EXPENSE_ALIASES 即可；要調整費用大類，
@@ -321,9 +321,11 @@ def normalize_expense(description) -> Tuple[str, str]:
 # 幣別
 # ============================================================
 
-# 目前所有供應商 (印尼) 轉檔結果的 AMOUNT 都是印尼盾；帳單上的美金只出現
-# 在費用名稱裡 (例如 'FREIGHT CHARGE (USD 23.54)')，金額欄已經換成 IDR
-DEFAULT_CURRENCY = "IDR"
+# 帳單、供應商、國家資料夾都判斷不出幣別時不猜，幣別留空 (None)，
+# 由 invoice-expense-db 列出清單詢問使用者，再補進下面的規則。
+# (帳單上的美金只出現在費用名稱裡，例如 'FREIGHT CHARGE (USD 23.54)'，
+#  金額欄已經是當地幣別，所以不從費用名稱判斷幣別)
+DEFAULT_CURRENCY: Optional[str] = None
 # 個別供應商的金額幣別跟預設不同時加在這裡 (key：SUPPLIER 欄位轉大寫)
 SUPPLIER_CURRENCY: dict = {
     # 越南供應商 (Excel 對帳表，金額為越南盾)
@@ -335,7 +337,7 @@ SUPPLIER_CURRENCY: dict = {
 #   1. 帳單上的幣別 (金額文字裡的幣別代碼/符號，_CURRENCY_RES)
 #   2. 供應商 (SUPPLIER_CURRENCY 指定名稱 -> 公司名稱的國別特徵)
 #   3. 國家資料夾 (供應商轉檔結果\<國家>\...，COUNTRY_FOLDER_CURRENCY)
-#   4. DEFAULT_CURRENCY
+#   4. 都判斷不出來：留空 (None)，詢問使用者
 # 目前帳單只有中國、東南亞、印度、台灣；新增其他國家時再補規則。
 COUNTRY_CURRENCY = {
     "CN": "CNY", "TW": "TWD", "IN": "INR", "ID": "IDR", "VN": "VND", "TH": "THB",
@@ -409,10 +411,11 @@ _CURRENCY_RES = (
 )
 
 
-def detect_currency(amount_raw, supplier, default: str = DEFAULT_CURRENCY) -> str:
+def detect_currency(amount_raw, supplier,
+                    default: Optional[str] = DEFAULT_CURRENCY) -> Optional[str]:
     """金額幣別：帳單上的幣別 (金額文字，例如 'USD 1,234'、'Rp 50.000') 優先，
     其次供應商 (SUPPLIER_CURRENCY -> 名稱國別 COUNTRY_CURRENCY)，最後 default
-    (呼叫端傳國家資料夾的幣別，見 folder_currency())。"""
+    (呼叫端傳國家資料夾的幣別，見 folder_currency())；都沒有回傳 None。"""
     if isinstance(amount_raw, str):
         for code, pattern in _CURRENCY_RES:
             if pattern.search(amount_raw):

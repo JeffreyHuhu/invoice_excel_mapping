@@ -196,7 +196,7 @@ def _find_header(rows: List[list]) -> Tuple[int, Dict[int, str]]:
 
 
 def clean_record(raw: Dict[str, object],
-                 default_currency: str = DEFAULT_CURRENCY) -> Dict[str, object]:
+                 default_currency: Optional[str] = DEFAULT_CURRENCY) -> Dict[str, object]:
     """一列原始值 -> 清洗後的明細 (不含 source_file/source_folder)。"""
     invoice_date = parse_date(raw.get("invoice_date"))
     item, category = normalize_expense(raw.get("description"))
@@ -259,13 +259,13 @@ def init_db(con: duckdb.DuckDBPyConnection) -> None:
     cols = ", ".join(f"{name} {typ}" for name, typ in ITEM_COLUMNS)
     con.execute(f"CREATE TABLE IF NOT EXISTS expense_items ({cols}, "
                 "is_duplicate BOOLEAN DEFAULT FALSE)")
-    # 舊版資料庫沒有幣別欄：補上並填預設幣別 (舊版只有印尼盾資料)
+    # 舊版資料庫沒有幣別欄：補上並填印尼盾 (舊版只有印尼盾資料)
     has_currency = con.execute(
         "SELECT count(*) FROM information_schema.columns "
         "WHERE table_name = 'expense_items' AND column_name = 'currency'").fetchone()[0]
     if not has_currency:
         con.execute("ALTER TABLE expense_items ADD COLUMN currency VARCHAR")
-        con.execute("UPDATE expense_items SET currency = ?", [DEFAULT_CURRENCY])
+        con.execute("UPDATE expense_items SET currency = 'IDR'")
     con.execute("""CREATE TABLE IF NOT EXISTS etl_files (
         source_file VARCHAR PRIMARY KEY, mtime DOUBLE, size BIGINT,
         row_count INTEGER, error VARCHAR, processed_at TIMESTAMP)""")
@@ -346,7 +346,7 @@ def _drop_db_keep_manual_rates(db_path: Path) -> List[tuple]:
 
 def run(roots: List[Path], db_path: Path, level: str = "高",
         supplier_folder: Optional[str] = None, workers: int = 0, full: bool = False,
-        parquet: Optional[Path] = None, default_currency: str = DEFAULT_CURRENCY,
+        parquet: Optional[Path] = None, default_currency: Optional[str] = DEFAULT_CURRENCY,
         update_fx: bool = True, use_threads: bool = False,
         echo: Callable[[str], None] = print,
         progress: Optional[Callable[[int, int], None]] = None) -> Dict:
@@ -460,7 +460,8 @@ def main(argv: Optional[List[str]] = None) -> int:
     parser.add_argument("--full", action="store_true", help="清空資料庫重新匯入")
     parser.add_argument("--parquet", type=Path, help="另外匯出一份 Parquet 檔")
     parser.add_argument("--default-currency", default=DEFAULT_CURRENCY,
-                        help=f"金額沒有標示幣別時的預設幣別 (預設 {DEFAULT_CURRENCY})")
+                        help="帳單、供應商、國家資料夾都判斷不出幣別時用的幣別 "
+                             "(預設不指定：幣別留空，再詢問使用者)")
     parser.add_argument("--no-fx", action="store_true", help="不要上網更新匯率")
     args = parser.parse_args(argv)
 
@@ -470,7 +471,7 @@ def main(argv: Optional[List[str]] = None) -> int:
         return 1
     run([r.resolve() for r in args.roots], args.db.resolve(), args.level,
         args.supplier_folder, args.workers, args.full, args.parquet,
-        args.default_currency.upper(), not args.no_fx)
+        args.default_currency.upper() if args.default_currency else None, not args.no_fx)
     return 0
 
 
