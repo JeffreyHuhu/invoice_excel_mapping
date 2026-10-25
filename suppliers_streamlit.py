@@ -4485,6 +4485,14 @@ def parse_galuh(text: str) -> Dict:
     header["invoice_date"] = (
         _galuh_parse_date(*_galuh_date_m.groups()) if _galuh_date_m else None
     )
+    if not header["invoice_date"]:
+        # 掃描檔 OCR 有時把日期放到標籤上一行 ("… RW 000 - 03 Feb 2025" /
+        # "… Tgl. Invoice :")：在 No. Invoice 到 Tgl. Invoice 之間找
+        sec = re.search(r"No[.,]\s*Invoice(.*?)Tgl\.\s*Invoice", text, re.DOTALL)
+        for d in re.finditer(r"\b(\d{1,2})\s*([A-Za-z]{3,})\s+(\d{4})\b", sec.group(1) if sec else ""):
+            header["invoice_date"] = _galuh_parse_date(*d.groups())
+            if header["invoice_date"]:
+                break
 
     # consignee：優先找報表明細頁開頭「PT. 開頭、後面接 No : <發票號>」那
     # 一行 (比最上面的 "TO ..." 簡稱更正式/更準確)，找不到才退回 "TO ..."。
