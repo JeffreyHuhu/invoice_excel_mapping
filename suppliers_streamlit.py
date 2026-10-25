@@ -3924,10 +3924,12 @@ def parse_dsv(text: str) -> Dict:
 
     header["order_no"] = _search(r"OWNER'S REFERENCE\s*\n\s*(\S+)", text)
 
+    # ETA 可能沒有印 ("IDJKT = Jakarta, Java, Indonesia 28-Feb-25 ZAJNB = Johannesburg,
+    # South Africa"，使用者 2026-10 樣本 ID610160512)
     m = re.search(
-        r"=\s*([^,]+),.*?(\d{1,2}-[A-Za-z]{3}-\d{2})\s+\S+\s*=\s*([^,]+),.*?"
-        r"(\d{1,2}-[A-Za-z]{3}-\d{2})",
-        text,
+        r"=\s*([^,\n]+),[^\n]*?(\d{1,2}-[A-Za-z]{3}-\d{2})\s+\S+\s*=\s*([^,\n]+),[^\n]*?"
+        r"(\d{1,2}-[A-Za-z]{3}-\d{2})?\s*$",
+        text, re.MULTILINE,
     )
     if m:
         header["port_of_loading"] = m.group(1).strip()
@@ -3940,21 +3942,33 @@ def parse_dsv(text: str) -> Dict:
         header["port_of_discharge"] = None
         header["arrive_date"] = None
 
-    m = _DSV_VESSEL_BL_PATTERN.search(text)
-    if m:
-        header["vessel"] = f"{m.group('vessel').strip()} / {m.group('voyage').strip()}"
-        header["bl_no"] = m.group("house_bl").strip()
-        header["mbl_no"] = m.group("ocean_bl").strip()
-    else:
-        header["vessel"] = None
-        header["bl_no"] = None
-        header["mbl_no"] = None
+    # 船名/提單只在 "… HOUSE BILL OF LADING" 表頭到 "ORIGIN" 之間找，避免抓到頁尾網址。
+    # 併櫃 (LCL) 只有一個號碼 "/ EDC1118207"：那是 House B/L，船名、MBL 填 N/A
+    # (使用者 2026-10 樣本 ID610160512)
+    header["vessel"] = header["bl_no"] = header["mbl_no"] = None
+    sec = re.search(r"HOUSE BILL OF LADING\s*\n(.*?)\n\s*ORIGIN\b", text, re.DOTALL)
+    if sec:
+        m = _DSV_VESSEL_BL_PATTERN.search(sec.group(1))
+        if m:
+            header["vessel"] = f"{m.group('vessel').strip()} / {m.group('voyage').strip()}"
+            header["bl_no"] = m.group("house_bl").strip()
+            header["mbl_no"] = m.group("ocean_bl").strip()
+        else:
+            m = re.search(r"^\s*/\s*([A-Z0-9]+)\s*$", sec.group(1), re.MULTILINE)
+            header["bl_no"] = m.group(1) if m else None
 
-    m = re.search(r"^(\S+)\s*\(", text, re.MULTILINE)
+    # 貨櫃號碼只在 "CONTAINERS" 區塊找；沒有這個區塊 (併櫃) 時填 N/A，
+    # 不要抓到費用名稱 "THC (Terminal Handling Charge)"
+    sec = re.search(r"^CONTAINERS\s*\n(.*?)(?:\n\s*(?:Total CO|CO₂|CHARGES)\b|\Z)",
+                    text, re.DOTALL | re.MULTILINE)
+    m = re.search(r"^(\S+)\s*\(", sec.group(1), re.MULTILINE) if sec else None
     header["container_no"] = m.group(1) if m else None
 
     m = re.search(r"[\d.]+\s*KG\s+([\d.]+)\s*M3", text)
-    header["volume"] = m.group(1) if m else None
+    # VOLUME 欄被其他文字蓋住讀不到時，用費用說明的 "1,001 Cubic Meter(s)"
+    m_cbm = None if m else re.search(r"(\d+),(\d{3})\s+Cubic Meter", text)
+    header["volume"] = (m.group(1) if m
+                        else f"{m_cbm.group(1)}.{m_cbm.group(2)}" if m_cbm else None)
 
     items = _dsv_extract_items(text)
     if not items:
