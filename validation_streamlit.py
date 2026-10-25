@@ -314,8 +314,11 @@ def _check_items(group_rows: List[Dict]) -> List[Dict]:
             issues.append(_issue(ERROR, "amount", "AMOUNT_NOT_NUMERIC",
                                  f"{label}的金額不是數字：{amount_raw}", row))
         elif amount == 0:
-            # 金額 0 的費用很常見 (例如 MATERAI 印花稅免收)，只當附註
-            issues.append(_issue(INFO, "amount", "AMOUNT_ZERO", f"{label}金額為 0", row))
+            # 金額 0 是帳單原文 (例如 MATERAI 印花稅免收、ECOMET "CUSTOM Rp 0.00")：
+            # 屬原帳單問題，不扣分 (使用者 2026-10-25 規定，所有供應商適用)
+            issues.append(dict(_issue(INFO, "amount", "AMOUNT_ZERO",
+                                      f"{label}金額為 0（帳單原文就是 0，屬原帳單問題，非擷取錯誤）", row),
+                               known_source_issue=True))
         elif amount < 0:
             issues.append(_issue(WARN, "amount", "AMOUNT_NEGATIVE",
                                  f"{label}金額為負數 ({amount_raw})，請確認是否為折讓/扣款", row))
