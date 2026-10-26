@@ -45,6 +45,63 @@ def _search(pattern: str, text: str) -> Optional[str]:
 
 
 # ---------------------------------------------------------------------------
+# 材積 (Volume) 統一寫法 (使用者 2026-10-27 規定，所有供應商適用)：
+#   1. 整櫃 (FCL) 有貨櫃數：「數量X櫃型」，多種櫃型用 ", "，例如 "1X40HC"、
+#      "1X20GP, 1X40HC"。
+#   2. 散貨 (LCL) 沒有貨櫃數：CBM 數字 + " M3"，例如 "7.010 M3"。
+#   3. 只有重量 (空運/快遞，沒有 CBM)：重量 + " KG"，例如 "2082 KG"。
+# 各供應商只負責抓出貨櫃/CBM/重量，格式一律交給 _fmt_volume()。
+# ---------------------------------------------------------------------------
+
+def _fmt_volume(containers=None, cbm=None, kg=None) -> Optional[str]:
+    """containers：[(數量, 櫃型)]，櫃型去掉撇號、空白、FT 並轉大寫 ("40'HC" ->
+    "40HC"、"20 FT" -> "20")，同櫃型數量合併。cbm / kg：帳單印的數字 (字串或
+    數字，呼叫端先把千分位/小數符號整理好)，0 視為沒有。"""
+    counts: Dict[str, int] = {}
+    for qty, kind in containers or ():
+        key = re.sub(r"['\s]|FT\b", "", str(kind).upper())
+        try:
+            counts[key] = counts.get(key, 0) + int(float(qty))
+        except (TypeError, ValueError):
+            continue
+    parts = [f"{n}X{key}" for key, n in counts.items() if n]
+    if parts:
+        return ", ".join(parts)
+    for value, unit in ((cbm, "M3"), (kg, "KG")):
+        if value is None or str(value).strip() in ("", "N/A"):
+            continue
+        text = str(value).strip()
+        try:
+            if float(text) == 0:
+                continue
+        except ValueError:
+            continue
+        return f"{text} {unit}"
+    return None
+
+
+_VOLUME_BOX_RE = re.compile(r"(\d+)\s*[xX]\s*(\d{2}\s*'?\s*(?:[A-Za-z]{1,3}\b)?)")
+
+
+def _volume_from_text(raw: Optional[str]) -> Optional[str]:
+    """把帳單上的材積文字轉成統一寫法：'FCL - 1x40HC' / '1X20,6X40' /
+    '(1x20 FT) (3x40 HQ)' -> 櫃量；'2.5 CBM' / '27.450 M3' -> M3；'614KG' -> KG。
+    認不出來的照原文。"""
+    if not raw:
+        return raw
+    boxes = _VOLUME_BOX_RE.findall(raw)
+    if boxes:
+        return _fmt_volume(containers=boxes)
+    m = re.search(r"(\d+(?:[.,]\d+)?)\s*(?:CBM|M3)\b", raw, re.IGNORECASE)
+    if m:
+        return _fmt_volume(cbm=m.group(1).replace(",", "."))
+    m = re.search(r"(\d+(?:[.,]\d+)?)\s*KGS?\b", raw, re.IGNORECASE)
+    if m:
+        return _fmt_volume(kg=m.group(1).replace(",", "."))
+    return raw
+
+
+# ---------------------------------------------------------------------------
 # 全系統統一的日期顯示格式：「DD Mon YYYY」，月份用英文縮寫 (Jan/Feb/…)。
 # 所有供應商的日期擷取函式最後都呼叫這個共用函式組字串，不要各自手動拼
 # "DD.MM.YYYY"，確保畫面顯示、匯出 Excel、跟正確答案比對三處的日期格式
@@ -155,7 +212,9 @@ def _dwiharta_clean_volume(value: Optional[str]) -> Optional[str]:
     """
     if not value:
         return value
-    return re.sub(r"^(FCL|LCL)\s*-\s*", "", value.strip(), flags=re.IGNORECASE).strip()
+    # 材積統一寫法 (見 _fmt_volume)："1x40HC" -> "1X40HC"
+    return _volume_from_text(
+        re.sub(r"^(FCL|LCL)\s*-\s*", "", value.strip(), flags=re.IGNORECASE).strip())
 
 
 def _dwiharta_parse_indo_date(text: Optional[str]) -> Optional[str]:
@@ -298,7 +357,8 @@ def _kn_parse_air(text: str, header: Dict) -> List[Dict]:
         header[code] = _format_date_en(*m.groups()) if m else None
     cargo = re.search(r"VOLUME / CBM[^\n]*\n[^\n]*?([\d,]+\.\d+)\s+([\d.]+)\s+([\d.]+)\s*$",
                       text, re.MULTILINE)
-    header["volume"] = cargo.group(2) if cargo else None
+    # 空運有印 CBM，材積寫 CBM (統一寫法見 _fmt_volume)
+    header["volume"] = _fmt_volume(cbm=cargo.group(2), kg=cargo.group(1).replace(",", "")) if cargo else None
     header["container_no"] = None
     items = []
     for m in charge_line.finditer(text):
@@ -452,11 +512,8 @@ def _kn_extract_containers(text: str) -> List[tuple]:
 def _kn_container_volume(containers: List[tuple]) -> Optional[str]:
     """整櫃 (FCL) 的櫃量：同樣櫃型合併數量，櫃型只取第一個字母，
     例如 40' GE + 40' HC + 20' GE -> "1X40G+1X40H+1X20G"。"""
-    counts: Dict[str, int] = {}
-    for _, qty, size, kind in containers:
-        key = f"{size}{kind[0]}"
-        counts[key] = counts.get(key, 0) + qty
-    return "+".join(f"{qty}X{key}" for key, qty in counts.items()) or None
+    # 材積統一寫法 (見 _fmt_volume)：多種櫃型用 ", " 隔開
+    return _fmt_volume(containers=[(qty, f"{size}{kind[0]}") for _, qty, size, kind in containers])
 
 
 def _kn_extract_po_numbers(text: str) -> Optional[str]:
@@ -597,7 +654,8 @@ def parse_kuehne_nagel(text: str) -> Dict:
     else:
         header["container_no"] = None
         m2 = re.search(r"AS PER ATTACHED\s+([\d,\.]+)\s+([\d,\.]+)", text)
-        header["volume"] = m2.group(2) if m2 else None
+        # 散貨：CBM (統一寫法見 _fmt_volume)
+        header["volume"] = _fmt_volume(cbm=m2.group(2).replace(",", "")) if m2 else None
 
     # 這種帳單沒有主提單，留空給 expand_to_rows() 補 N/A
     header["mbl_no"] = None
@@ -1182,7 +1240,8 @@ def parse_maersk(text: str) -> Dict:
             "arrive_date": _maersk_parse_date(
                 _search(rf"\bETA\s*:\s*(.+?){_MAERSK_STOP}", block)
             ),
-            "volume": block_volume or total_volume,
+            # 材積統一寫法 (見 _fmt_volume)：散貨 CBM
+            "volume": _fmt_volume(cbm=(block_volume or total_volume or "").replace(",", "") or None),
             # Shipper：帳單上 "SHPR:" 後面的公司名稱 (跟 "Sold to:" 的帳單
             # 對象可能不是同一家，不要直接沿用 consignee 的值)。
             "shipper": _search(rf"\bSHPR\s*:\s*(.+?){_MAERSK_STOP}", block),
@@ -1348,7 +1407,8 @@ def parse_hyper_mega(text: str) -> Dict:
     # 後面的內容」穩定地就是 Vessel 值 (參見本區塊開頭的說明)。
     header["vessel"] = _search(r"Shipper\s*:.*:\s*(.+?)\s*$", text)
     m = re.search(r"CBM\s*/\s*Package\s*:\s*(?:LCL|FCL)\s*/\s*([\d,]+)\s*/", text)
-    header["volume"] = m.group(1).replace(",", ".") if m else None
+    # 材積統一寫法 (見 _fmt_volume)："0,5100" -> "0.5100 M3"
+    header["volume"] = _fmt_volume(cbm=m.group(1).replace(",", ".")) if m else None
 
     # 這種帳單沒有獨立的「開船日」欄位、也沒有貨櫃資訊，缺漏後續會自動
     # 補 N/A。
@@ -1627,7 +1687,8 @@ def parse_tata_classic(text: str) -> Dict:
     header["mbl_no"] = _search(rf"\bMAWB\s*:\s*(.+?){_TATA_STOP}", text)
     header["bl_no"] = _search(rf"\bHAWB\s*:\s*(.+?){_TATA_STOP}", text)
     header["vessel"] = _search(rf"\bFlight\s*:\s*(.+?){_TATA_STOP}", text)
-    header["volume"] = _search(rf"\bQTY\s*:\s*(.+?){_TATA_STOP}", text)
+    # 材積統一寫法 (見 _fmt_volume)："3 PKG / 32 KG" -> "32 KG"
+    header["volume"] = _volume_from_text(_search(rf"\bQTY\s*:\s*(.+?){_TATA_STOP}", text))
     header["port_of_loading"] = _search(rf"\bORIGIN\s*:\s*(.+?){_TATA_STOP}", text)
     header["shipper"] = _tata_extract_shipper(text)
 
@@ -1829,7 +1890,8 @@ def parse_tata_receipt(text: str) -> Dict:
     # 欄位整張發票只有一個值，不分品項 (不像 TATA A/F 格式逐行各自不同)。
     header["shipper"] = _search(_TATA_RECEIPT_SHIP_PATTERN, text)
     _volume_m = _TATA_RECEIPT_VOLUME_RE.search(text)
-    header["volume"] = _volume_m.group(1).strip() if _volume_m else None
+    # 材積統一寫法 (見 _fmt_volume)："3CTN/109KG" -> "109 KG"
+    header["volume"] = _volume_from_text(_volume_m.group(1).strip()) if _volume_m else None
 
     # 海運 (使用者提示，例如 SC2608-1058)：表格下方印 "HB/L:" "MB/L:"
     # "SHIPPER:" "ORIGIN:" "VESSEL: ... Total 43.332.814" (右欄 Total 擠在同一行)
@@ -2058,7 +2120,7 @@ def _tata_af_format_weight(text: Optional[str]) -> Optional[str]:
         value = float(text)
     except ValueError:
         return None
-    return f"{value:g} kgs"
+    return _fmt_volume(kg=f"{value:g}")   # 材積統一寫法 (見 _fmt_volume)
 
 
 def _tata_af_take_adjacent(lines, idx, item_line_idx_set, consumed) -> str:
@@ -2693,7 +2755,8 @@ def parse_femaria(text: str) -> Dict:
     header["invoice_date"] = _femaria_parse_date(
         _search(r"Jakarta\s*,\s*(\d{4}-\d{1,2}-\d{1,2})", text)
     )
-    header["volume"] = _femaria_parse_volume(text)
+    # 材積統一寫法 (見 _fmt_volume)："(1x20 FT) (3x40 HQ)" -> "1X20, 3X40HQ"
+    header["volume"] = _volume_from_text(_femaria_parse_volume(text))
     header["vessel"] = _search(r"Vessel\s*/\s*Voyage\s*:\s*(.+?)\s+ATA", text)
     header["bl_no"] = _femaria_clean_placeholder_dash(
         _search(r"BL/AWB\s+No\.\s*:\s*(\S+)", text)
@@ -3210,7 +3273,10 @@ def parse_pan_ekspres(text: str) -> Dict:
     header["vessel"] = _search(r"Vessel\s*:\s*(.+?)\s*$", text)
     header["port_of_loading"] = _search(r"POL\s*:\s*(.+?)\s+No AJU", text)
     header["port_of_discharge"] = _search(r"POD\s*:\s*(.+?)\s+Party", text)
-    header["volume"] = _search(r"Party\s*:\s*(.+?)\s*$", text)
+    # 材積統一寫法 (見 _fmt_volume)：散貨用 "Measurement : 3" (CBM)，沒有才用
+    # "Gross Weight : 1296" (KG)；"Party : 48 ROLLS" 是件數，不是材積
+    header["volume"] = _fmt_volume(cbm=_search(r"Measurement\s*:\s*([\d.]+)", text),
+                                   kg=_search(r"Gross Weight\s*:\s*([\d.]+)", text))
     header["arrive_date"] = _pan_parse_date(
         _search(r"ETA\s*:\s*(\d{1,2}-[A-Za-z]{3}-\d{4})", text)
     )
@@ -3968,8 +4034,12 @@ def parse_dsv(text: str) -> Dict:
     m = re.search(r"[\d.]+\s*KG\s+([\d.]+)\s*M3", text)
     # VOLUME 欄被其他文字蓋住讀不到時，用費用說明的 "1,001 Cubic Meter(s)"
     m_cbm = None if m else re.search(r"(\d+),(\d{3})\s+Cubic Meter", text)
-    header["volume"] = (m.group(1) if m
-                        else f"{m_cbm.group(1)}.{m_cbm.group(2)}" if m_cbm else None)
+    # 材積統一寫法 (見 _fmt_volume)：整櫃數 "PCIU9246720 (40HC - …) / FCL" ->
+    # "1X40HC"；散貨寫 CBM
+    fcl = re.findall(r"^\S+\s*\((\w+)\s*-[^)]*\)\s*/\s*FCL", sec.group(1), re.MULTILINE) if sec else []
+    header["volume"] = _fmt_volume(
+        containers=[(1, kind) for kind in fcl],
+        cbm=(m.group(1) if m else f"{m_cbm.group(1)}.{m_cbm.group(2)}" if m_cbm else None))
 
     items = _dsv_extract_items(text)
     if not items:
@@ -4733,13 +4803,15 @@ def parse_ecomet(text: str) -> Dict:
 
     m_weight = (re.search(r"Nett\s*Weight\s+([\d.,]+)", flat)
                 or re.search(r"Nett\s+([\d.,]+)\s+Weight\b", flat))
-    header["volume"] = f"{m_weight.group(1)} KG" if m_weight else None
-    # 有櫃型時材積寫櫃型，照帳單原文 ("Tipe : FCL // 1X40'HC COLLECT" -> 1X40'HC、
-    # "LCL - 2X40' + 1X20' N/N" -> 2X40' + 1X20')；沒有櫃型才寫 KG (使用者 2026-10-25)
-    tipe = _search(r"Tipe\s+([^\n]*)", text.replace(":", ""))
-    m_box = re.search(r"\d+X\d{2}'(?:HC)?(?:\s*\+?\s*\d+X\d{2}'(?:HC)?)*", tipe or "")
-    if m_box:
-        header["volume"] = m_box.group(0)
+    # 材積統一寫法 (見 _fmt_volume，使用者 2026-10-27)：Tipe 有櫃數寫櫃量
+    # ("FCL // 1X40'HC COLLECT" -> "1X40HC"、"LCL - 2X40' + 1X20'" -> "2X40, 1X20")；
+    # 沒有就寫 CBM ("CBM 25.21"，空運是 "0 / 0" 視為沒有)；再沒有寫 Nett Weight KG
+    tipe = _search(r"Tipe\s+([^\n]*)", text.replace(":", "")) or ""
+    boxes = re.findall(r"(\d+)X(\d{2}'?(?:HC)?)", tipe)
+    header["volume"] = _fmt_volume(
+        containers=boxes,
+        cbm=_search(r"\bCBM\s+([\d.,]+)", flat),
+        kg=m_weight.group(1) if m_weight else None)
 
     flight = _search(r"Flight\s+(.+?)\s+Gross", flat)
     voyage = _search(r"Voyage\s+(.+?)\s+CBM", flat)
@@ -4992,7 +5064,8 @@ def _handal_extract_header(text: str) -> Dict:
     m = _HANDAL_VOLUME_RE.search(text)
     # 散貨 (LCL) 沒有櫃型，材積欄寫重量 (例如 "614KG")
     m_kg = None if m else re.search(r'\b(\d[\d,.]*\s?KG)\b', text)
-    h['volume'] = m.group(1) if m else (m_kg.group(1) if m_kg else None)
+    # 材積統一寫法 (見 _fmt_volume)："1X20,6X40" -> "1X20, 6X40"、"614KG" -> "614 KG"
+    h['volume'] = _volume_from_text(m.group(1) if m else (m_kg.group(1) if m_kg else None))
 
     m = _HANDAL_CODE_RE.search(text)
     code = m.group(1) if m else None
@@ -5584,7 +5657,8 @@ def _ct_statement(rows: List[list]) -> Optional[Dict]:
             "bl_no": so_inv, "mbl_no": so_inv,
             # 越南境內拖車，啟運港 / 目的港一律 VIETNAM (使用者答案)
             "port_of_loading": "VIETNAM", "port_of_discharge": "VIETNAM",
-            "volume": _vn_num(_vn_cell(row, c_cbm)),
+            # 材積統一寫法 (見 _fmt_volume)：CBM 欄 -> "0.26 M3"
+            "volume": _fmt_volume(cbm=_vn_num(_vn_cell(row, c_cbm))),
             "vessel": plate or None, "container_no": cont or None,
         })
     if vat:
@@ -5767,7 +5841,7 @@ _RAC_META_LABELS = {
     "DECLARATION": "mbl_no", "SO TO KHAI": "mbl_no",
     "DATE C/D": "date_cd", "DELIVERY DATE FCL": "delivery_date",
     "NGÀY ĐÓNG HÀNG": "stuffing_date", "PORT": "port", "KGS": "kgs",
-    "20'": "cont_20", "40'": "cont_40", "CONT NO": "container_no",
+    "20'": "cont_20", "40'": "cont_40", "CONT NO": "container_no", "CBM": "cbm",
 }
 
 
@@ -5869,18 +5943,20 @@ def _rac_table(rows: List[list]):
 
 
 def _rac_volume(row: list, meta: Dict[str, int], kind: str) -> Optional[str]:
-    """FCL/出口：櫃型件數 (例如 '1X20G')；LCL/出口沒有櫃：重量 (例如 '877.78 KG')。"""
+    """材積統一寫法 (見 _fmt_volume)：FCL 櫃量 (例如 '1X20G')；LCL 沒有櫃：
+    CBM 欄 (例如 '2.5 M3')，沒有 CBM 才寫重量 (例如 '877.78 KG')。"""
     containers = []
     for field, size in (("cont_20", "20G"), ("cont_40", "40G")):
         n = _vn_num(_vn_cell(row, meta.get(field)))
         if n:
-            containers.append(f"{_vn_text(n)}X{size}")
+            containers.append((n, size))
     if containers:
-        return ", ".join(containers)
+        return _fmt_volume(containers=containers)
     if kind == "fcl_import":
         return None
+    cbm = _vn_num(_vn_cell(row, meta.get("cbm")))
     kgs = _vn_num(_vn_cell(row, meta.get("kgs")))
-    return f"{_vn_text(kgs)} KG" if kgs else None
+    return _fmt_volume(cbm=_vn_text(cbm) if cbm else None, kg=_vn_text(kgs) if kgs else None)
 
 
 def _rac_parse_sheet(name: str, rows: List[list]):
@@ -6039,12 +6115,14 @@ _OPL_ITEM_RE = re.compile(
 
 
 def _opl_volume(text: str) -> Optional[str]:
-    """"20'/40'/45' : 1 / 0 / 0" -> "1X20G" (有數量的櫃型才列，多種用逗號)。"""
+    """材積統一寫法 (見 _fmt_volume)："20'/40'/45' : 1 / 0 / 0" -> "1X20G"；
+    沒有櫃數用 "VOLUME : 27.450 M3"，再沒有用 "GROSS WT : 2,592.00 KGS"。"""
     m = re.search(r"20'/40'/45'\s*:\s*(\d+)\s*/\s*(\d+)\s*/\s*(\d+)", text)
-    if not m:
-        return None
-    parts = [f"{n}X{size}G" for n, size in zip(m.groups(), ("20", "40", "45")) if int(n)]
-    return ",".join(parts) or None
+    boxes = [(n, f"{size}G") for n, size in zip(m.groups(), ("20", "40", "45"))] if m else []
+    kg = _search(r"GROSS WT\s*:\s*([\d,.]+)\s*KGS", text)
+    return _fmt_volume(containers=boxes,
+                       cbm=_search(r"VOLUME\s*:\s*([\d.]+)\s*M3", text),
+                       kg=kg.replace(",", "") if kg else None)
 
 
 def _opl_date(value: Optional[str]) -> Optional[str]:
@@ -6393,7 +6471,17 @@ def _cw_parse_doc(doc: str, supplier: Optional[str]) -> List[Dict]:
         m = _cw_after(doc, r"OWNER'S REFERENCE", r"(\S*\d\S*)", look=1)
         h["order_no"] = m.group(1) if m else None
     vol = _search(r"KG\s+([\d.,]+)\s*M3", doc)
-    h["volume"] = f"{vol.replace(',', '.')} M3" if vol else None
+    kg = _search(r"([\d.,]+)\s*KG\s+[\d.,]+\s*M3", doc)
+    # 材積統一寫法 (見 _fmt_volume)：CONTAINERS 區塊的櫃型 ("FFAU3490244 - 40HC")
+    # 算櫃量；MOL 沒有這個區塊，用費用單位 "4 - 40HC" 的最大數量；都沒有寫 CBM
+    boxes = [(1, k) for k in re.findall(r"^\s*[A-Z]{4}\d{7}\s*-\s*(\w+)", doc, re.MULTILINE)]
+    if not boxes:
+        per_type: Dict[str, int] = {}
+        for qty, kind in re.findall(r"\s(\d+)\s+-\s+(\d{2}[A-Z]{2})\s", doc):
+            per_type[kind] = max(per_type.get(kind, 0), int(qty))
+        boxes = [(n, k) for k, n in per_type.items()]
+    h["volume"] = _fmt_volume(containers=boxes, cbm=vol.replace(",", ".") if vol else None,
+                              kg=kg.replace(",", ".") if kg else None)
     h["vessel"] = h["bl_no"] = h["mbl_no"] = None
     m = _cw_after(doc, r"OCEAN BILL OF LADING.*HOUSE BILL OF LADING",
                   r"(?P<v>.+?) / (?P<voy>\S+) / \S+ (?P<ocean>\S+) (?P<house>\S+)$")
@@ -6554,12 +6642,11 @@ def parse_expeditors(text: str) -> Dict:
     h["bl_no"] = _search(r"AWB/BL:\s*(\S+)", text)
     h["port_of_discharge"] = _search(r"DESTINATION:\s*(\S+)", text)
     h["vessel"] = _search(r"CARRIER:\s*(.+?)\s*$", text)
-    m = re.search(r"PCS\s+([\d.]+)\s+K\b", text)
-    if m:
-        weight = float(m.group(1))
-        h["volume"] = int(weight) if weight.is_integer() else weight
-    else:
-        h["volume"] = (lambda v: f"{v} CBM" if v else None)(_search(r"PCS\s+([\d.]+)\s+CBM", text))
+    # 材積統一寫法 (見 _fmt_volume)：海運 "5.120 CBM" -> "5.120 M3"；空運只有
+    # 重量 "2082.000 K" -> "2082 KG"
+    weight = _search(r"PCS\s+([\d.]+)\s+K\b", text)
+    h["volume"] = _fmt_volume(cbm=_search(r"PCS\s+([\d.]+)\s+CBM", text),
+                              kg=f"{float(weight):g}" if weight else None)
     block = re.search(r"Description\s+VAT\s+AMOUNT\s+[A-Z]{3}\s*\n(.*?)\nSUB TOTAL", text, re.DOTALL)
     items = []
     for line in (block.group(1).split("\n") if block else []):
