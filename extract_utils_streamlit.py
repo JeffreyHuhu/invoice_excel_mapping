@@ -911,7 +911,7 @@ def register_supplier(key: str, label: str,
         "audit_exclude": audit_exclude, "force_ocr": force_ocr,
         "sheet_parse": sheet_parse, "sheet_totals": sheet_totals,
         "extract_vat_total": extract_vat_total, "invoice_page": invoice_page,
-        "ocr_psm": ocr_psm, "page_text": page_text,
+        "ocr_psm": ocr_psm, "page_text": page_text, "multi_page_pdf": multi_page,
         # Excel 供應商一份檔案可能有好幾張對帳單，比對時跟 multi_page 一樣用
         # invoice_no 分組
         "multi_page": multi_page or sheet_parse is not None,
@@ -926,7 +926,10 @@ def detect_supplier(text: str) -> Optional[str]:
     """
     from_sheet = (text or "").startswith(SHEET_TEXT_MARK)
     for key, entry in SUPPLIER_REGISTRY.items():
-        if (entry.get("sheet_parse") is not None) != from_sheet:
+        # 同一家可能 PDF 與 Excel 帳單都有 (例如越南 MAERSK)：有對應的擷取規則才比對
+        if from_sheet and entry.get("sheet_parse") is None:
+            continue
+        if not from_sheet and entry.get("parse") is None:
             continue
         try:
             if entry["detect"](text):
@@ -1195,7 +1198,8 @@ def parse_invoice_pdf(pdf_path: str, supplier_key: Optional[str] = None,
             rows = []
         return key, rows or expand_to_rows({"header": {}, "items": [{}]}), text
 
-    if is_multi_page_supplier(key):
+    # PDF 只看註冊時的 multi_page (同時有 Excel 規則的供應商，multi_page 只是比對分組用)
+    if key in SUPPLIER_REGISTRY and SUPPLIER_REGISTRY[key].get("multi_page_pdf"):
         rows = _parse_multi_page_pdf(pdf_path, key, **pdfplumber_kwargs)
         return key, rows, text
 
@@ -1753,7 +1757,7 @@ def audit_invoice_totals(
             results.append(result)
         return results
 
-    if entry.get("multi_page"):
+    if entry.get("multi_page_pdf"):
         pages = supplier_pages(pdf_path, supplier_key, **pdfplumber_kwargs)
         groups = _group_rows_by_invoice(rows)
         # key(正規化發票號碼) -> 原始發票號碼字串，用來在「不是發票抬頭頁」

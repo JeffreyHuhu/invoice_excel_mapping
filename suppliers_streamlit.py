@@ -323,6 +323,9 @@ def parse_dwiharta(text: str) -> Dict:
 
 def detect_kuehne_nagel(text: str) -> bool:
     upper = text.upper()
+    # 越南 KN (VN10，越南文電子發票/附件清單) 另有規則 KN_VN
+    if "KUEHNE + NAGEL" in upper and ("HÓA ĐƠN" in upper or "HOÁ ĐƠN" in upper or "VIỆT NAM" in upper):
+        return False
     return "KUEHNE" in upper and "NAGEL" in upper
 
 
@@ -1058,6 +1061,9 @@ def detect_maersk(text: str) -> bool:
     upper = text.upper()
     # 只看抬頭：掃描檔 OCR 常把 "Kode dan Nomor Seri" 讀錯，不能靠它判斷
     if upper.lstrip().startswith("FAKTUR PAJAK"):
+        return False
+    # 越南 MAERSK (VN07，越南文電子發票) 另有規則
+    if "MAERSK LOGISTICS & SERVICES VI" in upper or "HÓA ĐƠN GIÁ TRỊ GIA TĂNG" in upper:
         return False
     return "MAERSK LOGISTICS" in upper
 
@@ -4242,7 +4248,11 @@ register_supplier(
 #     (帳單本身沒有印出「啟運港」這個標籤，固定用這家供應商所在地)。
 
 def detect_apl(text: str) -> bool:
-    return "APL LOGISTICS" in text.upper()
+    upper = text.upper()
+    # 越南 APL (VN11，越南文電子發票) 另有規則 APL_VN
+    if "APL LOGISTICS VIỆT NAM" in upper or "HÓA ĐƠN GIÁ TRỊ GIA TĂNG" in upper:
+        return False
+    return "APL LOGISTICS" in upper
 
 
 def apl_invoice_page(page: str) -> bool:
@@ -6690,6 +6700,921 @@ register_supplier(
 )
 
 
+# ===========================================================================
+# 越南 Excel 對帳表共用擷取 (VN01、VN02、VN06 … 2026-10-27 新增)
+# ===========================================================================
+#
+# 越南供應商多半用 Excel 對帳表 (Bảng kê / Statement) 請款，每家欄位不同，可是
+# 骨架一樣：抬頭 (賣方、買方、日期、附發票號碼)、一到兩列表頭 (例如「LOẠI CONT」
+# 下面再分 20'/40'/45')、一列一筆出貨、費用欄、VAT 欄、合計欄、最後合計列。
+# 這裡寫一套共用程式，每家只給一份設定 (_VT_xxx)：
+#   - 欄位用表頭文字找 (去聲調、轉大寫後「包含」比對)，不寫死欄位位置。
+#   - 兩列表頭自動合併：上一列是合併儲存格時，往左找最近的標題，
+#     例如 "LOẠI CONT" + "40'" -> "LOAI CONT 40'"。
+#   - 慣例同 VN05 CONG THANH 的運費對帳表 (使用者答案)：每一列出貨各一張發票，
+#     INVOICE NO = 設定的單號欄；每個費用欄是一筆費用 (名稱用表頭)，VAT 單獨一筆。
+#     同一個單號出現在好幾列 (或好幾張工作表) 時，合併成同一張發票勾稽。
+#   - 勾稽 (sheet_totals)：每張發票的費用加總 = 「未稅合計」欄；加上 VAT =
+#     「含稅合計」欄 (有設定才做)。
+#   - 材積照統一寫法 (_fmt_volume)：20'/40'/45' 櫃數 -> "1X40"；沒有櫃數用 CBM；
+#     再沒有用重量 KG。
+#
+# 設定欄位 (都用表頭文字的片段，去聲調大寫，例如 "SO CONTAINER")：
+#   header：辨識表頭列的文字；key：發票號碼欄 (可給多個，依序取第一個有值的)；
+#   fees：[(表頭片段, 費用名稱或 None=用表頭)]；vat / vat_desc：VAT 欄與名稱；
+#   total / grand：未稅合計、含稅合計欄；date：每列日期欄；fields：{標準欄位:
+#   表頭片段}；boxes：{"20": 表頭, "40": 表頭, "45": 表頭}；cbm / kg：材積欄；
+#   port：「起點 - 終點」合在一欄時用來拆成啟運港/目的港。
+
+
+def _vt_norm(value) -> str:
+    """表頭比對用：去越南文聲調、轉大寫、換行與連續空白壓成一個空白。"""
+    import unicodedata
+    text = _vn_text(value).replace("Đ", "D").replace("đ", "d")
+    text = "".join(ch for ch in unicodedata.normalize("NFKD", text)
+                   if not unicodedata.combining(ch))
+    return re.sub(r"\s+", " ", text).strip().upper()
+
+
+def _vt_header_row(rows: List[list], marker) -> Optional[int]:
+    """表頭列：第一個包含 marker (可給多個) 的列。"""
+    markers = marker if isinstance(marker, (list, tuple)) else (marker,)
+    for i, row in enumerate(rows[:40]):
+        if any(m in _vt_norm(c) for c in row for m in markers):
+            return i
+    return None
+
+
+def _vt_labels(rows: List[list], h: int, two_rows: bool = True, above: bool = False) -> List[str]:
+    """每欄的完整標題：表頭列 (合併儲存格往左補) + 下一列子標題 (two_rows)。
+    above：有些欄的標題在表頭的上一列 (例如 VN14 "NGÀY HĐ / SỐ HĐ")，表頭列空白時用它。"""
+    top = rows[h]
+    sub = (rows[h + 1] if h + 1 < len(rows) else []) if two_rows else []
+    up = rows[h - 1] if above and h > 0 else []
+    width = max(len(top), len(sub), len(up))
+    labels, last = [], ""
+    for c in range(width):
+        t = _vt_norm(top[c]) if c < len(top) else ""
+        if not t and c < len(up):
+            t = _vt_norm(up[c])
+        s = _vt_norm(sub[c]) if c < len(sub) else ""
+        # 子標題是數字或很短 (20'/40'/VND/USD) 時，上一列空白代表被合併
+        if t:
+            last = t
+        elif s:
+            t = last
+        labels.append(f"{t} {s}".strip())
+    return labels
+
+
+def _vt_col(labels: List[str], *needles) -> Optional[int]:
+    """第一個包含任一片段的欄位。片段開頭加 "=" 代表要完全相等。"""
+    for needle in needles:
+        if not needle:
+            continue
+        for c, label in enumerate(labels):
+            if (label == needle[1:]) if needle.startswith("=") else (needle in label):
+                return c
+    return None
+
+
+def _vt_doc_date(rows: List[list]) -> Optional[str]:
+    """抬頭日期："Ngày 28 tháng 09 năm 2026"、"Ngày 03/09/2026"、"DATE : 28/09/2026"。"""
+    for row in rows[:20]:
+        # 去聲調後比對 (Excel 的越南文有時是組合字元，直接比對 "Ngày" 會失敗)
+        text = _vt_norm(" ".join(_vn_text(c) for c in row if c is not None))
+        m = re.search(r"NGAY\s+(\d{1,2})\s+THANG\s+(\d{1,2})\s+NAM\s+(\d{4})", text)
+        if m:
+            return _format_date_en(*m.groups())
+        m = re.search(r"(?:NGAY|DATE)\s*:?\s*(\d{1,2})/(\d{1,2})/(\d{4})", text)
+        if m:
+            return _format_date_en(*m.groups())
+    return None
+
+
+def _vt_consignee(rows: List[list]) -> Optional[str]:
+    """買方：「Khách hàng : …」「Tên khách hàng : …」「Họ tên người mua hàng (Customer): …」
+    「To : …」「CONSIGNEE : …」「Customer : …」。"""
+    pat = re.compile(r"^(?:TEN\s+)?KHACH\s+HANG|NGUOI\s+MUA\s+HANG|^TO\b|^CONSIGNEE|^CUSTOMER")
+    for row in rows[:20]:
+        # 只取儲存格第一行 (下一行常是地址)
+        cells = [_vn_text(str(c).splitlines()[0]) for c in row if c not in (None, "") and str(c).strip()]
+        for i, cell in enumerate(cells):
+            if pat.search(_vt_norm(cell)):
+                value = cell.split(":", 1)[1] if ":" in cell else ""
+                if not value.strip(" :：") and i + 1 < len(cells):
+                    value = cells[i + 1]        # "To :" | "POU YUEN …" 值在下一格
+                # 同一格常接著地址/稅號 ("… VIỆT NAM Địa chỉ: …")
+                value = re.split(r"\s+(?:Đ[ịi]a\s+ch[ỉi]|Add(?:ress)?\b|MST\b|Tel\b)", value, flags=re.I)[0]
+                value = value.strip(" :：")
+                if value:
+                    return value
+    return None
+
+
+def _vt_parse_sheet(name: str, rows: List[list], cfg: Dict, supplier: str) -> Tuple[List[Dict], Dict]:
+    """一張對帳表 -> (費用列, {發票號碼: [未稅合計, 含稅合計]})。"""
+    h = _vt_header_row(rows, cfg["header"])
+    if h is None:
+        return [], {}
+    two_rows = cfg.get("two_rows", True)
+    labels = _vt_labels(rows, h, two_rows, cfg.get("above", False))
+
+    def find(v):
+        return _vt_col(labels, *(v if isinstance(v, (list, tuple)) else (v,)))
+
+    col = {k: find(v) for k, v in cfg.items() if k in ("total", "grand", "vat", "date", "cbm", "kg", "port")}
+    keys = [_vt_col(labels, k) for k in cfg["key"]]
+    fees = [(find(lab), desc) for lab, desc in cfg["fees"]]
+    def fee_name(c):
+        """費用名稱照抄表頭原文：子標題是費用名稱就用子標題 ("Description" 底下的
+        "Ocean Freight"、"CHI HỘ" 底下的 "PHÍ NÂNG (gồm VAT)")；子標題只是幣別或
+        櫃型 ("USD"、"VND"、"20'") 時用上面的標題 (合併儲存格往左找)。"""
+        sub = _vn_text(_vn_cell(rows[h + 1], c)) if two_rows and h + 1 < len(rows) else ""
+        if sub and not re.fullmatch(r"(?:VND|USD|RMB|\d{2}'?|VAT.*|TOTAL)", sub, re.I):
+            return sub
+        for left in range(c, -1, -1):
+            top = _vn_text(_vn_cell(rows[h], left))
+            if top:
+                return top
+        return labels[c]
+
+    fees = [(c, desc or fee_name(c)) for c, desc in fees if c is not None]
+    # 外幣費用名稱加註幣別 (同 VN09 MOL 的使用者答案 "… (USD)")
+    fees = [(c, f"{desc} ({cur})" if (cur := next((x for x in ("USD", "RMB") if re.search(
+        rf"\b{x}\b", labels[c])), None)) and cur not in desc.upper() else desc) for c, desc in fees]
+    fields = {code: find(lab) for code, lab in cfg.get("fields", {}).items()}
+    boxes = {size: _vt_col(labels, lab) for size, lab in cfg.get("boxes", {}).items()}
+    common = {"supplier": supplier, "consignee": _vt_consignee(rows),
+              "invoice_date": _vt_doc_date(rows)}
+    doc_key = None
+    if cfg.get("doc_key"):
+        # 整張對帳表一個號碼 (例如 VN19 "Mã bảng kê: PYV260901"、VN11 表尾
+        # "Invoice No.: 28433")：當發票號碼
+        all_text = " ".join(_vn_text(c) for r in rows for c in r if c not in (None, ""))
+        m_doc = re.search(cfg["doc_key"], all_text)
+        doc_key = m_doc.group(1) if m_doc else None
+    if cfg.get("doc_date"):
+        for r in rows:
+            cells = [c for c in r if c not in (None, "")]
+            for i, c in enumerate(cells[:-1]):
+                if cfg["doc_date"] in _vt_norm(c) and _vn_date(cells[i + 1]):
+                    common["invoice_date"] = _vn_date(cells[i + 1])
+    items, totals = [], {}
+    start = h + 2 if two_rows else h + 1
+    end = len(rows)
+    for i in range(start, len(rows)):
+        first = _vt_norm(next((c for c in rows[i] if c not in (None, "")), ""))
+        if re.match(r"^(TONG|TOTAL|CONG|VAT|XIN VUI|SO TK)", first):
+            end = i
+            break
+    # 整張對帳表只有一個 VAT (合計列下方 "VAT 8% | 1,638,528")：單獨一張，
+    # 發票號碼用設定的對帳表號碼欄 (vat_doc) 或工作表名稱
+    for row in rows[end:end + 6]:
+        cells = [c for c in row if c not in (None, "")]
+        if cells and re.match(r"^VAT\b", _vt_norm(cells[0])) and cfg.get("vat_row"):
+            nums = [_vn_amount(c) for c in cells[1:] if _vn_amount(c)]
+            if nums:
+                items.append({"description": _vn_text(cells[0]), "amount": None, "vat": nums[0],
+                              **common, "invoice_no": doc_key or f"{name.strip()} VAT"})
+            break
+    if cfg.get("vat_total"):
+        # 表尾的整張 VAT ("Total VAT amount | 2590843.48")，取該列最後一個數字
+        for row in rows[end:]:
+            if any(cfg["vat_total"] in _vt_norm(c) for c in row):
+                nums = [_vn_amount(c) for c in row if _vn_amount(c)]
+                if nums:
+                    items.append({"description": cfg.get("vat_desc", "VAT"), "amount": None,
+                                  "vat": nums[-1], **common, "invoice_no": doc_key or f"{name.strip()} VAT"})
+                break
+    last_key = last_date = None
+    for row in rows[start:end]:
+        key = next((_vn_text(_vn_cell(row, k)) for k in keys if _vn_text(_vn_cell(row, k))), "")
+        if not key:
+            # 續行：單號空白但有費用 (VN14 同一票第二列只有 D/O 費)，算在上一張
+            if cfg.get("carry") and last_key and any(_vn_amount(_vn_cell(row, c)) for c, _ in fees):
+                key = last_key
+            else:
+                continue
+        last_key = key
+        key = doc_key or key
+        head = dict(common, invoice_no=key)
+        for code, c in fields.items():
+            if c is not None and _vn_text(_vn_cell(row, c)):
+                value = _vn_cell(row, c)
+                head[code] = (_vn_date(value) or _vn_text(value)) if code.endswith("_date") else _vn_text(value)
+        if col.get("date") is not None:
+            raw_date = _vn_cell(row, col["date"])
+            # 日期後面可能接其他字 ("26/08/2026 - 146 KGS"，VN18)
+            m_date = re.match(r"(\d{1,2})/(\d{1,2})/(\d{4})", _vn_text(raw_date))
+            row_date = _vn_date(raw_date) or (_format_date_en(*m_date.groups()) if m_date else None)
+            # 同一趟車的後幾批不再寫日期 (VN06 進口派車表)：沿用上一列
+            if not row_date and cfg.get("ffill_date"):
+                row_date = last_date
+            if row_date:
+                head["invoice_date"] = last_date = row_date
+        if col.get("port") is not None and " - " in _vn_text(_vn_cell(row, col["port"])):
+            pol, pod = _vn_text(_vn_cell(row, col["port"])).split(" - ", 1)
+            head.setdefault("port_of_loading", pol.strip())
+            head.setdefault("port_of_discharge", pod.strip())
+        def measure(name_):
+            # Excel 浮點誤差 (6.912000000000001) 取到小數 3 位
+            value = _vn_num(_vn_cell(row, col.get(name_))) if col.get(name_) is not None else None
+            return f"{round(value, 3):g}" if value else None
+
+        head["volume"] = _fmt_volume(
+            containers=[(_vn_num(_vn_cell(row, c)), size) for size, c in boxes.items() if c is not None],
+            cbm=measure("cbm"), kg=measure("kg"))
+        # 費用名稱 "@欄位" 代表取該欄的文字 (例如 VN07 Remark 欄 "Late come charge")
+        row_items = [{"description": (_vn_text(_vn_cell(row, find(desc[1:]))) or desc[1:])
+                      if desc.startswith("@") else desc,
+                      "amount": _vn_amount(_vn_cell(row, c)), "vat": None, **head}
+                     for c, desc in fees if _vn_amount(_vn_cell(row, c))]
+        vat = _vn_amount(_vn_cell(row, col.get("vat"))) if col.get("vat") is not None else None
+        if vat:
+            row_items.append({"description": cfg.get("vat_desc", "VAT"), "amount": None, "vat": vat, **head})
+        if not row_items:
+            continue
+        items += row_items
+        # 合計欄空白 (公式沒有存計算結果) 時當成沒有合計，不是 0
+        t = totals.setdefault(key, [None, None])
+        for i, name_ in enumerate(("total", "grand")):
+            value = _vn_num(_vn_cell(row, col[name_])) if col.get(name_) is not None else None
+            if value is not None:
+                t[i] = (t[i] or 0) + value
+    return items, totals
+
+
+def _vt_sheets(book, cfgs: List[Tuple[str, Dict]]):
+    """依工作表名稱 (正規表示式，比對去聲調大寫的名稱) 套設定；第一個符合的為準。"""
+    for name, rows in book.sheets:
+        for pattern, cfg in cfgs:
+            if re.search(pattern, _vt_norm(name)):
+                yield name, rows, cfg
+                break
+
+
+def _vt_make(supplier: str, cfgs: List[Tuple[str, Dict]]):
+    """產生這家供應商的 (sheet_parse, sheet_totals)。"""
+    def sheet_parse(book) -> List[Dict]:
+        items = []
+        for name, rows, cfg in _vt_sheets(book, cfgs):
+            items += _vt_parse_sheet(name, rows, cfg, supplier)[0]
+        # 同一張發票在某張表才有的欄位 (例如材積只在 LCC 表)，補到其他列
+        known: Dict[str, Dict] = {}
+        for it in items:
+            for code, value in it.items():
+                if value not in (None, "") and code not in ("description", "amount", "vat"):
+                    known.setdefault(it["invoice_no"], {}).setdefault(code, value)
+        items = [{**known.get(it["invoice_no"], {}), **{k: v for k, v in it.items() if v not in (None, "")},
+                  "vat": it.get("vat"), "amount": it.get("amount")} for it in items]
+        return [{"header": {}, "items": items or [{"description": None, "amount": None}]}]
+
+    def sheet_totals(book) -> List[Dict]:
+        merged: Dict[str, List[float]] = {}
+        has_total = has_grand = False
+        for name, rows, cfg in _vt_sheets(book, cfgs):
+            has_total |= "total" in cfg
+            has_grand |= "grand" in cfg
+            for key, pair in _vt_parse_sheet(name, rows, cfg, supplier)[1].items():
+                m = merged.setdefault(key, [None, None])
+                for i, value in enumerate(pair):
+                    if value is not None:
+                        m[i] = (m[i] or 0) + value
+        return [{"invoice_no": key, "total": t if has_total else None,
+                 "grand_total": g if has_grand else None} for key, (t, g) in merged.items()]
+    return sheet_parse, sheet_totals
+
+
+def _vt_register(key: str, label: str, detect, supplier: str, cfgs) -> None:
+    parse, totals = _vt_make(supplier, cfgs)
+    register_supplier(key, label, detect, None, sheet_parse=parse, sheet_totals=totals)
+
+
+# --- VN01 TRANS WAGON (CÔNG TY TNHH LIÊN VẬN QUỐC TẾ，MST 0302…) -------------
+# 一個活頁簿三張正式對帳表 (各附一張越南增值稅發票)：S1-LCC 當地費用、S1-O.F
+# 海運費、S1-EXW 工廠交貨費；另有「TỔNG」彙總表與「EXWORK」工作表 (重複，不取)。
+# 發票號碼 = HAWB.No (同一票的三張表合併勾稽)。VAT 0%。
+_VT_TRANS_WAGON = [
+    (r"^S1-LCC", {"header": "HAWB.NO", "key": ["HAWB.NO"],
+                  "fees": [("PHI CHUNG TU", None), ("PHI DAI LY", None), ("PHI PHU TROI", None),
+                           ("PHI BOC XEP", None), ("PHI XEP DO", None), ("PHI VE SINH", None),
+                           ("PHI QUAN LY", None), ("DRAYAGE", None), ("LOADING", None)],
+                  "vat": "VAT", "vat_desc": "VAT", "total": "TONG CONG (TOTAL) VND",
+                  "grand": "=TONG CONG (TOTAL) TOTAL", "port": "CANG DI",
+                  "boxes": {"20": "CONT 20", "40": "CONT 40"}, "cbm": "CBM",
+                  "fields": {"bl_no": "HAWB.NO"}}),
+    (r"^S1-O\.?F", {"header": "HAWB.NO", "key": ["HAWB.NO"],
+                    "fees": [("CUOC BIEN", None)], "vat": "VAT", "vat_desc": "VAT",
+                    "total": "CUOC BIEN", "grand": "=CUOC BIEN (OCEAN FREIGHT) TOTAL",
+                    "port": "CANG DI", "fields": {"bl_no": "HAWB.NO"}}),
+    (r"^S1-EXW", {"header": "HAWB.NO", "key": ["HAWB.NO"],
+                  "fees": [("PHI EXWORK", None)], "vat": "VAT", "vat_desc": "VAT",
+                  "total": "PHI EXWORK", "grand": "=PHI EXWORK TOTAL",
+                  "port": "CANG DI", "fields": {"bl_no": "HAWB.NO"}}),
+]
+
+
+def detect_trans_wagon(text: str) -> bool:
+    return "TRANS WAGON" in text.upper()
+
+
+_vt_register("TRANS_WAGON", "CÔNG TY TNHH LIÊN VẬN QUỐC TẾ (TRANS WAGON)",
+             detect_trans_wagon, "CÔNG TY TNHH LIÊN VẬN QUỐC TẾ", _VT_TRANS_WAGON)
+
+
+# --- VN02 VĨNH HƯNG LONG (拖車行) --------------------------------------------
+# 兩個檔：運費對帳表 (CƯỚC VC，好幾張工作表，每列一個貨櫃) 與代墊吊櫃費 (CHI HỘ
+# NÂNG HẠ，金額已含 VAT)。發票號碼 = 批號 SỐ LÔ (新批號優先，沒有用舊批號)，
+# 同一批好幾個貨櫃合併勾稽；貨櫃號碼、櫃型 (20'/40'/45') 逐列。
+_VT_VHL_COMMON = {
+    "header": "SO CONTAINER", "key": ["SO LO MOI", "SO LO CU", "=SO LO", "SO CONTAINER"],
+    "date": "NGAY HOAN THANH", "boxes": {"20": "LOAI CONT 20'", "40": "LOAI CONT 40'", "45": "LOAI CONT 45'"},
+    "fields": {"container_no": "SO CONTAINER", "port_of_loading": ("CANG LAY", "=CANG"),
+               "port_of_discharge": ("CANG HA", "CANG TRA")},
+}
+_VT_VINH_HUNG_LONG = [
+    (r"CUOC VC", {**_VT_VHL_COMMON,
+                  "fees": [("CUOC VC TRONG", None), ("CUOC VC NGOAI", None), ("=CUOC VAN CHUYEN", None),
+                           ("SO TIEN PHU THU", None), ("BOI DUONG", None)],
+                  "vat": "THUE VAT", "vat_desc": "Thuế VAT 8%",
+                  "total": "TONG CUOC VC", "grand": "TONG CONG SO TIEN"}),
+    (r"NEO CONT", {**_VT_VHL_COMMON, "date": None,
+                   "fees": [("PHI NEO CONT", None)], "vat": "THUE VAT", "vat_desc": "Thuế VAT 8%",
+                   "total": "PHI NEO CONT", "grand": "TONG CONG SO TIEN"}),
+    (r"CHI HO", {**_VT_VHL_COMMON,
+                 "fees": [("PHI NANG", None), ("PHI HA", None), ("VSC", None)],
+                 "total": "=TONG CONG"}),
+]
+
+
+def detect_vinh_hung_long(text: str) -> bool:
+    return "VINH HUNG LONG" in _vt_norm(text)
+
+
+_vt_register("VINH_HUNG_LONG", "CÔNG TY TNHH VĨNH HƯNG LONG", detect_vinh_hung_long,
+             "CÔNG TY TNHH VĨNH HƯNG LONG", _VT_VINH_HUNG_LONG)
+
+
+# --- VN06 BÌNH TÂN (HỢP TÁC XÃ VẬN TẢI DỊCH VỤ DU LỊCH BÌNH TÂN，MST 0303140905) --
+# 三種檔：雜費 Miscellaneous Fee (IMP/EXP，每列一批，VAT 在合計列下方，整張一個)、
+# 出口運費 (NB/PHV)、進口派車表 (08-CFS/08-AIR，每列一批，逐列 VAT)。
+# 發票號碼 = 批號 (SỐ LÔ / Lot No / Dec No)；車牌照 VN05 慣例填貨櫃號碼與船名。
+_VT_BINH_TAN = [
+    (r"^(IMP|EXP)$", {"header": "PAY NO", "two_rows": False, "key": ["LOT NO", "DEC NO"],
+                      "fees": [("MISCELL", None), ("=OT.", None), ("=OTHER", None),
+                               ("=PRICE", "Miscellaneous Fee"), ("=2%", "2%")],
+                      "total": "=TOTAL", "vat_row": True, "date": "DEC DATE",
+                      "fields": {"order_no": "=INV"}, "cbm": "TOTAL CFS/AIR"}),
+    (r"^(NB|PHV)$", {"header": "SO LO", "key": ["=SO LO"],
+                     "fees": [("CUOC VC CHUA VAT", None), ("SO TIEN PHU THU", None)],
+                     "total": "TONG TIEN THANH TOAN", "vat_row": True, "date": "=NGAY",
+                     "cbm": "SO LUONG CBM",
+                     "fields": {"vessel": "SO XE", "container_no": "SO XE", "order_no": "SO INV"}}),
+    (r"CFS|AIR", {"header": "SO LO", "two_rows": False, "key": ["SO LO"],
+                  "fees": [("ST/1 LO CHUA VAT", "Cước vận chuyển"), ("PHU PHI XANG DAU", None)],
+                  "total": "TONG TIEN/1 LO", "vat": "VAT 8%", "vat_desc": "VAT 8%",
+                  "grand": ("=TONG CONG", "=TOTAL"), "date": "NGAY NHAN HANG", "ffill_date": True,
+                  "cbm": "CMB", "kg": "=KG",
+                  "fields": {"vessel": "SO XE", "container_no": "SO XE", "port_of_loading": "=CANG"}}),
+]
+
+
+def detect_binh_tan(text: str) -> bool:
+    # 不能只看 "BÌNH TÂN"：寶元的地址就在平新郡 (Quận Bình Tân)，別家帳單也會出現
+    norm = _vt_norm(text)
+    return ("0303140905" in norm or "HOP TAC XA VAN TAI DICH VU DU LICH" in norm
+            or ("PFQ-" in norm and "MISCELLANEOUS FEE" in norm)
+            or "DANH SACH XE VAN CHUYEN HANG" in norm)
+
+
+_vt_register("BINH_TAN", "HỢP TÁC XÃ VẬN TẢI DỊCH VỤ DU LỊCH BÌNH TÂN", detect_binh_tan,
+             "HỢP TÁC XÃ VẬN TẢI DỊCH VỤ DU LỊCH BÌNH TÂN", _VT_BINH_TAN)
+
+
+# --- VN12 NGUYÊN HƯỞNG (空運請款) ---------------------------------------------
+# 每項費用都有 RMB 與 VND 兩欄，只取 VND；發票號碼 = Waybill number。
+_VT_NGUYEN_HUONG = [
+    (r".", {"header": "WAYBILL", "key": ["WAYBILL"],
+            "fees": [("AIR FREIGHT VND", "Air freight"), ("CUSTOMS FEES (BILL) VND", "Customs fees"),
+                     ("BILL OF LADING FEE (BILL) VND", "Bill of lading fee"),
+                     ("ADDITIONAL FEE (BILL) VND", "Additional fee"),
+                     ("WAREHOUSING FEE (BILL) VND", "Warehousing fee"),
+                     ("PAD EXPENSE VND", "Pad expense"), ("D/O (BILL) VND", "D/O")],
+            "total": "TOTAL AMOUNT VND", "date": "PICKUP DATE", "kg": "WEIGHT",
+            "fields": {"bl_no": "WAYBILL", "shipper": "=SHIPPER"}}),
+]
+
+
+def detect_nguyen_huong(text: str) -> bool:
+    return "NGUYEN HUONG" in _vt_norm(text)
+
+
+_vt_register("NGUYEN_HUONG", "CÔNG TY TNHH NGUYÊN HƯỞNG", detect_nguyen_huong,
+             "CÔNG TY TNHH NGUYÊN HƯỞNG", _VT_NGUYEN_HUONG)
+
+
+# --- VN14 ORIENTAL LOGISTICS MULTIMODAL (Công Ty TNHH Logistics Vận Tải Đa Phương Thức) --
+# 三種表 (CN 進口、TRUCK、SEA 出口)。費用是 USD (少數 VND)，每列另有越南盾的
+# 未稅金額、VAT、含稅金額與發票號碼 SỐ HĐ。費用照抄 USD 金額、名稱加 "(USD)"
+# (同 MOL 慣例)，用每列的 USD 合計勾稽；VAT 是越南盾 (單獨一筆)。發票號碼 = 每列的
+# 發票號碼 SỐ HĐ (沒有才用 HAWB/Bill No)，HAWB 填 B/L NO.。
+_VT_OLM_FEES_CN = [(x, None) for x in (
+    "OCEAN FREIGHT", "OTHER CHARGES", "CFS FEE", "=CIC", "D/O FEE", "=HANDLING FEE", "CLEANING FEE",
+    "=THC", "=CMC", "=LSS", "=BAF", "AFR AMENDMENT", "=HANDLING")]
+_VT_ORIENTAL = [
+    (r"^CN", {"header": "BILL NO", "above": True, "key": ["SO HD", "BILL NO"], "fees": _VT_OLM_FEES_CN,
+              "total": "TOTAL (USD)", "vat": "=VAT", "vat_desc": "VAT", "date": "NGAY HD",
+              "boxes": {"20": "CY QTY 20'", "40": "CY QTY 40'"}, "cbm": "CFS CBM",
+              "fields": {"bl_no": "BILL NO", "order_no": "LOT NO", "port_of_loading": "ORIGIN PORT"}}),
+    (r"TRUCK", {"header": "H-B/L", "key": ["SO HD", "H-B/L", "M-B/L"],
+                "fees": [(x, None) for x in ("TRUCKING FEE", "BORDER GATE FEE", "CUSTOMS CLEARANCE FEE",
+                                             "TOLL FEE", "LOLO FEE", "FUEL SURCHARGE", "FCR TRUCKING")],
+                "total": "TOTAL USD", "vat": "=VAT", "vat_desc": "VAT", "date": "NGAY HD",
+                "boxes": {"20": "CY QUANTITY 20", "40": "CY QUANTITY 40"}, "cbm": "CFS CBM",
+                "fields": {"bl_no": "H-B/L", "mbl_no": "M-B/L", "order_no": "LOT NO",
+                           "port_of_loading": "ORIGIN PORT"}}),
+    (r"SEA", {"header": "H-B/L", "key": ["SO HD", "H-B/L", "M-B/L"],
+              "fees": [(x, None) for x in (
+                  "THC VND", "THC USD", "=EBS", "CFS VND", "CFS USD", "=TRUCKING", "=LOCAL CHARGE",
+                  "TCS CHARGE", "=AMS", "=BAF", "=EDI", "=SCANNING", "=RR", "=LSS", "OCEAN FREIGHT",
+                  "AIR FREIGHT", "HANDLING FEE VND", "HANDLING FEE USD", "FUMIGATION VND",
+                  "FUMIGATION USD", "SEAL FEE", "TELEX FEE", "BILL FEE")],
+              "total": "TOTAL USD", "vat": "=VAT", "vat_desc": "VAT", "date": "NGAY HD",
+              "boxes": {"20": "CY QUANTITY 20", "40": "CY QUANTITY 40"}, "cbm": "CFS CBM",
+              "fields": {"bl_no": "H-B/L", "mbl_no": "M-B/L", "order_no": "LOT NO",
+                         "port_of_loading": "NOTE PORT"}}),
+]
+
+
+def detect_oriental_multimodal(text: str) -> bool:
+    return "ORIENTAL LOGISTICS MULTIMODA" in _vt_norm(text)
+
+
+_vt_register("ORIENTAL_MULTIMODAL", "CÔNG TY TNHH LOGISTICS VẬN TẢI ĐA PHƯƠNG THỨC (ORIENTAL)",
+             detect_oriental_multimodal, "ORIENTAL LOGISTICS MULTIMODAL", _VT_ORIENTAL)
+
+
+# --- VN16 SONG TRIỀU (拖車行，Pou Li Tây Ninh) ---------------------------------
+# 四張運費對帳表 (散貨車、轉倉貨櫃、出口櫃、進口櫃)。運費 = 未調漲運費 + 油價調漲
+# 金額；另有裝卸、壓車、吊櫃上下、過磅等費用。發票號碼 = 批號 SỐ LÔ / SỐ INV。
+_VT_ST_COMMON = {"date": "=NGAY", "port": None, "cbm": "SO LUONG CBM",
+                 "boxes": {"20": "LOAI CONT 20'", "40": "LOAI CONT 40'", "45": "LOAI CONT 45'"},
+                 "total": "=TONG", "vat_row": True,
+                 "fields": {"vessel": "SO XE", "container_no": ("SO CONTAINER", "SO XE"),
+                            "port_of_loading": ("DIEM DI", "DIEM DI"), "port_of_discharge": "DIEM DEN"}}
+_VT_SONG_TRIEU = [
+    (r"XE TAI", {**_VT_ST_COMMON, "header": "SO XE", "key": ["SO INV"],
+                 "fees": [("PHI BOC", None), ("NEO XE", None), ("PHAT SINH", None),
+                          ("CUOC VAN CHUYEN CHUA TANG", None), ("SO TIEN % TANG", None)]}),
+    (r"CHUYEN KHO", {**_VT_ST_COMMON, "header": "SO CONTAINER", "key": ["SO INV", "SO CONTAINER"],
+                     "fees": [("TROUBLE", None), ("=NEO", None), ("CUOC VAN CHUYEN CHUA TANG", None),
+                              ("SO TIEN % TANG", None)]}),
+    (r"CONT (XUAT|NHAP)", {**_VT_ST_COMMON, "header": "SO CONTAINER", "key": ["=SO LO", "SO CONTAINER"],
+                           "fees": [("CUOC VC CHUA TANG", None), ("SO TIEN % TANG", None),
+                                    ("BD NANG", None), (("PHI KHAC PHI", "PHI KHAC SO TIEN"), None),
+                                    (("PHI NANG/HA NANG", "PHI NANG / HA NANG"), None),
+                                    (("PHI NANG/HA HA", "PHI NANG / HA HA"), None), ("PHI CAN CAN", None)]}),
+]
+
+
+def detect_song_trieu(text: str) -> bool:
+    norm = _vt_norm(text)
+    return "SONG TRIEU" in norm or "033 1003828 194" in norm
+
+
+_vt_register("SONG_TRIEU", "CÔNG TY TNHH SONG TRIỀU", detect_song_trieu,
+             "CÔNG TY TNHH SONG TRIỀU", _VT_SONG_TRIEU)
+
+
+# --- VN17 TIMES CARGO LOGISTIC (CÔNG TY TNHH DỊCH VỤ GIAO NHẬN HÀNG HÓA) ------
+# Statement of account (SEA - IMPORT)：每列一票，有自己的 Invoice No.，金額是越南盾
+# (已用 Rate Exchange 換算)；合計列 "TOTAL BALANCE"。發票號碼 = Invoice No.。
+_VT_TIMES_CARGO = [
+    (r".", {"header": "HBL", "key": ["=INVOICE NO.", "=HBL"],
+            "fees": [(x, None) for x in (
+                "OCEAN FREIGHT", "DESCRIPTION EXW", "THC FEE", "DO FEE", "HANDLING FEE", "CIC FEE",
+                "LSS FEE", "CFS FEE", "LOADING FEE", "DESCRIPTION EBS", "DRAYAGE")],
+            "total": "=TOTAL", "date": "=INVOICE DATE", "cbm": "=QUANTITY",
+            "fields": {"bl_no": "=HBL", "shipper": "=SHIPPER", "port_of_loading": "PLACE OF RECEIPT",
+                       "port_of_discharge": "PLACE OF DELIVERY", "vessel": "VESSEL",
+                       "arrive_date": "=ETA"}}),
+]
+
+
+def detect_times_cargo(text: str) -> bool:
+    return "TIMES CARGO LOGISTIC" in _vt_norm(text)
+
+
+_vt_register("TIMES_CARGO", "CÔNG TY TNHH DỊCH VỤ GIAO NHẬN HÀNG HÓA (TIMES CARGO)",
+             detect_times_cargo, "TIMES CARGO LOGISTIC CO., LTD", _VT_TIMES_CARGO)
+
+
+# --- VN18 DỊCH VỤ VẬN CHUYỂN SÀI GÒN (空運) -------------------------------------
+# 每列一票：空運費 A/F (USD 與換算後 VND)、Local Charge、Break Bulk (都是 VND)，
+# 各有自己的紅色發票號碼 (Red invoice no.)，所以發票號碼用 HAWB。日期欄是
+# "26/08/2026 - 146 KGS" 這種文字。沒有逐列合計，不做逐張勾稽。
+_VT_SAIGON = [
+    (r".", {"header": "HAWB", "key": ["HAWB NO"],
+            "fees": [("AMOUNT (VND)", "Air freight (A/F)"), ("LOCAL CHARGE (VND)", "Local Charge"),
+                     ("BREAK BULK", "Break Bulk")],
+            "date": "INV DATE", "kg": "CHARGEABLE WEIGHT",
+            "fields": {"bl_no": "HAWB NO", "mbl_no": "MAWB NO"}}),
+]
+
+
+def detect_saigon_transport(text: str) -> bool:
+    return "DICH VU VAN CHUYEN SAI GON" in _vt_norm(text)
+
+
+_vt_register("SAIGON_TRANSPORT", "CÔNG TY TNHH DỊCH VỤ VẬN CHUYỂN SÀI GÒN", detect_saigon_transport,
+             "CÔNG TY TNHH DỊCH VỤ VẬN CHUYỂN SÀI GÒN", _VT_SAIGON)
+
+
+# --- VN19 IMX EXPRESS (CÔNG TY TNHH DỊCH VỤ CHUYỂN PHÁT NHANH IMX，MST 0315868311) --
+# 兩張對帳表：D/O FEE (USD 與 VND 兩欄，取 VND) 與 AIR FREIGHT (A/F、FUEL、P/U、HD 都是
+# USD，名稱加 "(USD)"，用 TOTAL USD 勾稽)。發票號碼 = 對帳表號 (Mã bảng kê，每張表附一張
+# 發票)，AWB.No 填 B/L NO.。
+_VT_IMX_COMMON = {"key": ["AWB.NO"], "date": "=DATE", "kg": "WEIGHT",
+                  "doc_key": r"M[ãa]\s*b[ảa]ng\s*k[êe]\s*:\s*([A-Z0-9]+)",
+                  "fields": {"bl_no": "AWB.NO", "shipper": "=SHIPPER", "vessel": "FLIGHT"}}
+_VT_IMX = [
+    (r"D\.?O FEE", {**_VT_IMX_COMMON, "header": "AWB.NO", "fees": [("D/O FEE VND", "D/O FEE")]}),
+    (r"AIR FREIGHT", {**_VT_IMX_COMMON, "header": "AWB.NO",
+                      "fees": [("A/F CHARGE", None), ("FUEL", None), ("=P/U USD", None), ("=HD USD", None)],
+                      "total": "=TOTAL USD"}),
+]
+
+
+def detect_imx(text: str) -> bool:
+    norm = _vt_norm(text)
+    return "IMX EXPRESS" in norm or "0315868311" in norm
+
+
+_vt_register("IMX", "CÔNG TY TNHH DỊCH VỤ CHUYỂN PHÁT NHANH IMX", detect_imx,
+             "CÔNG TY TNHH DỊCH VỤ CHUYỂN PHÁT NHANH IMX", _VT_IMX)
+
+
+# --- VN15 EXPEDITORS 的 Excel 對帳表 (AIR IMP) -----------------------------------
+# 「單價」(11~17 欄) 與「金額」(20~26 欄) 兩組費用欄，只取金額；另有運費 CƯỚC、
+# 代收代付 THU HỘ ĐẠI LÝ NƯỚC NGOÀI、VAT、合計。發票號碼 = 每列的 TAX INVOICE NUMBER。
+# PDF 規則在上面 (parse_expeditors)；這裡重新註冊一次，把 Excel 規則加上去。
+_LH = "LAM HANG - (THUE 8%)"
+_VT_EXPEDITORS = [
+    (r".", {"header": "EI REF", "key": ["TAX INVOICE NUMBER", "VAN DON PHU"],
+            "fees": [(f"{_LH} PHI LENH", None), (f"{_LH} PHI XEP DO", None), (f"{_LH} PHI PHU TROI", None),
+                     (f"{_LH} PHI VE SINH", None), (f"{_LH} PHI PCS", None), (f"{_LH} PHI E-MANIFEST", None),
+                     (f"{_LH} PHI HANDLING", None), ("=CUOC", "CƯỚC"),
+                     ("=THU HO DAI LY NUOC NGOAI", "THU HỘ ĐẠI LÝ NƯỚC NGOÀI")],
+            "vat": "=VAT", "vat_desc": "VAT 8%", "grand": "TONG CONG (VND)", "date": "TAX INVOICE DATE",
+            "boxes": {"20": "KHOI LUONG 20'", "40": "KHOI LUONG 40'"}, "kg": "CBM/C.W",
+            "fields": {"mbl_no": "VAN DON CHINH", "bl_no": "VAN DON PHU", "order_no": "EI REF",
+                       "arrive_date": "NGAY DEN", "port_of_loading": "NOI DI", "port_of_discharge": "NOI DEN"}}),
+]
+_exp_sheet_parse, _exp_sheet_totals = _vt_make("CÔNG TY TNHH EXPEDITORS VIỆT NAM", _VT_EXPEDITORS)
+
+
+def detect_expeditors(text: str) -> bool:      # noqa: F811  (加上 Excel 對帳表)
+    upper = text.upper()
+    return ("EXPEDITORS VIETNAM COMPANY LIMITED" in upper and "TAX No:" in text) or (
+        "EXPEDITORS VIET" in upper and "EI REF" in upper)
+
+
+register_supplier(
+    "EXPEDITORS", "EXPEDITORS VIETNAM COMPANY LIMITED", detect_expeditors, parse_expeditors,
+    multi_page=True, extract_total=_exp_extract_total, extract_grand_total=_exp_extract_grand_total,
+    sheet_parse=_exp_sheet_parse, sheet_totals=_exp_sheet_totals,
+)
+
+
+# ===========================================================================
+# 越南 PDF 帳單 (2026-10-27 新增)：VN07 MAERSK、VN10 KN、VN04 DHL EXPRESS
+# ===========================================================================
+# 越南的正式發票是電子增值稅發票 (HÓA ĐƠN GIÁ TRỊ GIA TĂNG / VAT INVOICE)，每家
+# 版面不同。INVOICE NO = 發票號碼 (Số / Invoice No.，不含發票符號 1C26TSG，待使用者
+# 確認)。數字是英式千分位 (12,556,673)。
+
+
+def _vn_pdf_num(text: Optional[str]):
+    """'12,556,673' / '3,587.5' -> 數字。"""
+    if not text:
+        return None
+    try:
+        value = float(text.replace(",", ""))
+    except ValueError:
+        return None
+    return int(value) if value.is_integer() else value
+
+
+def _vn_pdf_date(text: Optional[str]) -> Optional[str]:
+    m = re.match(r"(\d{1,2})/(\d{1,2})/(\d{4})", text or "")
+    return _format_date_en(*m.groups()) if m else None
+
+
+# --- VN07 MAERSK LOGISTICS & SERVICES VIỆT NAM ---------------------------------
+# PDF：電子發票，費用行 "Phí xếp dỡ hàng hóa FCR001555329 VND M3 29.682 423,040 8% 12,556,673"
+# (名稱、FCR、幣別、單位、數量、單價、稅率、未稅金額)，稅額只有總數 -> 單獨一筆 VAT。
+# Excel：Late come charge 對帳表，每列有自己的發票號碼 (INVOICE NO.)。
+_MAERSK_VN_ITEM_RE = re.compile(
+    r"^(?P<desc>.+?)\s+(?P<ref>FCR\d+|[A-Z]{3,}\d{5,})\s+(?P<cur>[A-Z]{3})\s+(?P<unit>\S+)\s+"
+    r"(?P<qty>[\d,.]+)\s+(?P<price>[\d,.]+)\s+(?P<rate>\d+%|KCT)\s+(?P<amount>[\d,.]+)$", re.MULTILINE)
+
+
+def detect_maersk_vn(text: str) -> bool:
+    upper = text.upper()
+    return "MAERSK LOGISTICS & SERVICES VI" in upper or (
+        "MAERSK" in upper and "LATE COME CHARGE" in upper)
+
+
+def parse_maersk_vn(text: str) -> Dict:
+    h: Dict[str, Optional[str]] = {}
+    series = _search(r"K[ýy] hi[ệe]u[^:]*:\s*(\S+)", text)
+    number = _search(r"S[ốo] \(Invoice No\.\):\s*(\d+)", text)
+    h["invoice_no"] = number   # 只用號碼 (發票符號 series 待使用者確認要不要加)
+    h["invoice_date"] = _vn_pdf_date(_search(r"\(Invoice Date\):\s*(\S+)", text))
+    h["supplier"] = "CÔNG TY TNHH MAERSK LOGISTICS & SERVICES VIỆT NAM"
+    h["consignee"] = _search(r"S[ốo] \(Invoice No\.\):[^\n]*\n(.+)", text)
+    h["port_of_discharge"] = _search(r"\(POD\):\s*(\S+)", text)
+    h["port_of_loading"] = _search(r"\(POL\):\s*(\S+)", text)
+    h["order_no"] = _search(r"\(Ref No\):\s*(\S+)", text)
+    items, cbm = [], None
+    for m in _MAERSK_VN_ITEM_RE.finditer(text):
+        h.setdefault("bl_no", m.group("ref"))
+        if m.group("unit").upper() == "M3":
+            cbm = m.group("qty")
+        items.append({"description": m.group("desc").strip(), "amount": _vn_pdf_num(m.group("amount")),
+                      "vat": None})
+    h["volume"] = _fmt_volume(cbm=cbm)
+    vat = _search(r"\(Total VAT amount\):\s*([\d,.]+)", text)
+    rate = _search(r"\s(\d+)%\s+[\d,.]+$", text)
+    if vat:
+        items.append({"description": f"VAT {rate}%" if rate else "VAT", "amount": None,
+                      "vat": _vn_pdf_num(vat)})
+    return {"header": h, "items": items or [{"description": None, "amount": None, "vat": None}]}
+
+
+def _maersk_vn_total(text: str):
+    return _vn_pdf_num(_search(r"\(Subtotal\):\s*([\d,.]+)", text))
+
+
+def _maersk_vn_grand(text: str):
+    return _vn_pdf_num(_search(r"\(Total amount\):\s*([\d,.]+)", text))
+
+
+_MAERSK_VN_SHEET = [
+    (r".", {"header": "BILL NO", "key": ["=INVOICE NO.", "BILL NO"],
+            "fees": [("AMOUNT (NOT VAT)", "@REMARK")], "vat": "=VAT", "vat_desc": "VAT 8%",
+            "total": "AMOUNT (NOT VAT)", "grand": "TOTAL (VND)", "cbm": "=CBM", "two_rows": False,
+            "fields": {"bl_no": "BILL NO", "order_no": "SO BOOKING", "onboard_date": "NGAY XUAT"}}),
+]
+_maersk_vn_sheet_parse, _maersk_vn_sheet_totals = _vt_make(
+    "CÔNG TY TNHH MAERSK LOGISTICS & SERVICES VIỆT NAM", _MAERSK_VN_SHEET)
+
+register_supplier(
+    "MAERSK_VN", "CÔNG TY TNHH MAERSK LOGISTICS & SERVICES VIỆT NAM", detect_maersk_vn, parse_maersk_vn,
+    extract_total=_maersk_vn_total, extract_grand_total=_maersk_vn_grand,
+    sheet_parse=_maersk_vn_sheet_parse, sheet_totals=_maersk_vn_sheet_totals,
+)
+
+
+# --- VN10 KUEHNE + NAGEL 越南 -------------------------------------------------
+# 兩種 PDF：
+#  (a) 電子發票：費用行 "1 Phí khai manifest tại nơi đi 1 SDG 650,000 650,000 8% 52,000 702,000"
+#      (序號、名稱、數量、單位、單價、未稅、稅率、稅額、含稅)，每筆自帶稅額。
+#  (b) 附件清單 (DANH SÁCH ĐÍNH KÈM HOÁ ĐƠN)：每列一票 (Số File)，10 個費用欄 + 合計 + VAT。
+#      表頭在 PDF 裡兩行交錯，費用名稱依欄位順序整理在 _KN_VN_LIST_FEES (待使用者確認)。
+_KN_VN_ITEM_RE = re.compile(
+    r"^\d+\s+(?P<desc>.+?)\s+(?P<qty>[\d,.]+)\s+(?P<unit>[A-Z]{2,4})\s+(?P<price>[\d,.]+)\s+"
+    r"(?P<amount>[\d,.]+)\s+(?P<rate>\d+%|KCT)\s+(?P<tax>[\d,.]+)\s+(?P<total>[\d,.]+)$", re.MULTILINE)
+_KN_VN_LIST_FEES = (
+    "Phí biên nhận hàng đường biển - 215", "CY monitoring - 376", "Phí xếp dỡ tại cảng đi - 400",
+    "Phí làm hàng lb - 428", "Phí e-VGM - 347", "Phí Cơ sở hạ tầng cảng xuất",
+    "Phí làm hàng ngoài giờ - 411", "Phí sắp xếp hàng xuất - 417", "Phí lưu kho hàng xuất - 410",
+    "Phí DEM/DET - 415")
+_KN_VN_LIST_ROW_RE = re.compile(
+    r"^(?P<file>\d{8,})\s+(?P<dn>\S+)\s+(?P<so>\d+)\s+(?P<cbm>[\d.]+)\s+(?P<kg>[\d.]+?)"
+    r"(?P<dest>[A-Z][A-Z ]+?)\s+(?P<money>(?:[\d,]+ VND\s*){12})$", re.MULTILINE)
+
+
+def detect_kn_vn(text: str) -> bool:
+    upper = text.upper()
+    return "KUEHNE + NAGEL" in upper and ("HÓA ĐƠN" in upper or "HOÁ ĐƠN" in upper or "VIỆT NAM" in upper)
+
+
+def _kn_vn_list_rows(text: str):
+    rows = []
+    for m in _KN_VN_LIST_ROW_RE.finditer(text):
+        money = [_vn_pdf_num(v) for v in re.findall(r"([\d,]+) VND", m.group("money"))]
+        rows.append({"file": m.group("file"), "dn": m.group("dn"), "so": m.group("so"),
+                     "cbm": m.group("cbm"), "kg": m.group("kg"), "dest": m.group("dest").strip(),
+                     "fees": money[:10], "total": money[10], "vat": money[11]})
+    return rows
+
+
+def parse_kn_vn(text: str) -> Dict:
+    h: Dict[str, Optional[str]] = {"supplier": "CÔNG TY TNHH KUEHNE + NAGEL"}
+    list_rows = _kn_vn_list_rows(text)
+    if list_rows:
+        h["invoice_date"] = _vn_pdf_date(_search(r"ĐƠN NGÀY\s*(\d{1,2}/\d{1,2}/\d{4})", text.upper()))
+        h["consignee"] = "CÔNG TY TNHH POUYUEN VIỆT NAM" if "POUYUEN" in text.upper() else None
+        items = []
+        for r in list_rows:
+            common = {"invoice_no": r["file"], "order_no": r["so"], "port_of_discharge": r["dest"],
+                      "volume": _fmt_volume(cbm=r["cbm"], kg=r["kg"])}
+            items += [{"description": name, "amount": amt, "vat": None, **common}
+                      for name, amt in zip(_KN_VN_LIST_FEES, r["fees"]) if amt]
+            items.append({"description": "VAT 8%", "amount": None, "vat": r["vat"], **common})
+        return {"header": h, "items": items or [{"description": None, "amount": None, "vat": None}]}
+    series = _search(r"\(Series\):\s*(\S+)", text)
+    number = _search(r"\(Invoice No\.\):\s*(\S+)", text)
+    h["invoice_no"] = number   # 只用號碼 (發票符號 series 待使用者確認要不要加)
+    h["invoice_date"] = _vn_pdf_date(_search(r"\(Invoice date\):\s*(\S+)", text))
+    h["consignee"] = _search(r"\(Customer.s name\):\s*(.+)", text)
+    h["onboard_date"] = _vn_pdf_date(_search(r"\(Departure date\):\s*(\S+)", text))
+    h["arrive_date"] = _vn_pdf_date(_search(r"\(Arrival date\):\s*(\S+)", text))
+    h["order_no"] = _search(r"\(File number\):\s*(\S+)", text)
+    m = re.search(r"\(AWB/SWB\):\s*(\S+)[^\n]*\n(\d+)\s*$", text, re.MULTILINE)
+    h["bl_no"] = (m.group(1) + m.group(2)) if m and m.group(1).endswith("-") else _search(
+        r"\(AWB/SWB\):\s*(\S+)", text)
+    items, cw = [], None
+    for m in _KN_VN_ITEM_RE.finditer(text):
+        if m.group("unit") == "CW":
+            cw = m.group("qty").replace(",", "")
+        items.append({"description": m.group("desc").strip(), "amount": _vn_pdf_num(m.group("amount")),
+                      "vat": _vn_pdf_num(m.group("tax"))})
+    h["volume"] = _fmt_volume(kg=cw)
+    return {"header": h, "items": items or [{"description": None, "amount": None, "vat": None}]}
+
+
+def _kn_vn_totals(text: str):
+    """(未稅, 含稅)：電子發票的 "Tổng cộng tiền thanh toán" 下一行；附件清單每票一組。"""
+    rows = _kn_vn_list_rows(text)
+    if rows:
+        return ({r["file"]: r["total"] for r in rows}, {r["file"]: r["total"] + r["vat"] for r in rows})
+    m = re.search(r"Tổng cộng tiền thanh toán\s*\n\s*([\d,.]+)\s+([\d,.]+)\s+([\d,.]+)", text)
+    return (_vn_pdf_num(m.group(1)), _vn_pdf_num(m.group(3))) if m else (None, None)
+
+
+register_supplier(
+    "KN_VN", "CÔNG TY TNHH KUEHNE + NAGEL (VIỆT NAM)", detect_kn_vn, parse_kn_vn,
+    extract_total=lambda t: _kn_vn_totals(t)[0], extract_grand_total=lambda t: _kn_vn_totals(t)[1],
+)
+
+
+# --- VN04 DHL - VNPT EXPRESS (CÔNG TY TNHH CHUYỂN PHÁT NHANH DHL-VNPT) ---------
+# 進口運費明細 (IB TARIFF)：一張發票 (Invoice no. SGNIR…) 好幾頁、好幾十票快遞。
+# 每票第一行 "26/08/2026 PUS 1973098271 SGN 3 6.00 1,365,383 1,365,383" (日期、起運地、
+# HAWB、目的地、件數、重量、運費、淨額)，接著附加費 (FUEL SURCHARGE、GO GREEN…)，
+# 再來 "PROD CODE EXPRESS WORLDWIDE nondoc"、"Sender: … Receiver: …"。
+# VAT 只有整張一個；稽核：費用加總 = Sub-total，加 VAT = Total VND。
+_DHL_VN_MAIN_RE = re.compile(
+    r"^(?P<date>\d{2}/\d{2}/\d{4})\s+(?P<org>[A-Z]{3})\s+(?P<hawb>\d{8,})\s+(?P<dest>[A-Z]{3})\s+"
+    r"(?P<pcs>\d+)\s+(?P<kg>[\d.]+)\s+(?P<regular>[\d,]+)(?:\s+[\d,]+)*\s+(?P<net>[\d,]+)$")
+# 附加費名稱有大小寫混合 ("Direct Signature 150,000 150,000")
+_DHL_VN_SUR_RE = re.compile(r"^(?P<desc>[A-Z][A-Za-z \-/]+?)\s+(?P<regular>[\d,]+)(?:\s+[\d,]+)*\s+(?P<net>[\d,]+)$")
+
+
+def detect_dhl_express_vn(text: str) -> bool:
+    return "DHL - VNPT EXPRESS" in text.upper()
+
+
+def parse_dhl_express_vn(text: str) -> Dict:
+    h: Dict[str, Optional[str]] = {
+        "supplier": "CÔNG TY TNHH CHUYỂN PHÁT NHANH DHL - VNPT",
+        "invoice_no": _search(r"Invoice no\.\s*(\S+)", text),
+        "invoice_date": _vn_pdf_date(_search(r"^Date\s+(\S+)", text)),
+        "consignee": _search(r"^(C[OÔ]NG TY .+?)\s+DHL contact", text)}
+    items, current, start = [], None, False
+    for line in text.splitlines():
+        line = line.strip()
+        if line.startswith("DATE ORG HAWB"):
+            start = True
+            continue
+        if not start or line.startswith(("Sub-total", "TOTAL", "VAT ")):
+            if line.startswith("Sub-total"):
+                start = False
+            continue
+        m = _DHL_VN_MAIN_RE.match(line)
+        if m:
+            current = {"bl_no": m.group("hawb"), "onboard_date": _vn_pdf_date(m.group("date")),
+                       "port_of_loading": m.group("org"), "port_of_discharge": m.group("dest"),
+                       "volume": _fmt_volume(kg=m.group("kg"))}
+            items.append({"description": "Freight charge", "amount": _vn_pdf_num(m.group("net")),
+                          "vat": None, **current})
+            continue
+        if current is None:
+            continue
+        if line.startswith("PROD CODE"):
+            product = line[len("PROD CODE"):].strip()
+            for it in items:
+                if it.get("bl_no") == current["bl_no"] and it["description"] == "Freight charge":
+                    it["description"] = product
+            continue
+        m = re.match(r"Sender:\s*(.+?)\s+Receiver:", line)
+        if m:
+            for it in items:
+                if it.get("bl_no") == current["bl_no"]:
+                    it["shipper"] = m.group(1).strip()
+            continue
+        m = _DHL_VN_SUR_RE.match(line)
+        if m and _vn_pdf_num(m.group("net")):
+            items.append({"description": m.group("desc").strip(), "amount": _vn_pdf_num(m.group("net")),
+                          "vat": None, **current})
+    vat = re.search(r"^VAT\s+([\d,]+)\s+([\d,]+)$", text, re.MULTILINE)
+    if vat:
+        items.append({"description": "VAT", "amount": None, "vat": _vn_pdf_num(vat.group(2))})
+    return {"header": h, "items": items or [{"description": None, "amount": None, "vat": None}]}
+
+
+def _dhl_express_vn_total(text: str):
+    m = re.search(r"^Sub-total:.*?([\d,]+)\s+[\d,]+\s+([\d,]+)$", text, re.MULTILINE)
+    return _vn_pdf_num(m.group(2)) if m else None
+
+
+def _dhl_express_vn_grand(text: str):
+    return _vn_pdf_num(_search(r"^Total VND\s+([\d,]+)", text))
+
+
+register_supplier(
+    "DHL_EXPRESS_VN", "CÔNG TY TNHH CHUYỂN PHÁT NHANH DHL - VNPT", detect_dhl_express_vn,
+    parse_dhl_express_vn, extract_total=_dhl_express_vn_total, extract_grand_total=_dhl_express_vn_grand,
+)
+
+
+# --- VN11 APL LOGISTICS VIỆT NAM -------------------------------------------------
+# PDF：一頁一張電子發票 (multi_page)，越南式數字 (13.025.090、數量 15,15)。
+#   "Chứng từ số: 149767, SINAR SANUR 149S - HO CHI MINH CITY, VIETNAM - SANTOS,SP, BRAZIL"
+#   = 單號、船名航次 - 啟運港 - 目的港 (卡車是 "BINH DUONG - DONG NAI-50H13141")。
+#   費用行 "1 Phụ phí xăng dầu CBM 15,15 26.594 402.899 8% 32.232 435.131" 每筆自帶稅額；
+#   整櫃費用 "Phí điều hành bến bãi công-tơ-nơ 40DC CTR 1" 用來算櫃量。
+# Excel：延滯費 (NEO CONT/NEO KHO) 對帳表，每列一個貨櫃，發票號碼 = 訂艙號 Booking No.。
+_APL_VN_ITEM_RE = re.compile(
+    r"^\d+\s+(?P<desc>.+?)\s+(?P<unit>[A-Z]{2,4})\s+(?P<qty>[\d.,]+)\s+(?P<price>[\d.]+)\s+"
+    r"(?P<amount>[\d.]+)\s+(?P<rate>\d+%|KCT)\s+(?P<tax>[\d.]+)\s+(?P<total>[\d.]+)$", re.MULTILINE)
+
+
+def detect_apl_vn(text: str) -> bool:
+    upper = text.upper()
+    return "APL LOGISTICS VIỆT NAM" in upper or "APL LOGISTICS V" in upper and "POUHUNG" in upper
+
+
+def parse_apl_vn(text: str) -> Dict:
+    h: Dict[str, Optional[str]] = {"supplier": "CÔNG TY TNHH APL LOGISTICS VIỆT NAM"}
+    series = _search(r"\(Serial\):\s*(\S+)", text)
+    number = _search(r"S[ốo] \(No\.\):\s*(\d+)", text)
+    h["invoice_no"] = number   # 只用號碼 (發票符號 series 待使用者確認要不要加)
+    m = re.search(r"Ngày \(date\)\s*(\d{1,2})\s*tháng \(month\)\s*(\d{1,2})\s*năm \(year\)\s*(\d{4})", text)
+    h["invoice_date"] = _format_date_en(*m.groups()) if m else None
+    h["consignee"] = _search(r"\(Company name\):\s*(.+)", text)
+    h["order_no"] = _search(r"Chứng từ số:\s*(\d+)", text)
+    # 第二個 "Chứng từ số: N, …" 到第一筆費用之間是船名 - 啟運港 - 目的港
+    m = re.search(r"Chứng từ số:\s*\d+,\s*(.*?)\n\s*1\s", text, re.DOTALL)
+    route = re.sub(r"\s+", " ", m.group(1)).strip() if m else ""
+    parts = [p.strip() for p in route.split(" - ")]
+    if len(parts) == 3:
+        h["vessel"], h["port_of_loading"], h["port_of_discharge"] = parts
+    items, cbm, boxes = [], None, []
+    for im in _APL_VN_ITEM_RE.finditer(text):
+        desc = im.group("desc").strip()
+        qty = im.group("qty").replace(".", "").replace(",", ".")
+        if im.group("unit") == "CBM":
+            cbm = qty
+        box = re.search(r"công-tơ-nơ\s+(\d{2}\w*)$", desc)
+        if box and im.group("unit") == "CTR":
+            boxes.append((qty, box.group(1)))
+        items.append({"description": desc, "amount": _dsv_vn_dot_amount(im.group("amount")),
+                      "vat": _dsv_vn_dot_amount(im.group("tax"))})
+    h["volume"] = _fmt_volume(containers=boxes, cbm=cbm)
+    return {"header": h, "items": items or [{"description": None, "amount": None, "vat": None}]}
+
+
+def _apl_vn_totals(text: str):
+    m = re.search(r"Tổng cộng \(Total\):\s*([\d.]+)\s+([\d.]+)\s+([\d.]+)", text)
+    return (_dsv_vn_dot_amount(m.group(1)), _dsv_vn_dot_amount(m.group(3))) if m else (None, None)
+
+
+def apl_vn_invoice_page(page: str) -> bool:
+    return "HÓA ĐƠN GIÁ TRỊ GIA TĂNG" in page.upper() and "APL" in page.upper()
+
+
+_APL_VN_SHEET = [
+    (r".", {"header": "BOOKING NO", "key": ["BOOKING NO"],
+            "fees": [("CHASSIS CONTSEAL", None), ("DROP OFF", None), ("CHARGE DET", "DET"),
+                     ("CUSTOMS / OTHERS", None)],
+            "total": "TOTAL ( VND )", "doc_key": r"Invoice No\.:\s*(\d+)", "doc_date": "INVOICE DATE",
+            "vat_total": "TOTAL VAT AMOUNT", "vat_desc": "VAT 8%",
+            "fields": {"container_no": "CONTAINER NUMBER", "order_no": "=INV#",
+                       "onboard_date": "PICK-UP MT DATE"}}),
+]
+_apl_vn_sheet_parse, _apl_vn_sheet_totals = _vt_make("CÔNG TY TNHH APL LOGISTICS VIỆT NAM", _APL_VN_SHEET)
+
+register_supplier(
+    "APL_VN", "CÔNG TY TNHH APL LOGISTICS VIỆT NAM", detect_apl_vn, parse_apl_vn, multi_page=True,
+    extract_total=lambda t: _apl_vn_totals(t)[0], extract_grand_total=lambda t: _apl_vn_totals(t)[1],
+    sheet_parse=_apl_vn_sheet_parse, sheet_totals=_apl_vn_sheet_totals,
+)
+
+
 SUPPLIER_NUMBERS = {
     # 供應商 key: (編號, 廠商代號, 進度管控表上的公司名稱)
     "YJE_TATA": ("ID01", "100019748", "PT. TATA HARMONI SARANATAMA"),
@@ -6715,6 +7640,19 @@ SUPPLIER_NUMBERS = {
     "EVERGREEN_LOGISTICS": ("ID38", "100019246", "PT. EVERGREEN LOGISTICS INDONESIA"),
     "RONG_A_CHAU": ("VN03", "100008978", "CÔNG TY TNHH GIAO NHẬN THƯƠNG MẠI RỒNG Á CHÂU"),
     "CONG_THANH": ("VN05", "100008048", "CTY TNHHDV GN VT VA TM CONG THANH"),
+    "TRANS_WAGON": ("VN01", "100009281", "CÔNG TY TNHH LIÊN VẬN QUỐC TẾ"),
+    "DHL_EXPRESS_VN": ("VN04", "100008681", "CÔNG TY TNHH CHUYỂN PHÁT NHANH DHL-VNPT"),
+    "MAERSK_VN": ("VN07", "100008773", "CÔNG TY TNHH MAERSK LOGISTICS & SERVICES VIỆT NAM"),
+    "KN_VN": ("VN10", "100009241", "CÔNG TY TNHH KUEHNE+NAGEL"),
+    "APL_VN": ("VN11", "100008592", "CÔNG TY TNHH APL LOGISTICS VIỆT NAM"),
+    "VINH_HUNG_LONG": ("VN02", "100008024", "CÔNG TY TNHH VĨNH HƯNG LONG"),
+    "BINH_TAN": ("VN06", "100012345", "HỢP TÁC XÃ VẬN TẢI DỊCH VỤ DU LỊCH BÌNH TÂN"),
+    "NGUYEN_HUONG": ("VN12", "100009955", "CÔNG TY TNHH NGUYÊN HƯỞNG"),
+    "ORIENTAL_MULTIMODAL": ("VN14", "100024393", "Công Ty TNHH Logistics Vận Tải Đa Phương Thức"),
+    "SONG_TRIEU": ("VN16", "100010180", "CÔNG TY TNHH SONG TRIỀU"),
+    "TIMES_CARGO": ("VN17", "100008880", "CÔNG TY TNHH DỊCH VỤ GIAO NHẬN HÀNG HÓA"),
+    "SAIGON_TRANSPORT": ("VN18", "100007723", "CÔNG TY TNHH DỊCH VỤ VẬN CHUYỂN SÀI GÒN"),
+    "IMX": ("VN19", "100025119", "CÔNG TY TNHH DỊCH VỤ CHUYỂN PHÁT NHANH IMX"),
     # 越南廠商代號：越南進度管控\By Vietnam supplier (Top 20) 的資料夾名稱
     "DSV_VN": ("VN08", "100007866", "CÔNG TY TNHH DSV AIR & SEA"),
     "MOL": ("VN09", "100009335", "CÔNG TY TNHH MOL LOGISTICS VIỆT NAM"),
