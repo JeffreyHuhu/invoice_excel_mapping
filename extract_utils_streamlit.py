@@ -652,7 +652,10 @@ _EN_PHRASES = (
     # 越南 DSV 費用名稱 (使用者 2026-10 正確答案)
     ("PHI LAO VU - HANG XUAT", "Export Service Fee"),
     ("PHI QUAN LY HANG XUAT", "Export Cargo Management Fee"),
-    ("PHI KHAI BAO AMS", "AMS Filing Fee"), ("PHI VAN DON", "House Bill / AWB Fee"),
+    ("PHI KHAI BAO AMS", "AMS Filing Fee"), ("PHI VAN DON", "Bill of Lading Fee"),
+    # 越南 MOL 費用名稱
+    ("PHI NIEM CHI", "Seal Fee"), ("PHI KHAI AFR", "AFR Filing Fee"),
+    ("PHI XEP DO", "Terminal Handling / Loading-Unloading Fee"), ("PHI LAM HANG", "Handling Fee"),
     ("PHI SOI HANG", "X-ray Screening Fee"), ("PHI PHAT HANH VAN DON", "B/L Issuance Fee"),
     ("PHI VGM", "VGM Fee"), ("PHI CFS", "CFS Fee"), ("PHI THC", "Terminal Handling Charge"),
     ("THUE 8% VAT", "VAT 8%"), ("THUE 10% VAT", "VAT 10%"),
@@ -815,8 +818,14 @@ def register_supplier(key: str, label: str,
                        sheet_totals: Optional[Callable[["SheetBook"], List[Dict]]] = None,
                        extract_vat_total: Optional[Callable[[str], Optional[float]]] = None,
                        invoice_page: Optional[Callable[[str], bool]] = None,
-                       ocr_psm: Optional[int] = None) -> None:
+                       ocr_psm: Optional[int] = None,
+                       page_text: Optional[Callable[[str], List[str]]] = None) -> None:
     """註冊一家供應商。
+
+    page_text (可選)：這家供應商自己的逐頁文字擷取 (傳入 PDF 路徑，回傳每頁
+    文字)，取代預設的 extract_pages_from_pdf()。用在需要看字元大小/位置才分得
+    開的版面 (例如越南 CargoWise 帳單的 DRAFT 浮水印、疊在費用名稱上的代碼)。
+    回傳空字串的頁 (掃描頁) 會退回預設擷取 (含 OCR)。
 
     ocr_psm (可選，非 multi_page 供應商用)：這家的掃描帳單頁改用指定的
     tesseract 版面分析模式重新 OCR (例如 GALUH 用 6，預設模式會漏掉金額欄)。
@@ -891,7 +900,7 @@ def register_supplier(key: str, label: str,
         "audit_exclude": audit_exclude, "force_ocr": force_ocr,
         "sheet_parse": sheet_parse, "sheet_totals": sheet_totals,
         "extract_vat_total": extract_vat_total, "invoice_page": invoice_page,
-        "ocr_psm": ocr_psm,
+        "ocr_psm": ocr_psm, "page_text": page_text,
         # Excel 供應商一份檔案可能有好幾張對帳單，比對時跟 multi_page 一樣用
         # invoice_no 分組
         "multi_page": multi_page or sheet_parse is not None,
@@ -1089,7 +1098,7 @@ def _parse_multi_page_pdf(pdf_path: str, key: str, **pdfplumber_kwargs) -> List[
     if entry.get("force_ocr"):
         pages = extract_pages_from_pdf_force_ocr(pdf_path)
     else:
-        pages = extract_pages_from_pdf(pdf_path, **pdfplumber_kwargs)
+        pages = supplier_pages(pdf_path, key, **pdfplumber_kwargs)
     rows: List[Dict] = []
     for page_text in pages:
         try:
@@ -1104,12 +1113,27 @@ def _parse_multi_page_pdf(pdf_path: str, key: str, **pdfplumber_kwargs) -> List[
     return rows
 
 
+def supplier_pages(pdf_path: str, key: Optional[str], **pdfplumber_kwargs) -> List[str]:
+    """逐頁文字：供應商有登記 page_text 時用它 (空白頁退回預設擷取)，否則用
+    extract_pages_from_pdf()。"""
+    pages = extract_pages_from_pdf(pdf_path, **pdfplumber_kwargs)
+    entry = SUPPLIER_REGISTRY.get(key) if key else None
+    if entry and entry.get("page_text") and not is_spreadsheet(pdf_path):
+        try:
+            custom = entry["page_text"](pdf_path)
+        except Exception:
+            return pages        # 自訂擷取失敗就用預設擷取，不中斷流程
+        if len(custom) == len(pages):
+            pages = [c if c.strip() else p for c, p in zip(custom, pages)]
+    return pages
+
+
 def invoice_text(pdf_path: str, key: Optional[str],
                  **pdfplumber_kwargs) -> Tuple[str, List[int]]:
     """帳單常夾帶雜訊頁 (提單、條款、其他公司的發票…)。供應商有登記
     invoice_page (register_supplier()) 時，只把「帳單頁」合併成擷取用的文字，
     回傳 (文字, 附件頁的頁碼 (1 起算))；沒有登記或一頁都不符合時用全部頁面。"""
-    pages = extract_pages_from_pdf(pdf_path, **pdfplumber_kwargs)
+    pages = supplier_pages(pdf_path, key, **pdfplumber_kwargs)
     entry = SUPPLIER_REGISTRY.get(key) if key else None
     psm = entry.get("ocr_psm") if entry else None
     if psm and not is_spreadsheet(pdf_path):
@@ -1705,7 +1729,7 @@ def audit_invoice_totals(
         return results
 
     if entry.get("multi_page"):
-        pages = extract_pages_from_pdf(pdf_path, **pdfplumber_kwargs)
+        pages = supplier_pages(pdf_path, supplier_key, **pdfplumber_kwargs)
         groups = _group_rows_by_invoice(rows)
         # key(正規化發票號碼) -> 原始發票號碼字串，用來在「不是發票抬頭頁」
         # 的頁面裡，用文字比對的方式判斷這一頁屬於哪一張發票 (見下方)。
