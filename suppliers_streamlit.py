@@ -5190,8 +5190,12 @@ def _handal_extract_items(text: str):
     in_sign = False
 
     for line in lines:
-        # 掃描檔 OCR 會帶出表格線 ("SEGEL | 25,000 25,000")
+        # 掃描檔 OCR 會帶出表格線 ("SEGEL | 25,000 25,000") 與行尾的撇號
+        # ("TRUCKING LAUT 40 (PPH 23) 3,420,000 '"，抽樣 PCI-FEB 2025)
         line = re.sub(r'\s*\|\s*', ' ', line).strip()
+        line = re.sub(r"\s+[^\w\s()]{1,2}$", "", line)             # 行尾雜訊 "'"
+        line = re.sub(r"(?<=\s)[^\w\s(),.\-/]{1,2}(?=\s)", "", line)  # 中間雜訊 "°"
+        line = re.sub(r"\s{2,}", " ", line)
         if not line:
             continue
         if re.match(r'for and on', line, re.IGNORECASE):

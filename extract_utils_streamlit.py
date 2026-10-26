@@ -200,17 +200,21 @@ _OCR_PSM_CACHE: Dict[Tuple[str, int, int], str] = {}
 _OCR_PSM_DPI = 400
 
 
-def _ocr_page_with_psm(pdf_path: str, page_index: int, psm: int) -> str:
+def _ocr_page_with_psm(pdf_path: str, page_index: int, psm: int, contrast: bool = False) -> str:
     """用指定的版面分析模式 (tesseract --psm) 高解析度重新 OCR 一頁。例如
     GALUH 的金額欄跟費用名稱分得很開，預設模式會漏掉整欄金額，psm 6 (整頁
     當成一個文字區塊) 才讀得到。供應商用 register_supplier(ocr_psm=6) 指定。"""
-    cache_key = (pdf_path, page_index, psm)
+    cache_key = (pdf_path, page_index, psm, contrast)
     if cache_key not in _OCR_PSM_CACHE:
         text = ""
         if _OCR_AVAILABLE:
             try:
                 with pdfplumber.open(pdf_path) as pdf:
                     image = pdf.pages[page_index].to_image(resolution=_OCR_PSM_DPI).original
+                if contrast:
+                    # 灰階 + 自動對比 (contrast=True)：見 invoice_text() 的自我檢查
+                    from PIL import ImageOps
+                    image = ImageOps.autocontrast(image.convert("L"))
                 text = pytesseract.image_to_string(image, config=f"--psm {psm}") or ""
             except Exception:
                 text = ""
@@ -1156,6 +1160,26 @@ def supplier_pages(pdf_path: str, key: Optional[str], **pdfplumber_kwargs) -> Li
     return list(pages)
 
 
+def _page_balances(entry: Dict, text: str) -> Optional[bool]:
+    """一頁文字自己算得平嗎：明細加總 (含稅額) = 含稅總額，或明細金額 = 未稅總額。
+    沒有總額規則或抓不到總額時回傳 None (不判斷)。"""
+    try:
+        items = entry["parse"](text).get("items") or []
+        amount = sum(i.get("amount") or 0 for i in items)
+        vat = sum(i.get("vat") or 0 for i in items)
+        if entry.get("extract_grand_total"):
+            total = entry["extract_grand_total"](text)
+            if isinstance(total, (int, float)):
+                return abs(amount + vat - total) <= 1
+        if entry.get("extract_total"):
+            total = entry["extract_total"](text)
+            if isinstance(total, (int, float)):
+                return abs(amount - total) <= 1
+    except Exception:
+        return None
+    return None
+
+
 def invoice_text(pdf_path: str, key: Optional[str],
                  **pdfplumber_kwargs) -> Tuple[str, List[int]]:
     """帳單常夾帶雜訊頁 (提單、條款、其他公司的發票…)。供應商有登記
@@ -1170,6 +1194,13 @@ def invoice_text(pdf_path: str, key: Optional[str],
         for i in _scanned_page_indexes(pdf_path):
             if detect_supplier(pages[i]) == key:
                 pages[i] = _ocr_page_with_psm(pdf_path, i, psm)
+                # 自我檢查：這一頁的明細加總對不上帳單總額時，改用灰階 + 自動對比
+                # 再 OCR 一次，對得上才採用 (GALUH 抽樣 0500047、0500071、0500086：
+                # 原圖漏掉 TRUCKING 金額、把 9 讀成 1；有些帳單反而原圖才讀得對)
+                if _page_balances(entry, pages[i]) is False:
+                    alt = _ocr_page_with_psm(pdf_path, i, psm, contrast=True)
+                    if _page_balances(entry, alt):
+                        pages[i] = alt
     check = entry.get("invoice_page") if entry else None
     keep = [i for i, p in enumerate(pages) if check(p)] if check else []
     if not keep:
