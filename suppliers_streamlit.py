@@ -3460,7 +3460,11 @@ def parse_pancaran(text: str) -> Dict:
     # Order No. 改用 JOB NO. (使用者提示，例如 INV.2509.0051)
     if header["order_no"] and not re.search(r"\d", header["order_no"]):
         header["order_no"] = header["bl_no"]
-    header["volume"] = _pancaran_extract_volume(text)
+    # 材積統一寫法 (見 _fmt_volume，使用者 2026-10-27)：卡車車型也照「數量X車型」，
+    # "LCL - 13x40HC LCL - 2xBOXCDDLCL - 1xBOXFUSO" -> "13X40HC, 2XBOXCDD, 1XBOXFUSO"
+    raw_volume = _pancaran_extract_volume(text)
+    boxes = re.findall(r"(\d+)\s*[xX]\s*([A-Za-z0-9]+?)(?=LCL|FCL|[^A-Za-z0-9]|$)", raw_volume or "")
+    header["volume"] = _fmt_volume(containers=boxes) or raw_volume
     header["shipper"] = _search(r"(?m)^SHIPPER\s*:\s*(.+?)(?:;|\s*$)", text)
 
     pol_pod = _search(r"(?m)^POL\s*/\s*POD\s*:\s*(.+)$", text)
