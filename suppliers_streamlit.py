@@ -6117,6 +6117,177 @@ register_supplier(
 # 越南：Desktop\越南進度管控 的「Vietnam Supplier Top 20.xlsx」(01~20，資料夾
 #   名稱「編號-廠商代號 公司名」)，建好規則後一樣在這裡登記 VN01~VN20。
 # 編號只是對照資料 (顯示在網頁清單、轉檔畫面與轉檔總表)，不影響辨識順序。
+# ===========================================================================
+# 供應商 VN08：CÔNG TY TNHH DSV AIR & SEA (越南 DSV，2026-10 新增)
+# ===========================================================================
+#
+# 兩種版型 (使用者 2026-10 樣本 SEP.2026 SAMPLE 1 / SAMPLE 2)：
+#   (a) PRO FORMA INVOICE：一份 PDF 一張發票 (可跨頁，"Continued Over…")，版面
+#       跟印尼 DSV 相同。INVOICE NO = SHIPMENT 號碼；SUPPLIER = 頁尾 Address 的
+#       "DSV Air & Sea Company Limited"；CONSIGNEE = 抬頭 "INVOICE DATE" 左邊的
+#       客戶名稱；費用名稱取 " - " 說明之前 (名稱本身可能有 " - "，例如
+#       "Phí lao vụ - hàng xuất - Greater of …")；VAT 是每筆 "8%=204.000" 的金額。
+#       空運：FLIGHT 第一段是航班號 (Vessel)、MAWB = MBL、HAWB = B/L。
+#       稽核：SUBTOTAL = 費用加總；TOTAL VND = 費用 + VAT。
+#   (b) BẢNG KÊ (越南文對帳表)：一列一票，INVOICE NO = Số SWB (也是 MBL)，
+#       B/L = FCR，每票拆 4 筆費用 (Phí phát hành vận đơn / Phí VGM / Phí CFS /
+#       Phí THC) + 1 筆 VAT ("Thuế 8% VAT")。RATE 欄是匯率，不取。日期只有
+#       "3-Sep"，年份取 SO# 最後 4 碼 ("SOA06092026")。
+#       ❗ 文字層的數字常把第一位拆開 ("2 49,793" = 249,793、CBM "5 3.471" =
+#       53.471)：1~2 位數、沒有逗號/小數點的字接到下一個字。
+#       稽核 (每票)：4 筆費用 = Thành tiền trước thuế；費用 + VAT = Tổng thành tiền。
+
+def detect_dsv_vn(text: str) -> bool:
+    upper = text.upper()
+    return "DSV AIR & SEA" in upper and ("VND" in upper or "VIỆT NAM" in upper
+                                         or "VIET NAM" in upper)
+
+
+_DSV_VN_DATE = r"\d{1,2}-[A-Za-z]{3}-\d{2}"
+# 費用行："Phí soi hàng - 1700 Kilogram(s) @ VND 600,00/KG 8%=81.600 1.020.000"
+_DSV_VN_CHARGE_RE = re.compile(
+    r"^(?P<desc>.+?) - (?=Greater|Base|Min|\d).*?\s(?P<rate>\d+)%=(?P<vat>[\d.]+)\s+"
+    r"(?P<amount>\d{1,3}(?:\.\d{3})*)$", re.MULTILINE)
+# 對帳表的一票：SWB FCR SO# [PO#] D-Mon 數字…
+_DSV_VN_ROW_RE = re.compile(
+    r"^(?P<swb>S[A-Z]{3}\d{6,8})\s+(?P<fcr>[A-Z]{3}\d{6,8})\s+(?P<so>\S+)\s+"
+    r"(?:(?P<po>\S+)\s+)?(?P<day>\d{1,2})-(?P<mon>[A-Za-z]{3})\s+(?P<rest>[\d.,\s]+)$",
+    re.MULTILINE)
+_DSV_VN_FEES = ("Phí phát hành vận đơn", "Phí VGM", "Phí CFS", "Phí THC")
+
+
+def _dsv_vn_dot_amount(text: Optional[str]) -> Optional[int]:
+    """越南式數字 '2.550.000' (句點千分位) -> 2550000。"""
+    if not text:
+        return None
+    digits = text.replace(".", "")
+    return int(digits) if digits.isdigit() else None
+
+
+def _dsv_vn_merge_split_numbers(tokens: List[str]) -> List[str]:
+    """把被拆開的第一位數字接回去："2 49,793" -> "249,793"。"""
+    out, prefix = [], ""
+    for i, tok in enumerate(tokens):
+        if re.fullmatch(r"\d{1,2}", tok) and i + 1 < len(tokens):
+            prefix += tok
+            continue
+        out.append(prefix + tok)
+        prefix = ""
+    return out
+
+
+def _dsv_vn_table_rows(text: str) -> List[Dict]:
+    """對帳表每一票：{swb, fcr, po, date, cbm, fees[4], subtotal, vat, total}。"""
+    rows = []
+    for m in _DSV_VN_ROW_RE.finditer(text):
+        tokens = m.group("rest").split()
+        if tokens and re.fullmatch(r"\d{1,2}", tokens[-1]):
+            tokens = tokens[:-1]                     # 最後的 Brand 代碼
+        nums = _dsv_vn_merge_split_numbers(tokens)
+        if len(nums) != 9:
+            continue
+        cbm, _rate, *money = nums
+        money = [int(v.replace(",", "")) if v.replace(",", "").isdigit() else None
+                 for v in money]
+        year = re.search(r"(\d{4})$", m.group("so"))
+        rows.append({
+            "swb": m.group("swb"), "fcr": m.group("fcr"), "po": m.group("po"),
+            "date": _format_date_en_from_month_name(
+                m.group("day"), m.group("mon"), year.group(1) if year else None),
+            "cbm": cbm, "fees": money[:4], "subtotal": money[4],
+            "vat": money[5], "total": money[6],
+        })
+    return rows
+
+
+def _parse_dsv_vn_table(text: str) -> Dict:
+    companies = re.findall(r"^(CÔNG TY TNHH .+?)\s*$", text, re.MULTILINE)
+    header: Dict[str, Optional[str]] = {code: None for code in (
+        "arrive_date", "onboard_date", "port_of_loading", "port_of_discharge",
+        "vessel", "container_no", "shipper")}
+    header["supplier"] = companies[0] if companies else None
+    header["consignee"] = companies[1] if len(companies) > 1 else None
+    rate = re.search(r"thuế\s+(\d+%)\s+VAT", text, re.IGNORECASE)
+    vat_desc = f"Thuế {rate.group(1)} VAT" if rate else "Thuế VAT"
+    items = []
+    for r in _dsv_vn_table_rows(text):
+        common = {"invoice_no": r["swb"], "invoice_date": r["date"], "order_no": r["po"],
+                  "bl_no": r["fcr"], "mbl_no": r["swb"], "volume": f"{r['cbm']} M3"}
+        for desc, amount in zip(_DSV_VN_FEES, r["fees"]):
+            items.append({"description": desc, "amount": amount, "vat": None, **common})
+        items.append({"description": vat_desc, "amount": None, "vat": r["vat"], **common})
+    return {"header": header, "items": items or [{"description": None, "amount": None}]}
+
+
+def _parse_dsv_vn_proforma(text: str) -> Dict:
+    header: Dict[str, Optional[str]] = {}
+    m = re.search(rf"^(.+?)\s+INVOICE DATE\s+({_DSV_VN_DATE})", text, re.MULTILINE)
+    header["consignee"] = m.group(1).strip() if m else None
+    header["invoice_date"] = _dsv_parse_date(m.group(2)) if m else None
+    header["invoice_no"] = _search(r"SHIPMENT\s+(\S+)", text)
+    header["supplier"] = _search(r"(DSV Air & Sea Company Limited)", text)
+    # SHIPPER / CONSIGNEE 兩欄黏在同一行：出貨方取到第一個公司型態字樣
+    m = re.search(r"SHIPPER\s+CONSIGNEE\s*\n(.+)", text)
+    shipper = re.match(r".*?\b(?:LIMITED|LTD\.?|JSC|CORPORATION|CO\.)", m.group(1)) if m else None
+    header["shipper"] = shipper.group(0).strip() if shipper else None
+    header["order_no"] = _search(r"OWNER'S REFERENCE[^\n]*\n\s*(\S+)", text)
+    header["volume"] = (lambda v: f"{v} M3" if v else None)(
+        _search(r"[\d.]+\s*KG\s+([\d.]+)\s*M3", text))
+    # 港口照抄整段 (同印尼 DSV)
+    m = re.search(
+        rf"^([A-Z]{{5}}\s*=\s*[^\n]+?)\s+({_DSV_VN_DATE})\s+([A-Z]{{5}}\s*=\s*[^\n]+?)"
+        rf"(?:\s+({_DSV_VN_DATE}))?\s*$", text, re.MULTILINE)
+    header["port_of_loading"] = m.group(1).strip(" ,") if m else None
+    header["onboard_date"] = _dsv_parse_date(m.group(2)) if m else None
+    header["port_of_discharge"] = m.group(3).strip(" ,") if m else None
+    header["arrive_date"] = _dsv_parse_date(m.group(4)) if m and m.group(4) else None
+    header["vessel"] = header["bl_no"] = header["mbl_no"] = None
+    m = re.search(r"FLIGHT / DATE & REFERENCE\s+MAWB\s+HAWB\s*\n(\S+)[^\n]*?(\S+)\s+(\S+)\s*$",
+                  text, re.MULTILINE)
+    if m:
+        header["vessel"], header["mbl_no"], header["bl_no"] = m.groups()
+    else:
+        sec = re.search(r"HOUSE BILL OF LADING\s*\n(.*?)\n\s*ORIGIN\b", text, re.DOTALL)
+        vm = _DSV_VESSEL_BL_PATTERN.search(sec.group(1)) if sec else None
+        if vm:
+            header["vessel"] = f"{vm.group('vessel').strip()} / {vm.group('voyage').strip()}"
+            header["bl_no"], header["mbl_no"] = vm.group("house_bl"), vm.group("ocean_bl")
+    sec = re.search(r"^CONTAINERS\s*\n(.*?)(?:\n\s*(?:Total CO|CO₂|CHARGES)\b|\Z)",
+                    text, re.DOTALL | re.MULTILINE)
+    cm = re.search(r"^(\S+)\s*\(", sec.group(1), re.MULTILINE) if sec else None
+    header["container_no"] = cm.group(1) if cm else None
+    items = [{"description": im.group("desc").strip(),
+              "amount": _dsv_vn_dot_amount(im.group("amount")),
+              "vat": _dsv_vn_dot_amount(im.group("vat"))}
+             for im in _DSV_VN_CHARGE_RE.finditer(text)]
+    return {"header": header, "items": items or [{"description": None, "amount": None}]}
+
+
+def parse_dsv_vn(text: str) -> Dict:
+    if "PRO FORMA INVOICE" in text.upper() or "SHIPMENT DETAILS" in text.upper():
+        return _parse_dsv_vn_proforma(text)
+    return _parse_dsv_vn_table(text)
+
+
+def _dsv_vn_extract_total(text: str):
+    """未稅總額：PRO FORMA 是 SUBTOTAL；對帳表回傳每票 {SWB: Thành tiền trước thuế}。"""
+    if _dsv_vn_table_rows(text):
+        return {r["swb"]: r["subtotal"] for r in _dsv_vn_table_rows(text)}
+    return _dsv_vn_dot_amount(_search(r"SUBTOTAL\s+([\d.]+)", text))
+
+
+def _dsv_vn_extract_grand_total(text: str):
+    if _dsv_vn_table_rows(text):
+        return {r["swb"]: r["total"] for r in _dsv_vn_table_rows(text)}
+    return _dsv_vn_dot_amount(_search(r"TOTAL\s+VND\s+([\d.]+)", text))
+
+
+register_supplier(
+    "DSV_VN", "CÔNG TY TNHH DSV AIR & SEA", detect_dsv_vn, parse_dsv_vn,
+    extract_total=_dsv_vn_extract_total, extract_grand_total=_dsv_vn_extract_grand_total,
+)
+
+
 SUPPLIER_NUMBERS = {
     # 供應商 key: (編號, 廠商代號, 進度管控表上的公司名稱)
     "YJE_TATA": ("ID01", "100019748", "PT. TATA HARMONI SARANATAMA"),
@@ -6142,6 +6313,8 @@ SUPPLIER_NUMBERS = {
     "EVERGREEN_LOGISTICS": ("ID38", "100019246", "PT. EVERGREEN LOGISTICS INDONESIA"),
     "RONG_A_CHAU": ("VN03", "100008978", "CÔNG TY TNHH GIAO NHẬN THƯƠNG MẠI RỒNG Á CHÂU"),
     "CONG_THANH": ("VN05", "100008048", "CTY TNHHDV GN VT VA TM CONG THANH"),
+    # 廠商代號待使用者提供 (Vietnam Supplier Top 20 只有編號 08)
+    "DSV_VN": ("VN08", "", "CÔNG TY TNHH DSV AIR & SEA"),
 }
 
 for _key, (_number, _vendor_code, _name) in SUPPLIER_NUMBERS.items():

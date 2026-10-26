@@ -649,6 +649,13 @@ _EN_PHRASES = (
     ("KHAI BO SUNG", "Supplementary declaration"), ("DAN TEM", "Label sticking"),
     ("XIN GIU GAC VA DAN TEM", "Guard keeping and label sticking"),
     ("GIU GAC", "Guard keeping"),
+    # 越南 DSV 費用名稱 (使用者 2026-10 正確答案)
+    ("PHI LAO VU - HANG XUAT", "Export Service Fee"),
+    ("PHI QUAN LY HANG XUAT", "Export Cargo Management Fee"),
+    ("PHI KHAI BAO AMS", "AMS Filing Fee"), ("PHI VAN DON", "House Bill / AWB Fee"),
+    ("PHI SOI HANG", "X-ray Screening Fee"), ("PHI PHAT HANH VAN DON", "B/L Issuance Fee"),
+    ("PHI VGM", "VGM Fee"), ("PHI CFS", "CFS Fee"), ("PHI THC", "Terminal Handling Charge"),
+    ("THUE 8% VAT", "VAT 8%"), ("THUE 10% VAT", "VAT 10%"),
     # 印尼文
     ("TOTAL BIAYA EKSTERNAL", "Total external cost"), ("TOTAL BIAYA REIMBURSEMENT",
                                                        "Total reimbursement cost"),
@@ -1797,6 +1804,17 @@ def audit_invoice_totals(
                 vat_total = entry["extract_vat_total"](text)
             except Exception:
                 vat_total = None
+        totals = (invoice_total, grand_total, final_total)
+        if any(isinstance(t, dict) for t in totals):
+            # 一份帳單多票、每票各自有總額 (例如越南 DSV 對帳表)：擷取函式回傳
+            # {發票號碼: 總額}，逐票勾稽
+            norm = [{normalize_value(k): v for k, v in t.items()} if isinstance(t, dict)
+                    else {} for t in totals]
+            for key, group_rows in _group_rows_by_invoice(rows).items():
+                picked = [n.get(key) for n in norm]
+                if group_rows and any(v is not None for v in picked):
+                    results.append(_build_result(group_rows, *picked))
+            return results
         if (invoice_total is not None or grand_total is not None or final_total is not None) and rows:
             results.append(_build_result(rows, invoice_total, grand_total, final_total,
                                          vat_total=vat_total))
