@@ -1286,7 +1286,12 @@ def parse_maersk(text: str) -> Dict:
 #   - 少數頁面 MBL No. 後面會多一個「-」尾巴 (排版問題)，擷取後要去掉。
 
 def detect_hyper_mega(text: str) -> bool:
-    return "HYPER MEGA" in text.upper()
+    upper = text.upper()
+    # TATA 的代墊費用說明也會寫 "REIMBURSEMENT - PT HYPER MEGA SHIPPING (INJK…)"
+    # (使用者 2026-10 抽樣 TH20251541)：抬頭是 TATA 就不是 HYPER MEGA
+    if "TATA HARMONI" in upper[:300]:
+        return False
+    return "HYPER MEGA" in upper
 
 
 _HYPER_LABEL_WORDS = [
@@ -3959,11 +3964,13 @@ def _dsv_extract_items(text: str) -> List[Dict]:
     items: List[Dict] = []
     matches = list(_DSV_ITEM_PATTERN.finditer(text))
     if not matches:
-        sec = re.search(r"CHARGES IN IDR\s*\n(.*?)\n\s*TOTAL CHARGES", text, re.DOTALL)
+        # 續頁沒有 "TOTAL CHARGES"，到 "Continued Over" 為止 (抽樣 ID610286388)
+        sec = re.search(r"CHARGES IN IDR\s*\n(.*?)\n\s*(?:TOTAL CHARGES|Continued Over)", text, re.DOTALL)
         matches = list(_DSV_ITEM_PLAIN_PATTERN.finditer(sec.group(1))) if sec else []
     for m in matches:
         items.append({
-            "description": m.group("desc").strip(),
+            # 名稱後面的費率說明不要 ("Overtime charge IDR 175000,00/hours/truck")
+            "description": re.sub(r"\s+IDR\s+[\d.,]+/.*$", "", m.group("desc").strip()),
             "amount": _dsv_clean_amount(m.group("amount")),
             # 費用明細行裡 "PPN IN IDR" 這一欄就是這筆費用的稅額 (VAT)，
             # 跟 "CHARGES IN IDR" (amount) 並排在同一行，_DSV_ITEM_PATTERN

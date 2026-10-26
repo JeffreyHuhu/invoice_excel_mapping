@@ -124,8 +124,8 @@ SUPPLIER_EXEMPTIONS: Dict[str, set] = {
 # 只對特定值的供應商例外 (同樣連附註都不列)
 SUPPLIER_VALUE_EXEMPTIONS: Dict[str, Dict[Tuple[str, str], set]] = {
     # INDOPROSTIME 空運直送收貨人，HAWB 欄印 "DIRECT TO CON"，照抄 (使用者 2026-10-25 確認)
-    "INDOPROSTIME": {("bl_no", "ID_NO_DIGIT"): {"DIRECT TO CON"}},
-    "INDOPROSTIME_TRANSPORT": {("bl_no", "ID_NO_DIGIT"): {"DIRECT TO CON"}},
+    "INDOPROSTIME": {("bl_no", "ID_NO_DIGIT"): {"DIRECT TO CON", "DIRCET TO CON"}},
+    "INDOPROSTIME_TRANSPORT": {("bl_no", "ID_NO_DIGIT"): {"DIRECT TO CON", "DIRCET TO CON"}},  # 帳單本身拼錯 DIRCET (抽樣 POU CHEN JUNI 2025)
 }
 
 # 日期合理範圍：早於這一年，或晚於今天 + 這麼多天，視為可疑
