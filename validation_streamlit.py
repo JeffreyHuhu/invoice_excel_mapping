@@ -115,6 +115,10 @@ SUPPLIER_EXEMPTIONS: Dict[str, set] = {
     "DWIHARTA": {("arrive_date", "DATE_ORDER")},
     "CONG_THANH": {("container_no", "CONTAINER_FORMAT"), ("vessel", "TEXT_NO_LETTER"),
                    ("amount", "AMOUNT_ZERO"), ("amount", "AMOUNT_NEGATIVE")},
+    # 越南拖車行 (VN06 BÌNH TÂN、VN16 SONG TRIỀU)：貨櫃號碼欄填車牌，比照 CONG THANH
+    # (2026-10-27 先比照辦理，待使用者確認)
+    "BINH_TAN": {("container_no", "CONTAINER_FORMAT")},
+    "SONG_TRIEU": {("container_no", "CONTAINER_FORMAT")},
 }
 
 # 只對特定值的供應商例外 (同樣連附註都不列)
