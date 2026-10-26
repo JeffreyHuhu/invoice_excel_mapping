@@ -6297,22 +6297,20 @@ def _parse_dsv_vn_table(text: str) -> Dict:
 
 
 def parse_dsv_vn(text: str) -> Dict:
-    if _dsv_vn_table_rows(text):
+    if _DSV_VN_ROW_RE.search(text):        # 只判斷版型，不先解析整張表
         return _parse_dsv_vn_table(text)
     return _cw_parse(text, _search(r"(DSV Air & Sea Company Limited)", text))
 
 
 def _dsv_vn_extract_total(text: str):
     """未稅總額：對帳表是每票 Thành tiền trước thuế；PRO FORMA 是每張 SUBTOTAL。"""
-    if _dsv_vn_table_rows(text):
-        return {r["swb"]: r["subtotal"] for r in _dsv_vn_table_rows(text)}
-    return _cw_extract_total(text)
+    rows = _dsv_vn_table_rows(text)
+    return {r["swb"]: r["subtotal"] for r in rows} if rows else _cw_extract_total(text)
 
 
 def _dsv_vn_extract_grand_total(text: str):
-    if _dsv_vn_table_rows(text):
-        return {r["swb"]: r["total"] for r in _dsv_vn_table_rows(text)}
-    return _cw_extract_grand_total(text)
+    rows = _dsv_vn_table_rows(text)
+    return {r["swb"]: r["total"] for r in rows} if rows else _cw_extract_grand_total(text)
 
 
 # ===========================================================================
@@ -6346,13 +6344,19 @@ def _cargowise_pages(pdf_path: str) -> List[str]:
     pages = []
     with pdfplumber.open(pdf_path) as pdf:
         for page_index, pg in enumerate(pdf.pages):
-            if not (pg.extract_text() or "").strip():
+            if not any(c["text"].strip() for c in pg.chars):
                 # 掃描頁 (YUSEN 把整份帳單掃描附在後面)：400 dpi + psm 6 才讀得對金額
                 # (使用者 2026-10-27 要求掃描頁也要到等級高)
                 pages.append(_ocr_page_with_psm(pdf_path, page_index, 6) + _CW_PAGE_MARK)
                 continue
-            # 粗體疊印三次的頁 ("BBB///LLL FFFEEEEEE")：同位置重複的字只留一個
-            pg = pg.dedupe_chars()
+            # 粗體疊印三次的頁 ("BBB///LLL FFFEEEEEE")：同位置重複的字只留一個。
+            # dedupe_chars() 很慢 (一頁約 0.8 秒)，先確認真的有疊印才做
+            seq = sorted(pg.chars, key=lambda c: (round(c["top"]), c["x0"]))
+            dup = sum(1 for a, b in zip(seq, seq[1:])
+                      if a["text"] == b["text"] and abs(a["x0"] - b["x0"]) < 1
+                      and abs(a["top"] - b["top"]) < 1)
+            if dup * 10 > len(seq):
+                pg = pg.dedupe_chars()
             chars = [c for c in pg.chars if c.get("size", 0) <= 30]
             small = [c for c in chars if c.get("size", 0) < 7.5 and c["x0"] < 60]
             drop = set()
@@ -6642,7 +6646,8 @@ def parse_expeditors(text: str) -> Dict:
     h["invoice_no"] = _search(r"TAX No:\s*NUMBER\s+(\S+)", text)
     m = re.search(r"CLIENT NO:\s*\S+\s+DATE\s+(\d{2})/(\d{2})/(\d{2})", text)
     h["invoice_date"] = _format_date_en(m.group(2), m.group(1), f"20{m.group(3)}") if m else None
-    h["consignee"] = _search(r"CLIENT NO:[^\n]*\n(.+?)\s+INVOICE\s*$", text)
+    # 中間可能夾空行 (樣本 E3Z3101331)
+    h["consignee"] = _search(r"CLIENT NO:[^\n]*\n\s*(.+?)\s+INVOICE\s*$", text)
     h["bl_no"] = _search(r"AWB/BL:\s*(\S+)", text)
     h["port_of_discharge"] = _search(r"DESTINATION:\s*(\S+)", text)
     h["vessel"] = _search(r"CARRIER:\s*(.+?)\s*$", text)

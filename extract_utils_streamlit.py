@@ -241,7 +241,12 @@ def _page_needs_full_ocr(fast: Tuple[str, bool]) -> bool:
     """要用高解析度重做的頁：轉向的頁 (低解析度判斷不了)，以及低解析度就認得
     出供應商或抬頭是 Faktur Pajak 的頁 (擷取與稅務發票判斷要用)。"""
     text, rotated = fast
-    return (rotated or detect_supplier(text) is not None
+    key = detect_supplier(text)
+    if key and SUPPLIER_REGISTRY.get(key, {}).get("page_text"):
+        # 這家供應商的 page_text 會自己 OCR (例如 CargoWise 掃描頁用 400 dpi)，
+        # 偵測用低解析度就夠，不要再多做一次高解析度 (YUSEN 29 頁省約 50 秒)
+        return rotated
+    return (rotated or key is not None
             or text.upper().lstrip().startswith("FAKTUR PAJAK"))
 
 
@@ -402,6 +407,11 @@ def extract_pages_from_pdf(pdf_path: str, **pdfplumber_kwargs) -> List[str]:
             if not text.strip():
                 scanned.append(i)
             pages_text.append(text)
+        text_key = detect_supplier("\n".join(pages_text)) if scanned and len(scanned) < len(pages_text) else None
+        if text_key and SUPPLIER_REGISTRY.get(text_key, {}).get("page_text"):
+            # 文字層已經認得出供應商，而且這家的 page_text 會自己 OCR 掃描頁：
+            # 這裡不用再 OCR (掃描頁留空字串，由 supplier_pages() 補上)
+            scanned = []
         if scanned:
             # 沒有文字層的掃描頁：先低解析度，認得出是帳單頁的再高解析度重做；
             # 低解析度一頁都認不出 (例如整份掃歪) 時全部用高解析度，跟以前一樣
@@ -1114,19 +1124,33 @@ def _parse_multi_page_pdf(pdf_path: str, key: str, **pdfplumber_kwargs) -> List[
     return rows
 
 
+_CUSTOM_PAGES_CACHE: "OrderedDict[tuple, List[str]]" = OrderedDict()
+
+
 def supplier_pages(pdf_path: str, key: Optional[str], **pdfplumber_kwargs) -> List[str]:
     """逐頁文字：供應商有登記 page_text 時用它 (空白頁退回預設擷取)，否則用
-    extract_pages_from_pdf()。"""
-    pages = extract_pages_from_pdf(pdf_path, **pdfplumber_kwargs)
+    extract_pages_from_pdf()。page_text 的結果有快取：同一份 PDF 擷取、稽核、
+    列附件頁會各呼叫一次，不快取每次都要重新解析版面 (YUSEN 29 頁一次約 30 秒)。"""
     entry = SUPPLIER_REGISTRY.get(key) if key else None
-    if entry and entry.get("page_text") and not is_spreadsheet(pdf_path):
-        try:
-            custom = entry["page_text"](pdf_path)
-        except Exception:
-            return pages        # 自訂擷取失敗就用預設擷取，不中斷流程
-        if len(custom) == len(pages):
-            pages = [c if c.strip() else p for c, p in zip(custom, pages)]
-    return pages
+    if not (entry and entry.get("page_text")) or is_spreadsheet(pdf_path):
+        return extract_pages_from_pdf(pdf_path, **pdfplumber_kwargs)
+    cache_key = (key,) + _pages_cache_key(pdf_path, pdfplumber_kwargs)
+    if cache_key in _CUSTOM_PAGES_CACHE:
+        _CUSTOM_PAGES_CACHE.move_to_end(cache_key)
+        return list(_CUSTOM_PAGES_CACHE[cache_key])
+    try:
+        pages = entry["page_text"](pdf_path)
+    except Exception:
+        # 自訂擷取失敗就用預設擷取，不中斷流程
+        return extract_pages_from_pdf(pdf_path, **pdfplumber_kwargs)
+    if any(not p.strip() for p in pages):
+        default = extract_pages_from_pdf(pdf_path, **pdfplumber_kwargs)
+        if len(default) == len(pages):
+            pages = [c if c.strip() else d for c, d in zip(pages, default)]
+    _CUSTOM_PAGES_CACHE[cache_key] = pages
+    while len(_CUSTOM_PAGES_CACHE) > _PAGES_CACHE_SIZE:
+        _CUSTOM_PAGES_CACHE.popitem(last=False)
+    return list(pages)
 
 
 def invoice_text(pdf_path: str, key: Optional[str],
