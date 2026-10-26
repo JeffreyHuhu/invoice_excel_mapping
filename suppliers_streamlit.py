@@ -6260,9 +6260,15 @@ def _cargowise_pages(pdf_path: str) -> List[str]:
     另外在頁尾加一行 "##SHIPPER## <出貨方>"：SHIPPER / CONSIGNEE 兩欄並排，
     只看文字分不出界線，用 CONSIGNEE 標題的 x 座標切開。"""
     import pdfplumber
+    from extract_utils_streamlit import _ocr_page_with_psm
     pages = []
     with pdfplumber.open(pdf_path) as pdf:
-        for pg in pdf.pages:
+        for page_index, pg in enumerate(pdf.pages):
+            if not (pg.extract_text() or "").strip():
+                # 掃描頁 (YUSEN 把整份帳單掃描附在後面)：400 dpi + psm 6 才讀得對金額
+                # (使用者 2026-10-27 要求掃描頁也要到等級高)
+                pages.append(_ocr_page_with_psm(pdf_path, page_index, 6) + _CW_PAGE_MARK)
+                continue
             # 粗體疊印三次的頁 ("BBB///LLL FFFEEEEEE")：同位置重複的字只留一個
             pg = pg.dedupe_chars()
             chars = [c for c in pg.chars if c.get("size", 0) <= 30]
@@ -6293,7 +6299,7 @@ def _cargowise_pages(pdf_path: str) -> List[str]:
                                and w["x0"] < cons["x0"] - 1), key=lambda w: w["x0"])
                 if line:
                     text += "\n##SHIPPER## " + " ".join(w["text"] for w in line)
-            pages.append(text)
+            pages.append(text + _CW_PAGE_MARK)
     return pages
 
 
@@ -6322,14 +6328,43 @@ def _cw_comma_number(text: str):
     return int(value) if value.is_integer() else value
 
 
+# 掃描頁 OCR 會把標籤後的冒號讀成 ")" "|" "!" "/" ("SHIPMENT|/SSGN0316985")
+_CW_INV_RE = r"SHIPMENT[\s)|:\]!/]*(?!DETAILS)([A-Z][A-Z0-9]{5,})"
+_CW_PAGE_MARK = "\n##PAGE##"
+
+
+def _cw_invoice_no(text: str) -> Optional[str]:
+    """SHIPMENT 號碼；掃描頁 OCR 會在字母跟數字中間多讀一個 O ("SSGNO0315882")。"""
+    inv = _search(_CW_INV_RE, text)
+    if inv:
+        fixed = re.sub(r"^([A-Z]+?)O+(?=\d{7,}$)", r"\1", inv)
+        inv = fixed if fixed != inv and re.fullmatch(r"[A-Z]{3,5}\d{7,}", fixed) else inv
+    return inv
+
+
 def _cw_docs(text: str) -> List[str]:
-    """一份 PDF 有好幾張發票時，從每張的 "Page 1 of N" 前一行切開。"""
-    lines = text.split("\n")
-    starts = [max(i - 1, 0) for i, ln in enumerate(lines) if re.match(r"\s*Page 1 of \d+", ln)]
-    if len(starts) <= 1:
-        return [text]
-    starts[0] = 0
-    return ["\n".join(lines[a:b]) for a, b in zip(starts, starts[1:] + [len(lines)])]
+    """一份 PDF 有好幾張發票時切開：每頁抬頭都有 SHIPMENT 號碼，連續幾頁號碼
+    相同 (或續頁讀不到號碼) 就是同一張；"Page 1 of N" 一定是新的一張 (同一個
+    SHIPMENT 可能開兩張，例如 YUSEN SSGN0316461 另有一張貨櫃延滯費)。沒有號碼
+    也沒有頁碼的頁 (疊印的附件頁) 不算。沒有分頁記號 (非 _cargowise_pages
+    擷取) 時整份當一張。先修 OCR 的數字空白 ("8%=64 . 000"、"1100000 ,00")。"""
+    text = re.sub(r"(?<=\d) *([.,]) *(?=\d)", r"\1", text)
+    pages = [p for p in text.split(_CW_PAGE_MARK) if p.strip()]
+    if len(pages) <= 1:
+        return [text.replace(_CW_PAGE_MARK, "")]
+    docs: List[List[str]] = []
+    current = None
+    for page in pages:
+        inv = _cw_invoice_no(page)
+        first_page = re.search(r"\bPage 1 of \d+", page)
+        if inv is None and not re.search(r"\bPage \d+ of \d+", page):
+            continue
+        if docs and not first_page and (inv is None or inv == current):
+            docs[-1].append(page)
+        else:
+            docs.append([page])
+            current = inv
+    return ["\n".join(d) for d in docs] or [text]
 
 
 def _cw_after(text: str, header_re: str, line_re: str, look: int = 4):
@@ -6347,8 +6382,8 @@ def _cw_after(text: str, header_re: str, line_re: str, look: int = 4):
 
 def _cw_parse_doc(doc: str, supplier: Optional[str]) -> List[Dict]:
     h: Dict[str, Optional[str]] = {"supplier": supplier}
-    h["invoice_no"] = _search(r"SHIPMENT\s*(?!DETAILS)([A-Z][A-Z0-9]{5,})", doc)
-    h["invoice_date"] = _cw_date(_search(r"\bDATE\s*(\d{1,2}-[A-Za-z]{3}-\d{2})", doc))
+    h["invoice_no"] = _cw_invoice_no(doc)
+    h["invoice_date"] = _cw_date(_search(r"\bDATE\s*[\[|(]?\s*(\d{1,2}-[A-Za-z]{3}-\d{2})", doc))
     m = re.search(r"^(?!SHIPMENT)(.+?)\s*(?:INVOICE DATE|SHIPMENT\s*[A-Z][A-Z0-9]{5,})",
                   doc, re.MULTILINE)
     h["consignee"] = m.group(1).strip() if m else None
@@ -6410,11 +6445,12 @@ def _cw_totals(text: str, patterns, conv=_dsv_vn_dot_amount):
     為準 (同一個 pattern 抓到好幾個就加總，例如 MOL 每個幣別一行 GRAND TOTAL)。"""
     out = {}
     for doc in _cw_docs(text):
-        inv = _search(r"SHIPMENT\s*(?!DETAILS)([A-Z][A-Z0-9]{5,})", doc)
+        inv = _cw_invoice_no(doc)
         for pattern in patterns:
             vals = re.findall(pattern, doc, re.MULTILINE)
             if inv and vals:
-                out[inv] = sum(conv(v) for v in vals)
+                # 同一個 SHIPMENT 開兩張時，總額相加 (明細也會併在同一組勾稽)
+                out[inv] = out.get(inv, 0) + sum(conv(v) for v in vals)
                 break
     return out
 
@@ -6583,12 +6619,12 @@ SUPPLIER_NUMBERS = {
     "EVERGREEN_LOGISTICS": ("ID38", "100019246", "PT. EVERGREEN LOGISTICS INDONESIA"),
     "RONG_A_CHAU": ("VN03", "100008978", "CÔNG TY TNHH GIAO NHẬN THƯƠNG MẠI RỒNG Á CHÂU"),
     "CONG_THANH": ("VN05", "100008048", "CTY TNHHDV GN VT VA TM CONG THANH"),
-    # 越南 VN08~VN20 廠商代號待使用者提供
-    "DSV_VN": ("VN08", "", "CÔNG TY TNHH DSV AIR & SEA"),
-    "MOL": ("VN09", "", "MOL LOGISTICS VIETNAM INC"),
-    "DHL_VN": ("VN13", "", "DHL GLOBAL FORWARDING (VIETNAM) CORPORATION"),
-    "EXPEDITORS": ("VN15", "", "EXPEDITORS VIETNAM COMPANY LIMITED"),
-    "YUSEN": ("VN20", "", "YUSEN LOGISTICS (VIETNAM) CO., LTD."),
+    # 越南廠商代號：越南進度管控\By Vietnam supplier (Top 20) 的資料夾名稱
+    "DSV_VN": ("VN08", "100007866", "CÔNG TY TNHH DSV AIR & SEA"),
+    "MOL": ("VN09", "100009335", "CÔNG TY TNHH MOL LOGISTICS VIỆT NAM"),
+    "DHL_VN": ("VN13", "100007618", "CTY CP GIAO NHẬN TOÀN CẦU DHL (VIỆTNAM)"),
+    "EXPEDITORS": ("VN15", "100008945", "CÔNG TY TNHH EXPEDITORS VIỆT NAM"),
+    "YUSEN": ("VN20", "100007349", "CHI NHÁNH CÔNG TY TNHH YUSEN LOGISTICS (VIỆTNAM) TẠI THÀNH PHỐ HỒ CHÍ MINH"),
 }
 
 for _key, (_number, _vendor_code, _name) in SUPPLIER_NUMBERS.items():

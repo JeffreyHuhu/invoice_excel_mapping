@@ -607,7 +607,8 @@ def format_formula_issue(issue: Dict) -> str:
 # 對照，再套詞組對照；越南文沒有對照的部分至少附上去聲調拼音。新詞直接加進
 # 下面兩個表即可。
 
-TEXT_NOTE_FIELDS = ("supplier", "consignee", "description", "port_of_loading",
+# CONSIGNEE (集團公司名稱) 不加英文備註 (使用者 2026-10-27 規定)
+TEXT_NOTE_FIELDS = ("supplier", "description", "port_of_loading",
                     "port_of_discharge", "shipper", "vessel")
 
 # 整句對照 (公司名稱等)
