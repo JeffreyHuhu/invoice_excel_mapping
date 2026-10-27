@@ -7,7 +7,8 @@ expense_normalize.py
   - parse_date()       ：各種日期寫法 (31.Aug.2026、2026-08-31、31/08/2026、
                          印尼文月份、Excel 日期序號...) 轉成 datetime.date
   - parse_amount()     ：金額/稅額 (含 Rp、千分位逗號或點、括號負數) 轉成 float
-  - parse_float()      ：材積等一般小數 (點一律當小數點)
+  - parse_float()      ：一般小數 (點一律當小數點)
+  - parse_volume()     ：材積原文 -> 櫃型櫃數 / TEU / CBM / KG (FCL > CBM > KG)
   - normalize_expense():費用名稱正規化，回傳 (標準費用項目, 費用大類)
   - normalize_port()   ：港口名稱統一大小寫與空白
   - detect_currency()  ：金額幣別 (帳單上的幣別 > 供應商 > 國家資料夾
@@ -21,7 +22,7 @@ expense_normalize.py
 import re
 import unicodedata
 from datetime import date, datetime, timedelta
-from typing import Optional, Tuple
+from typing import Dict, Optional, Tuple
 
 # 視為「沒有值」的佔位字
 _NA_VALUES = {"", "N/A", "NA", "N.A.", "-", "--", "NONE", "NULL", "NAN", "NIL"}
@@ -177,6 +178,61 @@ def parse_float(value) -> Optional[float]:
         return float(match.group(0).replace(",", ""))
     except ValueError:
         return None
+
+
+# 材積 (Volume) 拆成數字 (使用者 2026-10-27)。轉檔結果的寫法 (所有供應商)：
+#   FCL「數量X櫃型」(1X40HC, 多種用 ", " 隔開) > LCL「CBM M3」(7.010 M3) > 只有重量「KG」(2082 KG)
+#   舊格式只有數字沒有單位 (例如 MAERSK 47.545)：當成 CBM。
+# TEU：20 呎 = 1，40/45 呎 = 2。
+CONTAINER_TYPES = ("20GP", "40GP", "40HC", "45HC")
+_FCL_RE = re.compile(r"(\d+)\s*[X×*]\s*(20|40|45)\s*['’]?\s*(?:FT\b|FEET\b)?\s*([A-Z]{2})?",
+                     re.IGNORECASE)
+_CBM_RE = re.compile(r"(\d[\d,]*(?:\.\d+)?)\s*(?:M3|M³|CBM)\b", re.IGNORECASE)
+_KG_RE = re.compile(r"(\d[\d,]*(?:\.\d+)?)\s*(?:KGS?|KILOS?)\b", re.IGNORECASE)
+_BARE_NUMBER_RE = re.compile(r"\d[\d,]*(?:\.\d+)?")
+
+
+def _container_type(size: str, code: Optional[str]) -> str:
+    """呎數 + 櫃型代碼 -> CONTAINER_TYPES (高櫃 HC/HQ 算 40HC，其餘 40 呎算 40GP)。"""
+    if size == "20":
+        return "20GP"
+    if size == "45":
+        return "45HC"
+    return "40HC" if (code or "").upper() in ("HC", "HQ", "RH") else "40GP"
+
+
+def parse_volume(value) -> Dict[str, object]:
+    """材積原文 -> {"mode": FCL/LCL/空運快遞/None, "20GP".."45HC": 櫃數, "teu", "cbm", "kg"}。
+    依 FCL > CBM > KG 的順序只取一種；看不懂回傳全空。"""
+    out: Dict[str, object] = {"mode": None, "teu": None, "cbm": None, "kg": None}
+    out.update({t: None for t in CONTAINER_TYPES})
+    if value is None or isinstance(value, bool):
+        return out
+    if isinstance(value, (int, float)):
+        if value == value and value > 0:
+            out.update(mode="LCL", cbm=float(value))
+        return out
+    text = clean_text(value)
+    if not text:
+        return out
+    fcl = _FCL_RE.findall(text)
+    if fcl:
+        for qty, size, code in fcl:
+            t = _container_type(size, code)
+            out[t] = (out[t] or 0) + int(qty)
+        out["teu"] = float(sum((out[t] or 0) * (1 if t == "20GP" else 2) for t in CONTAINER_TYPES))
+        out["mode"] = "FCL"
+        return out
+    for regex, key, mode in ((_CBM_RE, "cbm", "LCL"), (_KG_RE, "kg", "空運快遞")):
+        m = regex.search(text)
+        if m:
+            out.update({key: float(m.group(1).replace(",", "")), "mode": mode})
+            return out
+    if _BARE_NUMBER_RE.fullmatch(text):
+        number = float(text.replace(",", ""))
+        if number > 0:
+            out.update(mode="LCL", cbm=number)
+    return out
 
 
 # ============================================================

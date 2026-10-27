@@ -55,7 +55,6 @@ from expense_normalize import (
     normalize_port,
     parse_amount,
     parse_date,
-    parse_float,
 )
 from settings import LOG_DIR, get_db_path
 
@@ -88,7 +87,7 @@ ITEM_COLUMNS = (
     ("expense_category", "VARCHAR"), ("amount", "DOUBLE"), ("vat", "DOUBLE"),
     ("currency", "VARCHAR"), ("order_no", "VARCHAR"), ("arrive_date", "DATE"), ("onboard_date", "DATE"),
     ("bl_no", "VARCHAR"), ("mbl_no", "VARCHAR"), ("port_of_loading", "VARCHAR"),
-    ("port_of_discharge", "VARCHAR"), ("volume", "DOUBLE"), ("vessel", "VARCHAR"),
+    ("port_of_discharge", "VARCHAR"), ("volume", "VARCHAR"), ("vessel", "VARCHAR"),
     ("container_no", "VARCHAR"), ("shipper", "VARCHAR"),
 )
 _DATE_COLUMNS = {name for name, typ in ITEM_COLUMNS if typ == "DATE"}
@@ -220,7 +219,7 @@ def clean_record(raw: Dict[str, object],
         "mbl_no": clean_text(raw.get("mbl_no")),
         "port_of_loading": normalize_port(raw.get("port_of_loading")),
         "port_of_discharge": normalize_port(raw.get("port_of_discharge")),
-        "volume": parse_float(raw.get("volume")),
+        "volume": clean_text(raw.get("volume")),  # 原文；pivot_export 用 parse_volume() 拆數字
         "vessel": clean_text(raw.get("vessel")),
         "container_no": clean_text(raw.get("container_no")),
         "shipper": clean_text(raw.get("shipper")),

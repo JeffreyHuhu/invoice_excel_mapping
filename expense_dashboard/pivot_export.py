@@ -5,8 +5,8 @@ pivot_export.py — 匯出「可樞紐分析」的費用彙總 Excel
 【做什麼】
   把資料庫明細填進樞紐範本 templates/pivot_template.xlsx (由
   build_pivot_template.py 用 Excel 做一次)。範本已有：
-    儀表板頁 (交叉分析篩選器 + 4 張樞紐分析圖)、4 張樞紐分析表、
-    明細表格「明細表」、讀取失敗表格「讀取失敗表」。
+    兩頁儀表板 (KPI、交叉分析篩選器、樞紐分析圖)、各角度樞紐分析表、
+    明細表格「明細表」、讀取失敗表格「讀取失敗表」。版面見 build_pivot_template.py。
   樞紐分析表設定「開檔時自動重新整理」，主管打開檔案就看到最新資料。
 
 【欄位】(使用者 2026-10-27 指定)
@@ -29,7 +29,8 @@ from xml.sax.saxutils import escape
 import pandas as pd
 
 import fx
-from expense_normalize import COUNTRY_FOLDER_CURRENCY, supplier_country
+from expense_normalize import (CONTAINER_TYPES, COUNTRY_FOLDER_CURRENCY, parse_volume,
+                               supplier_country)
 
 TEMPLATE = Path(__file__).with_name("templates") / "pivot_template.xlsx"
 DETAIL_SHEET, DETAIL_TABLE = "明細", "明細表"
@@ -71,16 +72,29 @@ ANALYSIS_COLUMNS: List[Tuple[str, str, str]] = [
     ("month", "月", "int"),
     ("year_month", "年月", "text"),
     ("route", "航線", "text"),
+    # 運量 (parse_volume 拆材積)：同一供應商的同一批貨只在第一列有值，樞紐加總不重複
+    ("ship_mode", "運送型態", "text"),
+] + [(f"cnt_{t}", f"{t} 櫃數", "count") for t in CONTAINER_TYPES] + [
+    ("teu", "TEU", "count"),
+    ("cbm", "CBM", "qty"),
+    ("kg", "重量 KG", "qty"),
+    # 單位成本的分子：FCL 費用只除以 TEU、LCL 費用只除以 CBM
+    ("fcl_usd", "FCL 費用 (USD)", "num"),
+    ("lcl_usd", "LCL 費用 (USD)", "num"),
+    ("invoice_count", "發票張數", "count"),
     ("source_folder", "來源資料夾", "text"),
     ("source_file", "來源檔案", "text"),
 ]
 COLUMNS = TEMPLATE_COLUMNS + ANALYSIS_COLUMNS
 FAILED_COLUMNS: List[Tuple[str, str, str]] = [
     ("source_file", "檔案", "text"), ("error", "原因", "text")]
-# 從資料庫讀的欄位 (country / quarter / year_month / route 由 add_helper_columns() 算)
-DB_COLUMNS = [c for c, _, _ in COLUMNS if c not in ("country", "quarter", "year_month", "route")]
+# add_helper_columns() 算的欄位；其餘從資料庫讀
+HELPER_COLUMNS = {"country", "quarter", "year_month", "route", "ship_mode", "teu", "cbm", "kg",
+                  "fcl_usd", "lcl_usd", "invoice_count"} | {f"cnt_{t}" for t in CONTAINER_TYPES}
+DB_COLUMNS = [c for c, _, _ in COLUMNS if c not in HELPER_COLUMNS]
 
-NUMBER_FORMATS = {"date": "mmm-dd-yyyy", "num": "#,##0.00", "rate": "#,##0.0000", "int": "0"}
+NUMBER_FORMATS = {"date": "mmm-dd-yyyy", "num": "#,##0.00", "rate": "#,##0.0000", "int": "0",
+                  "count": "#,##0", "qty": "#,##0.000"}
 
 _COUNTRY_NAMES = {
     "CN": "中國", "TW": "台灣", "IN": "印度", "ID": "印尼", "VN": "越南", "TH": "泰國",
@@ -115,7 +129,8 @@ def _country(source_file, supplier) -> Optional[str]:
 
 
 def add_helper_columns(df: pd.DataFrame) -> pd.DataFrame:
-    """加上國家、季、年月、航線 (樞紐分析分組用)。"""
+    """加上國家、季、年月、航線、運量、發票張數 (樞紐分析分組與加總用)。
+    df 要依 detail_select() 的順序排好 (每批貨的運量記在最早那一列)。"""
     pairs = df[["source_file", "supplier"]].drop_duplicates()
     lookup = {(f, s): _country(f, s) for f, s in pairs.itertuples(index=False)}
     df["country"] = [lookup[k] for k in zip(df["source_file"], df["supplier"])]
@@ -128,6 +143,24 @@ def add_helper_columns(df: pd.DataFrame) -> pd.DataFrame:
     pod = df["port_of_discharge"].fillna("").astype(str).str.strip()
     df["route"] = (pol.where(pol != "", "?") + " → " + pod.where(pod != "", "?")).where(
         (pol != "") | (pod != ""))
+
+    # 運量：材積原文 -> 數字。同一供應商 + 提單號碼 (沒有就用發票號碼) + 材積 = 同一批貨，
+    # 只記在第一列 (使用者 2026-10-27：每家供應商各算一次)
+    parsed = {v: parse_volume(v) for v in df["volume"].dropna().unique()}
+    mode = df["volume"].map(pd.Series({v: r["mode"] for v, r in parsed.items()}, dtype=object))
+    df["ship_mode"] = mode
+    first = ~pd.DataFrame({"s": df["supplier"], "b": df["bl_no"].fillna(df["invoice_no"]),
+                           "v": df["volume"]}).duplicated()
+    for key, col in [(t, f"cnt_{t}") for t in CONTAINER_TYPES] + [
+            ("teu", "teu"), ("cbm", "cbm"), ("kg", "kg")]:
+        values = pd.Series({v: r[key] for v, r in parsed.items()}, dtype=float)
+        df[col] = df["volume"].map(values).where(first)
+    amount = pd.to_numeric(df["amount"], errors="coerce")
+    df["fcl_usd"] = amount.where(mode == "FCL")
+    df["lcl_usd"] = amount.where(mode == "LCL")
+    # 發票張數：每張發票 (供應商 + 發票號碼) 只在第一列記 1
+    df["invoice_count"] = (~pd.DataFrame({"s": df["supplier"], "i": df["invoice_no"].fillna(
+        df["source_file"])}).duplicated()).astype(int)
     return df
 
 
@@ -188,7 +221,7 @@ def _cell_fragments(series: pd.Series, kind: str, style: str) -> List[Optional[s
         days = (pd.to_datetime(series, errors="coerce") - pd.Timestamp("1899-12-30")) \
             / pd.Timedelta(days=1)
         return [None if pd.isna(v) else f"{s_attr}><v>{v:.10g}</v></c>" for v in days]
-    if kind in ("num", "rate", "int"):
+    if kind in NUMBER_FORMATS:   # date 以外有數字格式的型別都是數字
         nums = pd.to_numeric(series, errors="coerce")
         return [None if pd.isna(v) else f"{s_attr}><v>{float(v):.15g}</v></c>" for v in nums]
     out: List[Optional[str]] = []
