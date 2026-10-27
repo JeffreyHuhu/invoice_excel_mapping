@@ -21,6 +21,7 @@ import plotly.graph_objects as go
 import streamlit as st
 
 import fx
+import pivot_export
 from expense_normalize import EXPENSE_CATEGORIES, OTHER_CATEGORY
 from settings import get_db_path
 
@@ -491,11 +492,24 @@ def export_excel(db: str, db_mtime: float, sql: str, params: Tuple, columns: Tup
     return buf.getvalue()
 
 
+@st.cache_data(show_spinner=False, max_entries=2)
+def export_pivot(db: str, db_mtime: float, where: str, params: Tuple, fixed: Tuple) -> bytes:
+    """可樞紐分析的 Excel (pivot_export)：一律換算 USD，沿用目前的篩選與固定匯率設定。"""
+    cte, cte_params = pivot_export.items_cte(dict(fixed))
+    df = query(db, db_mtime, f"{cte}\n{pivot_export.detail_select(where)}",
+               tuple(cte_params) + params)
+    failed = query(db, db_mtime, "SELECT source_file, error FROM etl_files "
+                   "WHERE error IS NOT NULL ORDER BY 1")
+    buf = io.BytesIO()
+    pivot_export.write_workbook(df, failed, buf)
+    return buf.getvalue()
+
+
 export_args = (DB, MTIME, f"{CTE}\n{detail_body}", CTE_PARAMS + params,
                tuple(detail_columns.items()))
 export_key = export_args[2:4]
 stamp = pd.Timestamp.now().strftime("%Y%m%d_%H%M")
-e1, e2, _ = st.columns([1, 1, 3])
+e1, e2, e3, _ = st.columns([1, 1, 1.4, 1.6])
 with e1:
     if st.button("⬇ 準備 CSV", width="stretch"):
         with st.spinner("產生 CSV 中..."):
@@ -515,5 +529,21 @@ with e2:
         xlsx = st.session_state.get("xlsx")
         if xlsx and xlsx[0] == export_key:
             st.download_button("下載 Excel", xlsx[1], f"費用明細_{stamp}.xlsx",
+                               "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                               width="stretch", type="primary")
+with e3:
+    if n_lines > EXCEL_MAX_ROWS:
+        st.button("⬇ 準備樞紐分析 Excel", disabled=True, width="stretch",
+                  help=f"超過 Excel 上限 {EXCEL_MAX_ROWS:,} 列，請縮小範圍或改用 CSV")
+    else:
+        if st.button("⬇ 準備樞紐分析 Excel", width="stretch",
+                     help="含儀表板頁、4 張樞紐分析表與圖、交叉分析篩選器；金額一律換算 USD。"
+                          "開檔後按「啟用編輯」，樞紐分析表會自動重新整理。"):
+            with st.spinner(f"產生樞紐分析 Excel 中 ({n_lines:,} 筆)..."):
+                st.session_state["pivot"] = (export_key, export_pivot(
+                    DB, MTIME, where, params, tuple(sorted(fixed_rates.items()))))
+        pivot = st.session_state.get("pivot")
+        if pivot and pivot[0] == export_key:
+            st.download_button("下載樞紐分析 Excel", pivot[1], f"費用分析樞紐_{stamp}.xlsx",
                                "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
                                width="stretch", type="primary")

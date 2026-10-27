@@ -13,5 +13,6 @@ import python_calamine  # noqa: F401
 
 import expense_normalize  # noqa: F401
 import fx  # noqa: F401
+import pivot_export  # noqa: F401
 import process_data  # noqa: F401
 import settings  # noqa: F401

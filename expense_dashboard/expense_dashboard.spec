@@ -10,6 +10,7 @@ pages = [(f, '.') for f in ('app.py', 'dashboard.py', 'data_admin.py')]
 
 datas = (
     pages
+    + [('templates/pivot_template.xlsx', 'templates')]   # 樞紐分析 Excel 範本 (pivot_export)
     + collect_data_files('streamlit')          # 前端網頁檔
     + copy_metadata('streamlit')               # streamlit 啟動時會查自己的版本
     + collect_data_files('plotly')             # plotly 的 validators / 樣板 json
