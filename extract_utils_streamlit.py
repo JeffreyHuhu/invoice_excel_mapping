@@ -1223,13 +1223,19 @@ def invoice_text(pdf_path: str, key: Optional[str],
     return "\n".join(pages[i] for i in keep), noise
 
 
-_POU_FACTORY_RE = re.compile(r"\bPOU\s*-?\s*(YUEN|HUNG|CHEN|SUNG|LI|SHENG|YI)\b")
+# 前後不能接英文字母 (不用 \b：抽樣檔名 "f007_POU HUNG…" 的底線算字元)
+_POU_FACTORY_RE = re.compile(r"(?<![A-Z])POU\s*-?\s*(YUEN|HUNG|CHEN|SUNG|LI|SHENG|YI)(?![A-Z])")
 
 
 def _consignee_from_filename(path: str) -> Optional[str]:
-    """檔名裡的寶成廠別 ("POUYUEN"、"POU HUNG"、"POULI") -> "POU YUEN" 這種寫法。"""
-    m = _POU_FACTORY_RE.search(os.path.basename(path or "").upper())
-    return f"POU {m.group(1)}" if m else None
+    """檔名裡的寶成廠別 ("POUYUEN"、"POU HUNG"、"POULI") -> "POU YUEN" 這種寫法。
+    檔名沒有時，看上兩層資料夾名稱 (越南資料夾 "…\\POU LI\\2025\\THANG 09\\…")。"""
+    parts = os.path.normpath(path or "").split(os.sep)
+    for part in reversed(parts[-3:]):
+        m = _POU_FACTORY_RE.search(part.upper())
+        if m:
+            return f"POU {m.group(1)}"
+    return None
 
 
 def parse_invoice_pdf(pdf_path: str, supplier_key: Optional[str] = None,
