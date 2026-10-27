@@ -2285,6 +2285,11 @@ def parse_tata(text: str) -> Dict:
 # 漏掉另一種格式的頁面。
 
 def detect_yje_or_tata(text: str) -> bool:
+    # DHL Express 帳單 (抬頭 "DHL Express … REGULAR INVOICE") 的附件頁可能出現 TATA
+    # 的關鍵字 (2026-10-27 抽樣 SRGR003222411 等 8 份被誤認)：看抬頭排除
+    head = text[:300].upper()
+    if head.lstrip().startswith("DHL EXPRESS") and ("INVOICE" in head or "DEBIT NOTE" in head):
+        return False
     return detect_yje(text) or detect_tata(text)
 
 
@@ -3651,8 +3656,9 @@ _DHL_EXTRA_CHARGE_NAME_LINE = re.compile(r"^([A-Z][A-Z /&]+[A-Z])\s+[\d,]+\s*$",
 # 「目的地代碼一定是大寫字母」這個特徵切開，不用連續空白判斷。
 _DHL_MAIN_LINE_PATTERN = re.compile(
     r"^(?P<awb>\d{6,12})(?:\s+\S.*?)?\s+(?P<date>\d{1,2}-\d{1,2}-\d{4})\s+"
-    r"(?P<ocode>[A-Z]{2,4}),\s*(?P<oregion>[A-Za-z ]+?)\s+"
-    r"(?P<dcode>[A-Z]{2,4}),\s*(?P<dregion>[A-Za-z ]+?)\s+EXPRESS\s+"
+    # 地名可能有括號、句點、撇號、連字號 ("MAA, CHENNAI (MADRAS)"，2026-10-27 抽樣)
+    r"(?P<ocode>[A-Z]{2,4}),\s*(?P<oregion>[A-Za-z][A-Za-z ().'\-]*?)\s+"
+    r"(?P<dcode>[A-Z]{2,4}),\s*(?P<dregion>[A-Za-z][A-Za-z ().'\-]*?)\s+EXPRESS\s+"
     r"(?P<weight>[\d.]+)\s*[A-Z]?\s+(?P<items>\d+)\s+"
     r"(?P<charge>[\d,]+)\s+(?P<vat>[\d,]+)\s+[A-Z]\s+(?P<total>[\d,]+)\s*$",
     re.MULTILINE,
@@ -3712,11 +3718,15 @@ def _parse_dhl_regular(text: str) -> Optional[Dict]:
             "onboard_date": onboard_date,
             "port_of_loading": port_of_loading,
             "port_of_discharge": port_of_discharge,
+            # 材積 = 每票的 Weight in Kg (使用者 2026-10-27 答案 "14.5 KG")
+            "volume": _fmt_volume(kg=f"{float(m.group('weight')):g}"),
         }
 
+        # 每筆費用自帶 VAT (使用者 2026-10-27 答案)
         items.append({
             "description": service_name,
             "amount": _dhl_clean_amount(m.group("charge")),
+            "vat": _dhl_clean_amount(m.group("vat")),
             **overrides,
         })
         if extra_pattern:
@@ -3724,6 +3734,7 @@ def _parse_dhl_regular(text: str) -> Optional[Dict]:
                 items.append({
                     "description": em.group("desc").strip(),
                     "amount": _dhl_clean_amount(em.group("amount")),
+                    "vat": _dhl_clean_amount(em.group("vat")),
                     **overrides,
                 })
 
@@ -3806,8 +3817,19 @@ def _dhl_customs_extract_items(text: str) -> List[Dict]:
     items: List[Dict] = []
     lines = text.split("\n")
 
+    # 彙總表可能有好幾種服務 (EXPRESS WORLDWIDE DOC / NONDOC / DOMESTIC，2026-10-27
+    # 抽樣)：從表頭到 "Total" 列之間每一列都是一筆
+    in_summary = False
     for line in lines:
-        m = _DHL_CUSTOMS_SUMMARY_LINE_PATTERN.match(line.strip())
+        stripped_line = line.strip()
+        if stripped_line.startswith("Type of Service"):
+            in_summary = True
+            continue
+        # OCR 掃描檔的表頭常讀壞 (in_summary 沒設到)：抓到服務列之後遇到 Total 也停，
+        # 不然後面 "NPWP 0013 1077 4306 2000" 會被當成一筆 (f008 抽樣)
+        if (in_summary or items) and stripped_line.upper().startswith("TOTAL"):
+            break
+        m = _DHL_CUSTOMS_SUMMARY_LINE_PATTERN.match(stripped_line)
         if not m:
             continue
         # 前 4 個 token 固定是 Number of Shipments / Total Weight /
@@ -3817,30 +3839,93 @@ def _dhl_customs_extract_items(text: str) -> List[Dict]:
         if len(tokens) < 4:
             continue
         amount = _dhl_clean_amount(tokens[3])
-        items.append({"description": m.group(1).strip(), "amount": amount if amount is not None else 0})
-        break
+        # 金額 0 (DUTIES & TAXES) 的 VAT 是 0；其他服務的 VAT 由 _dhl_allocate_vat() 分配
+        items.append({"description": m.group(1).strip(), "amount": amount if amount is not None else 0,
+                      "vat": 0 if not amount else None})
+    # 第 2 頁每筆額外費用 "DUTY TAX PAID 290,000 293,190" = 名稱、金額、含稅小計：
+    # VAT = 含稅小計 - 金額 (使用者 2026-10-27 答案：DUTY TAX PAID VAT 3,190，其餘 0)
+    line_totals = {}
+    for line in lines:
+        for mm in re.finditer(r"([A-Z][A-Z &]+[A-Z])\s+([\d,]+)\s+([\d,]+)\s*$", line.strip()):
+            amt, tot = _dhl_clean_amount(mm.group(2)), _dhl_clean_amount(mm.group(3))
+            if amt is not None and tot is not None and tot >= amt:
+                line_totals[(mm.group(1).strip(), amt)] = tot - amt
 
     in_extra_section = False
+    # OCR 讀壞 "Analysis of Extra Charges" 標題時，從彙總表的 Total 列下一行開始
+    has_title = any(ln.strip().upper().startswith("ANALYSIS OF EXTRA CHARGES") for ln in lines)
     for line in lines:
         stripped = line.strip()
-        if stripped.upper().startswith("ANALYSIS OF EXTRA CHARGES"):
+        if stripped.upper().startswith("ANALYSIS OF EXTRA CHARGES") or (
+                not has_title and not in_extra_section and items
+                and re.match(r"Total\s+\d", stripped)):
             in_extra_section = True
             continue
         if not in_extra_section:
             continue
         if stripped.upper().startswith("TOTAL EXTRA CHARGES"):
             break
+        # OCR 雜訊："FUELSURCHARGE —— 1,756,394 ," -> "FUEL SURCHARGE 1,756,394"
+        stripped = re.sub(r"[\s—–_|.,-]+$", "", stripped)
+        stripped = re.sub(r"\s+[—–_|-]+\s+", " ", stripped)
+        stripped = stripped.replace("FUELSURCHARGE", "FUEL SURCHARGE")
         m = _DHL_CUSTOMS_ITEM_PATTERN.match(stripped)
         if not m:
             continue
         desc = m.group(1).strip()
         if desc in ("TOTAL EXTRA CHARGES", "TOTAL DISCOUNTS", "TOTAL VAT"):
             continue
-        items.append({
-            "description": desc,
-            "amount": _dhl_clean_amount(m.group(2)),
-        })
+        amount = _dhl_clean_amount(m.group(2))
+        vat = next((v for (name, amt), v in line_totals.items()
+                    if amt == amount and name.endswith(desc)), None)
+        items.append({"description": desc, "amount": amount, "vat": vat})
     return items
+
+
+_DHL_VAT_CODE_RE = re.compile(
+    r"^[A-Z][a-z]?\s+[A-Za-z][A-Za-z ]*?\s+(?P<rate>\d+(?:\.\d+)?)%\s+(?P<base>[\d,]+)\s+(?P<vat>[\d,]+)\s*$",
+    re.MULTILINE)
+
+
+def _dhl_allocate_vat(text: str, items: List[Dict]) -> None:
+    """只有第 1 頁彙總表 (沒有逐票明細) 時，費用沒有自己的 VAT：用「Analysis of
+    VAT」每個稅別的稅基 (例如 "A Taxable 1.10% 580,000 6,380") 找出加總剛好等於
+    稅基的費用，稅額分給這些費用 (多筆時依金額比例，尾差放最後一筆)；其餘費用
+    VAT = 0 (使用者 2026-10-27 答案)。找不到對應的費用時，稅額單獨一筆。"""
+    from itertools import combinations
+    pending = [it for it in items if it.get("vat") is None and it.get("amount")]
+    if not pending:
+        for it in items:
+            if it.get("vat") is None:
+                it["vat"] = 0
+        return
+    codes = [(m.group("base"), m.group("vat")) for m in _DHL_VAT_CODE_RE.finditer(text)]
+    if not codes:
+        # 稅別那行讀不到稅額 (OCR)：用第 1 頁 "Total Amount (IDR) 未稅 VAT 含稅"
+        m = re.search(r"Total\s+Amount\s*\(IDR\)\s+([\d,]+)\s+([\d,]+)\s+[\d,]+", text)
+        codes = [m.groups()] if m else []
+    for base_text, vat_text in codes:
+        base, vat = _dhl_clean_amount(base_text), _dhl_clean_amount(vat_text)
+        if not base or not vat:
+            continue
+        group = tuple(pending) if sum(it["amount"] for it in pending) == base else None
+        for size in range(1, min(len(pending), 6) + 1) if not group else ():
+            group = next((g for g in combinations(pending, size)
+                          if sum(it["amount"] for it in g) == base), None)
+            if group:
+                break
+        if not group:
+            items.append({"description": "VAT", "amount": None, "vat": vat})
+            continue
+        left = vat
+        for it in group[:-1]:
+            it["vat"] = round(vat * it["amount"] / base)
+            left -= it["vat"]
+        group[-1]["vat"] = left
+        pending = [it for it in pending if it not in group]
+    for it in items:
+        if it.get("vat") is None and it.get("amount") is not None:
+            it["vat"] = 0
 
 
 def _parse_dhl_scanned_customs(text: str) -> Dict:
@@ -3864,24 +3949,95 @@ def _parse_dhl_scanned_customs(text: str) -> Dict:
         header[code] = None
 
     items = _dhl_customs_extract_items(text)
+    _dhl_allocate_vat(text, items)
     if not items:
         items = [{"description": None, "amount": None}]
 
     return {"header": header, "items": items}
 
 
+# (C) INBOUND DUTY INVOICE (JKTZR…，2026-10-27 抽樣)：一票，表頭 "Waybill Origin Shipper
+#     Destination…"，第一行 "5087356190 SGN, HO CHI MINH JKT, JAKARTA"；費用行
+#     "07-05-2026 IMPORT EXPORT DUTIES 370,461 z 370,461" (名稱、金額、稅別、[VAT]、含稅)，
+#     左邊可能夾著 "Description of Goods: SLAB TEST: 09 SET " 這段貨物說明。
+_DHL_DUTY_ITEM_RE = re.compile(
+    r"(?P<desc>[A-Z][A-Z &/]*[A-Z])\s+(?P<amount>[\d,]+)\s+(?P<code>[A-Za-z]{1,2})\s+"
+    r"(?:(?P<vat>[\d,]+)\s+)?(?P<total>[\d,]+)\s*$")
+
+
+def _dhl_is_duty(text: str) -> bool:
+    # OCR 可能讀掉標題 (f002 抽樣)：也看費用表頭 "Charge Description"
+    return ("DUTY INVOICE" in text[:400].upper() or "Charge Description" in text) \
+        and "Type of Service" not in text
+
+
+def _parse_dhl_duty(text: str) -> Dict:
+    header = _dhl_common_header(text)
+    m = re.search(r"^(\d{8,12})\s+([A-Z]{3},\s*[A-Z][A-Z .()'-]*?)\s+([A-Z]{3},\s*[A-Z][A-Z .()'-]*?)\s*$",
+                  text, re.MULTILINE)
+    if m:
+        header.update(bl_no=m.group(1), port_of_loading=m.group(2), port_of_discharge=m.group(3))
+    items: List[Dict] = []
+    for line in text.splitlines():
+        line = line.strip()
+        if line.upper().startswith(("ANALYSIS OF VAT", "TOTAL")):
+            if items:
+                break
+            continue
+        date = re.match(r"(\d{1,2}-\d{1,2}-\d{4})\s+", line)
+        if date:
+            header.setdefault("onboard_date", _dhl_parse_date(date.group(1)))
+            line = line[date.end():]
+        # 左欄的貨物說明 ("Description of Goods: SLAB TEST: 09 SET ") 去掉
+        # (OCR 會把 Description 讀成 "Detcription"，所以只認 "of Goods:")
+        line = re.sub(r"^.*?of Goods:.*?\d+\s*(?:SETS?|PCS?|CTNS?|PKGS?|UNITS?|EA)\s+(?:0\s+)?",
+                      "", line, flags=re.I)
+        line = re.sub(r"^\s*0?\s?ISBURSEMENT\b", "DISBURSEMENT", line)   # OCR 掉了 D
+        im = _DHL_DUTY_ITEM_RE.search(line)
+        if not im:
+            continue
+        amount = _dhl_clean_amount(im.group("amount"))
+        total = _dhl_clean_amount(im.group("total"))
+        vat = _dhl_clean_amount(im.group("vat")) if im.group("vat") else (
+            total - amount if amount is not None and total is not None else None)
+        items.append({"description": im.group("desc").strip(), "amount": amount, "vat": vat})
+    for code in ("order_no", "arrive_date", "mbl_no", "volume", "vessel", "container_no"):
+        header.setdefault(code, None)
+    return {"header": header, "items": items or [{"description": None, "amount": None}]}
+
+
 def parse_dhl(text: str) -> Dict:
-    if _dhl_is_regular(text):
-        result = _parse_dhl_regular(text)
-        if result is not None:
-            return result
-    return _parse_dhl_scanned_customs(text)
+    if _dhl_is_duty(text):
+        result = _parse_dhl_duty(text)
+    elif _dhl_is_regular(text) and (regular := _parse_dhl_regular(text)) is not None:
+        result = regular
+    else:
+        result = _parse_dhl_scanned_customs(text)
+    # OCR 把抬頭讀成 "PT GIROTIKA SEMESTA" 時供應商會抓不到：供應商固定
+    result["header"]["supplier"] = result["header"].get("supplier") or "PT BIROTIKA SEMESTA / DHL EXPRESS"
+    return result
+
+
+def _dhl_extract_grand_total(text: str) -> Optional[int]:
+    """含稅總額 = 每一票最後單獨一行的總費用 (例如 "2,917,670" = 該票費用 + VAT)
+    加總 (使用者 2026-10-27 提示：每一票的項目總額 + VAT = 每一票的總費用)；
+    找不到就用第 1 頁 Total Amount (IDR) 的含稅總額。"""
+    # 只看逐票明細 (第一個 "Air Waybill" 表頭到最後一個 "Service Sub Total")，
+    # 不吃到後面附件 (報關單、商業發票) 裡單獨一行的數字
+    start = text.find("Air Waybill")
+    end = text.rfind("Service Sub Total")
+    detail = text[start:end] if 0 <= start < end else ""
+    per_shipment = re.findall(r"^\s*(\d{1,3}(?:,\d{3})+)\s*$", detail, re.MULTILINE)
+    if per_shipment:
+        return sum(_dhl_clean_amount(v) for v in per_shipment)
+    m = re.search(r"Total\s+Amount\s*\(IDR\)\s+[\d,]+\s+[\d,]+\s+([\d,]+)", text)
+    return _dhl_clean_amount(m.group(1)) if m else None
 
 
 register_supplier(
     "DHL", "PT BIROTIKA SEMESTA / DHL EXPRESS",
     detect_dhl, parse_dhl,
-    extract_total=_dhl_extract_total,
+    extract_total=_dhl_extract_total, extract_grand_total=_dhl_extract_grand_total,
 )
 
 
@@ -5739,13 +5895,10 @@ def _ct_paid_on_behalf(rows: List[list]) -> Optional[Dict]:
         # Order No. = 這張發票的所有 INV；B/L NO. 與 MBL NO. = 所有報關單號 (Tờ khai)
         item["order_no"] = ",".join(item.pop("orders")) or None
         item["bl_no"] = item["mbl_no"] = ",".join(item.pop("decls")) or None
-    # 勾稽 (使用者提示)：每張發票 AMOUNT + VAT = 該列 TOTAL；整份清單的明細合計 =
-    # TỔNG CỘNG 的未稅與 TOTAL (容許逐列四捨五入每列 0.5，超過就是帳單合計列的
-    # 稅額不一致)
-    audit = [{"invoice_no": None, "total": total, "vat_total": vat_total, "grand_total": None,
-              "final_total": bill_total, "final_tolerance": max(1.0, 0.5 * len(items))}]
-    audit += [{"invoice_no": inv, "total": None, "grand_total": round(value, 2),
-               "final_total": None} for inv, value in row_totals.items()]
+    # 勾稽：只核對每一票 AMOUNT + VAT = 該列 TOTAL，不核對整份清單的 TỔNG CỘNG
+    # (使用者 2026-10-28 規定；total / vat_total / bill_total 只用來找合計列)
+    audit = [{"invoice_no": inv, "total": None, "grand_total": round(value, 2),
+              "final_total": None} for inv, value in row_totals.items()]
     return {"header": header, "items": items, "audit": audit}
 
 
