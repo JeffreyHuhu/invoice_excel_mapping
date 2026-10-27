@@ -551,6 +551,16 @@ def excel_formula_issues(path: str) -> Optional[List[Dict]]:
                 g["missing"][col] = missing
             issues.extend(grouped.values())
             issues.extend(_rate_total_issues(ws.title, formulas, sums, grid))
+            # 公式沒有存計算結果 (用程式產生、沒在 Excel 開過的 xlsx)：讀不到金額，
+            # 使用者 2026-10-27 規定標 ERROR
+            blank = [f"{col}{r}" for (r, col) in formulas
+                     if (lambda v: v is None or v == "")(
+                         grid[r - 1][column_index_from_string(col) - 1]
+                         if r - 1 < len(grid) and column_index_from_string(col) - 1 < len(grid[r - 1])
+                         else None)]
+            # 少數公式本來就算出空白 (=IF(…,"",…))：一半以上的公式都沒有值才算
+            if len(blank) >= 3 and len(blank) * 2 >= len(formulas):
+                issues.append({"kind": "uncached", "sheet": ws.title, "cells": blank})
     finally:
         wb.close()
     return issues
@@ -597,6 +607,10 @@ def _rate_total_issues(sheet: str, formulas: Dict[Tuple[int, str], str],
 
 def format_formula_issue(issue: Dict) -> str:
     """公式問題 -> 說明文字 (給驗證異常、轉檔總表、查驗結果用)。"""
+    if issue.get("kind") == "uncached":
+        cells = issue["cells"]
+        return (f"原帳單問題 (Excel 公式沒有存計算結果)：[{issue['sheet'].strip()}] {len(cells)} 個公式"
+                f"儲存格讀不到金額 (例 {'、'.join(cells[:3])})；請用 Excel 開啟後另存，再重新轉檔")
     if issue.get("kind") == "rate":
         blank = "、".join(issue["blank"][:5]) + (" 等" if len(issue["blank"]) > 5 else "")
         col, start, end = issue["col"], issue.get("start"), issue.get("end")
@@ -1209,6 +1223,15 @@ def invoice_text(pdf_path: str, key: Optional[str],
     return "\n".join(pages[i] for i in keep), noise
 
 
+_POU_FACTORY_RE = re.compile(r"\bPOU\s*-?\s*(YUEN|HUNG|CHEN|SUNG|LI|SHENG|YI)\b")
+
+
+def _consignee_from_filename(path: str) -> Optional[str]:
+    """檔名裡的寶成廠別 ("POUYUEN"、"POU HUNG"、"POULI") -> "POU YUEN" 這種寫法。"""
+    m = _POU_FACTORY_RE.search(os.path.basename(path or "").upper())
+    return f"POU {m.group(1)}" if m else None
+
+
 def parse_invoice_pdf(pdf_path: str, supplier_key: Optional[str] = None,
                        **pdfplumber_kwargs) -> Tuple[Optional[str], List[Dict], str]:
     """讀取PDF、自動判斷供應商 (若未指定)、用對應規則擷取欄位。
@@ -1227,6 +1250,13 @@ def parse_invoice_pdf(pdf_path: str, supplier_key: Optional[str] = None,
                     for row in expand_to_rows(parsed)]
         else:
             rows = []
+        # 帳單內沒有客戶名稱時，用檔名裡的寶成廠別補 (使用者 2026-10-27：
+        # "POU HUNG 09-26 … .xlsx" -> POU HUNG)
+        customer = _consignee_from_filename(pdf_path)
+        if customer:
+            for row in rows:
+                if row.get("consignee") in (None, "", NA):
+                    row["consignee"] = customer
         return key, rows or expand_to_rows({"header": {}, "items": [{}]}), text
 
     # PDF 只看註冊時的 multi_page (同時有 Excel 規則的供應商，multi_page 只是比對分組用)

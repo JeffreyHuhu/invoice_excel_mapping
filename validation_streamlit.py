@@ -100,7 +100,22 @@ KNOWN_SOURCE_ISSUES: Dict[str, Dict[Tuple[str, str], Tuple[str, Optional[set]]]]
         ("amount", "MISSING_REQUIRED"): ("進口每筆出貨都列 VAT 列，VAT PASS THROUGH 為 0 時金額與稅額皆為 N/A", None),
         ("bl_no", "ID_NO_DIGIT"): ("國內段 (Local) 出貨的提單欄本來就寫 LOCAL", {"LOCAL", "Local", "local"}),
     },
+    # 使用者 2026-10-27 確認「原帳單就這樣寫，就是原帳單問題」；只限這幾個原始值
+    "ECOMET": {
+        # [NIKOMAS]_Invoices_5_2025：到達日 21 May 2024 早於開船日 20 Apr 2025、
+        # 貨櫃號碼 BSI8184133 只有 3 個英文字母
+        ("arrive_date", "DATE_ORDER"): ("ECOMET 原帳單的到達日本身就早於開船日", {"21 May 2024"}),
+        ("container_no", "CONTAINER_FORMAT"): ("ECOMET 原帳單的貨櫃號碼本身就少一個英文字母",
+                                               {"BSI8184133"}),
+    },
+    "INDOPROSTIME_TRANSPORT": {
+        # 帳單印 "2026-JUN-31" (6 月沒有 31 日)
+        ("arrive_date", "DATE_FORMAT"): ("INDOPROSTIME 原帳單的日期本身就不存在", {"2026-JUN-31"}),
+        ("onboard_date", "DATE_FORMAT"): ("INDOPROSTIME 原帳單的日期本身就不存在", {"2026-JUN-31"}),
+    },
 }
+# INDO PROSTIME EXPRESS 與 TRANSPORT 是同一套帳單格式
+KNOWN_SOURCE_ISSUES["INDOPROSTIME"] = KNOWN_SOURCE_ISSUES["INDOPROSTIME_TRANSPORT"]
 
 # 供應商例外：這些 (欄位, 規則) 對該供應商不是問題，連附註都不列 (使用者規定)
 SUPPLIER_EXEMPTIONS: Dict[str, set] = {
@@ -116,7 +131,7 @@ SUPPLIER_EXEMPTIONS: Dict[str, set] = {
     "CONG_THANH": {("container_no", "CONTAINER_FORMAT"), ("vessel", "TEXT_NO_LETTER"),
                    ("amount", "AMOUNT_ZERO"), ("amount", "AMOUNT_NEGATIVE")},
     # 越南拖車行 (VN06 BÌNH TÂN、VN16 SONG TRIỀU)：貨櫃號碼欄填車牌，比照 CONG THANH
-    # (2026-10-27 先比照辦理，待使用者確認)
+    # (使用者 2026-10-27 確認)
     "BINH_TAN": {("container_no", "CONTAINER_FORMAT")},
     "SONG_TRIEU": {("container_no", "CONTAINER_FORMAT")},
 }
