@@ -6,14 +6,14 @@ build_pivot_template.py — 用本機 Excel 產生樞紐範本 templates/pivot_t
 pywin32)。匯出時 pivot_export.write_workbook() 只換範本裡的資料，不需要 Excel。
 
 範本內容 (使用者 2026-10-27 指定，給高階主管)：
-  儀表板_總覽    ：KPI (總費用/發票張數/TEU/CBM/每 TEU、每 CBM 成本)、交叉分析篩選器、
+  儀表板_總覽    ：KPI (總費用/發票張數/TEU/CBM/每 TEU 成本)、交叉分析篩選器、
                   每月 × 費用大類、今年 vs 去年、各供應商每月、費用大類 × 供應商
   儀表板_運量航線：交叉分析篩選器、每月櫃型櫃數、航線前 20 名、集團公司 × 費用大類
   樞紐_*         ：各圖表的樞紐分析表，另有供應商排名與占比、單位成本 (供應商/航線)
   明細 / 讀取失敗：Excel 表格，只放一列範例 (不含客戶資料，可 commit)
 交叉分析篩選器 (國家/供應商/年/費用大類) 連動全部樞紐。樞紐分析表不存快取資料
-(SaveData=False)、開檔時自動重新整理。每 TEU 成本 = FCL 費用 / TEU，
-每 CBM 成本 = LCL 費用 / CBM (樞紐計算欄位)。
+(SaveData=False)、開檔時自動重新整理。每 TEU 成本 = FCL 費用 / TEU (樞紐計算欄位)；
+不算每 CBM 成本 (使用者 2026-10-27)。
 
 用法：python build_pivot_template.py
 """
@@ -55,10 +55,8 @@ CBM = (title("cbm"), "CBM 數", QTY)
 FCL_USD = (title("fcl_usd"), "FCL 費用", MONEY)
 LCL_USD = (title("lcl_usd"), "LCL 費用", MONEY)
 PER_TEU = ("每TEU成本", "每 TEU 成本 (USD)", MONEY)
-PER_CBM = ("每CBM成本", "每 CBM 成本 (USD)", MONEY)
 # 樞紐計算欄位 (建在共用快取上，全部樞紐都能用)：sum(分子) / sum(分母)
-CALCULATED = {"每TEU成本": f"='{title('fcl_usd')}'/'{title('teu')}'",
-              "每CBM成本": f"='{title('lcl_usd')}'/'{title('cbm')}'"}
+CALCULATED = {"每TEU成本": f"='{title('fcl_usd')}'/'{title('teu')}'"}
 
 PIVOT_SHEETS = ["樞紐_每月費用大類", "樞紐_年度比較", "樞紐_供應商排名", "樞紐_供應商月份",
                 "樞紐_費用大類", "樞紐_集團公司", "樞紐_運量", "樞紐_單位成本_供應商",
@@ -148,7 +146,7 @@ def add_pivot(wb, cache, sheet_name, heading, rows, cols, values, top_n=None, so
         first.AutoSort(XL_DESCENDING, values[0][1])
         if top_n:
             first.PivotFilters.Add2(Type=XL_TOP_COUNT, DataField=data_fields[0], Value1=top_n)
-    pt.ErrorString = "-"          # 0 TEU / 0 CBM 的單位成本顯示 "-"
+    pt.ErrorString = "-"          # 0 TEU 的單位成本顯示 "-"
     pt.DisplayErrorString = True
     pt.SaveData = False
     pt.HasAutoFormat = False      # 重新整理時不要自動改欄寬
@@ -192,9 +190,9 @@ def main() -> int:
 
         supplier, category = title("supplier"), title("expense_category")
         year, month, year_month = title("year"), title("month"), title("year_month")
-        unit_cost = [FCL_USD, TEU, PER_TEU, LCL_USD, CBM, PER_CBM]
+        unit_cost = [FCL_USD, TEU, PER_TEU, LCL_USD, CBM]
         kpi = add_pivot(wb, cache, "", "", [], [],
-                        [USD_VALUE, INVOICES, TEU, CBM, PER_TEU, PER_CBM],
+                        [USD_VALUE, INVOICES, TEU, CBM, PER_TEU],
                         dest=(dash, "A4"), name="PT_KPI")
         pt = {
             "每月費用大類": add_pivot(wb, cache, "樞紐_每月費用大類", "每月 × 費用大類 (USD)",
@@ -218,7 +216,7 @@ def main() -> int:
                             sort=False),
             "單位成本_供應商": add_pivot(
                 wb, cache, "樞紐_單位成本_供應商",
-                "單位成本 (供應商)：每 TEU = FCL 費用 / TEU，每 CBM = LCL 費用 / CBM",
+                "單位成本 (供應商)：每 TEU 成本 = FCL 費用 / TEU",
                 [supplier], [], unit_cost),
             "單位成本_航線": add_pivot(
                 wb, cache, "樞紐_單位成本_航線", "單位成本 (航線，TEU 前 20 名)",

@@ -29,8 +29,8 @@ from xml.sax.saxutils import escape
 import pandas as pd
 
 import fx
-from expense_normalize import (CONTAINER_TYPES, COUNTRY_FOLDER_CURRENCY, parse_volume,
-                               supplier_country)
+from expense_normalize import (CONTAINER_TYPES, COUNTRY_FOLDER_CURRENCY, FCL_WORD_RE,
+                               LCL_WORD_RE, parse_volume, supplier_country)
 
 TEMPLATE = Path(__file__).with_name("templates") / "pivot_template.xlsx"
 DETAIL_SHEET, DETAIL_TABLE = "明細", "明細表"
@@ -78,7 +78,7 @@ ANALYSIS_COLUMNS: List[Tuple[str, str, str]] = [
     ("teu", "TEU", "count"),
     ("cbm", "CBM", "qty"),
     ("kg", "重量 KG", "qty"),
-    # 單位成本的分子：FCL 費用只除以 TEU、LCL 費用只除以 CBM
+    # 依運送型態分的費用；每 TEU 成本 = FCL 費用 / TEU (不算每 CBM 成本，使用者 2026-10-27)
     ("fcl_usd", "FCL 費用 (USD)", "num"),
     ("lcl_usd", "LCL 費用 (USD)", "num"),
     ("invoice_count", "發票張數", "count"),
@@ -147,7 +147,16 @@ def add_helper_columns(df: pd.DataFrame) -> pd.DataFrame:
     # 運量：材積原文 -> 數字。同一供應商 + 提單號碼 (沒有就用發票號碼) + 材積 = 同一批貨，
     # 只記在第一列 (使用者 2026-10-27：每家供應商各算一次)
     parsed = {v: parse_volume(v) for v in df["volume"].dropna().unique()}
-    mode = df["volume"].map(pd.Series({v: r["mode"] for v, r in parsed.items()}, dtype=object))
+    # 運送型態：整張帳單 (費用名稱 + 材積) 有 FCL/櫃型字樣 = FCL，有 CFS/CBM 字樣 = LCL
+    # (兩種都有以 FCL 為準)；都沒有才看材積格式 (使用者 2026-10-27)
+    invoice = pd.Series(list(zip(df["supplier"], df["invoice_no"].fillna(df["source_file"]))),
+                        index=df.index)
+    text = df["description_raw"].fillna("") + " " + df["volume"].fillna("")
+    has_fcl = text.str.contains(FCL_WORD_RE).groupby(invoice).transform("any")
+    has_lcl = text.str.contains(LCL_WORD_RE).groupby(invoice).transform("any")
+    by_volume = df["volume"].map(pd.Series({v: r["mode"] for v, r in parsed.items()},
+                                           dtype=object))
+    mode = by_volume.where(~(has_fcl | has_lcl), has_fcl.map({True: "FCL", False: "LCL"}))
     df["ship_mode"] = mode
     first = ~pd.DataFrame({"s": df["supplier"], "b": df["bl_no"].fillna(df["invoice_no"]),
                            "v": df["volume"]}).duplicated()

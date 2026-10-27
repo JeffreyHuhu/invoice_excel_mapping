@@ -190,6 +190,12 @@ _FCL_RE = re.compile(r"(\d+)\s*[X×*]\s*(20|40|45)\s*['’]?\s*(?:FT\b|FEET\b)?\
 _CBM_RE = re.compile(r"(\d[\d,]*(?:\.\d+)?)\s*(?:M3|M³|CBM)\b", re.IGNORECASE)
 _KG_RE = re.compile(r"(\d[\d,]*(?:\.\d+)?)\s*(?:KGS?|KILOS?)\b", re.IGNORECASE)
 _BARE_NUMBER_RE = re.compile(r"\d[\d,]*(?:\.\d+)?")
+# 運送型態字樣 (使用者 2026-10-27)：以整張帳單 (費用名稱 + 材積) 判斷，兩種都有以 FCL 為準
+#   有 FCL 或櫃型 (40HC、20' GP、1X40) = 整櫃；有 CFS、CBM (或 LCL) = 散貨
+FCL_WORD_RE = re.compile(r"\bFCL\b|\b(?:20|40|45)\s*(?:'|FT|FEET)?\s*"
+                         r"(?:GP|DC|DV|HC|HQ|RF|RH|OT|FR|ST|SD)\b|\b\d+\s*X\s*(?:20|40|45)\b",
+                         re.IGNORECASE)
+LCL_WORD_RE = re.compile(r"\bCFS\b|\bCBM\b|\bLCL\b", re.IGNORECASE)
 
 
 def _container_type(size: str, code: Optional[str]) -> str:
