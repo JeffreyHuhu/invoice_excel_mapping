@@ -393,6 +393,8 @@ SUPPLIER_CURRENCY: dict = {
     # 越南供應商 (Excel 對帳表，金額為越南盾)
     "CÔNG TY TNHH GIAO NHẬN THƯƠNG MẠI RỒNG Á CHÂU": "VND",
     "CÔNG TY TNHH DỊCH VỤ GIAO NHẬN VẬN TẢI VÀ THƯƠNG MẠI CÔNG THÀNH": "VND",
+    # 台灣曜捷 (OPL) 的美金 Debit Note，放在印尼資料夾但金額是美金 (使用者 2026-10-28)
+    "ORIENTAL POWER LOGISTICS CO., LTD.": "USD",
 }
 
 # INVOICE NO 不是供應商自己的帳單號碼 (例如寶成的發票號)、帳單也沒有發票日期的

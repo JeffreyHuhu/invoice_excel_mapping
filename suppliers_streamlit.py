@@ -6617,9 +6617,73 @@ register_supplier(
 
 def detect_opl(text: str) -> bool:
     """同一家也會附提單 (B/L) 文件，上面也有 NCL 名稱但不是請款單，所以
-    要同時有 "INV NO." 才算。"""
+    要同時有 "INV NO." 才算。台灣曜捷 (OPL) 的美金 Debit Note 見 _is_opl_dn()。"""
     upper = text.upper()
-    return "NCL INTER LOGISTIK" in upper and re.search(r"\bINV\s*NO\.", upper) is not None
+    return ("NCL INTER LOGISTIK" in upper and re.search(r"\bINV\s*NO\.", upper) is not None) \
+        or _is_opl_dn(text)
+
+
+# --- OPL 美金 Debit Note (使用者 2026-10-28：OPL 就是曜捷運通，"OUTBOUND DN" 就是
+# OPL 美金 Debit Note) ---------------------------------------------------------------
+# 台灣曜捷運通開的 "OUTBOUND INVOICE" / "OUTBOUND DEBIT NOTE"，金額是美金。抬頭的
+# 公司名稱每個字重複 4 次 (粗體疊印)，不用。欄位：DATE (MM/DD/YYYY，有些沒有)、
+# S/O#、FILE NO、HB/L、ON BOARD、POL、Dest、CNEE、VSL/VOY/LINE、(CBM)/(KGS)、CNTR NO。
+# 明細：ITEM NAME QUANTITY UNIT PRICE AMT COLLECT AMT ("SEA FREIGHT 2.877 CBM USD 36.00
+# 103.57 US$ 103.57"、數量可能寫 "MINI")，合計 "TOTAL: US$ 487.58" 或只有 "US$ 259.95"。
+# 供應商名稱固定 _OPL_DN_SUPPLIER：資料庫用它判斷幣別是 USD (SUPPLIER_CURRENCY)。
+_OPL_DN_SUPPLIER = "ORIENTAL POWER LOGISTICS CO., LTD."
+_OPL_DN_ITEM_RE = re.compile(
+    # 數量："2.877 CBM"、"1 SET"、"MINI"、整櫃 "1X20'GP"
+    r"^(?P<desc>[A-Z][A-Z0-9/&().\- ]*?)\s+(?:[\d.,]+\s+[A-Z]+|MINI|\d+X\d{2}'?[A-Z]{0,2})\s+USD\s+[\d,.]+\s+"
+    r"(?P<amount>[\d,.]+)\s+US\$\s*[\d,.]+\s*$")
+
+
+def _is_opl_dn(text: str) -> bool:
+    upper = text.upper()
+    return bool(re.search(r"OUTBOUND\s+(?:INVOICE|DEBIT\s+NOTE)", upper)) and "FILE NO" in upper \
+        and "HB/L" in upper
+
+
+def _opl_dn_total(text: str) -> Optional[float]:
+    return _opl_amount(_search(r"(?m)^\s*(?:TOTAL\s*:\s*)?US\$\s*([\d,.]+)\s*$", text))
+
+
+def _opl_dn_date(value: Optional[str]) -> Optional[str]:
+    """'09/18/2026' (月/日/年) 或 'SEP. 18,2026' -> '18 Sep 2026'。"""
+    m = re.match(r"(\d{1,2})/(\d{1,2})/(\d{4})$", value or "")
+    if m:
+        return datetime.date(int(m.group(3)), int(m.group(1)), int(m.group(2))).strftime("%d %b %Y")
+    m = re.match(r"([A-Za-z]{3})\.?\s*(\d{1,2})\s*,\s*(\d{4})", value or "")
+    return _format_date_en_from_month_name(m.group(2), m.group(1), m.group(3)) if m else value
+
+
+def _parse_opl_dn(text: str) -> Dict:
+    onboard = _opl_dn_date(_search(r"ON BOARD\s*:\s*([A-Z]{3}\.?\s*\d{1,2}\s*,\s*\d{4})", text))
+    kg = _search(r"\(KGS\)\s*:\s*([\d,.]+)", text)
+    cntr = re.findall(r"CNTR NO\s*:\s*([A-Z]{4}\d{7})(?:/(\d{2}'?[A-Z]{0,2}))?", text)
+    # 整櫃 (明細數量寫 "1X20'GP") 用櫃型；併櫃 (CFS/CBM 計價) 用 CBM
+    fcl = re.search(r"\s\d+X\d{2}'", text) is not None
+    header = {
+        "supplier": _OPL_DN_SUPPLIER,
+        # 同一個 FILE NO 會有好幾張 HB/L 各自請款 (2026-10-28 抽樣 CT-2609648)，發票號碼用 HB/L
+        "invoice_no": _search(r"HB/L\s*:\s*(\S+)", text),
+        # 沒有 DATE 的 Debit Note 暫用開船日 (待使用者確認)
+        "invoice_date": _opl_dn_date(_search(r"(?m)^\s*DATE\s*:\s*(\d{1,2}/\d{1,2}/\d{4})", text)) or onboard,
+        "consignee": _search(r"CNEE\s*:\s*(.+?)(?:\s+CLOSING\s*:|$)", text),
+        "order_no": _search(r"S/O#\s*:\s*(\S+)", text),
+        "onboard_date": onboard,
+        "bl_no": _search(r"HB/L\s*:\s*(\S+)", text),
+        "port_of_loading": _search(r"POL\s*:\s*(.+?)\s*$", text),
+        "port_of_discharge": _search(r"Dest\s*:\s*(.+?)\s*$", text),
+        "vessel": _search(r"VSL/VOY/LINE\s*:\s*(.+?)(?:\s+\(Normal\))?(?:\s+Sales\s*:|$)", text),
+        "container_no": ", ".join(c for c, _ in cntr) if cntr else None,
+        "volume": _fmt_volume(containers=[(1, size) for _, size in cntr if size] if fcl else None,
+                              cbm=_search(r"\(CBM\)\s*:\s*([\d.]+)", text),
+                              kg=kg.replace(",", "") if kg else None),
+    }
+    items = [{"description": m.group("desc").strip(), "amount": _opl_amount(m.group("amount")), "vat": None}
+             for m in (_OPL_DN_ITEM_RE.match(ln.strip()) for ln in text.splitlines()) if m]
+    return {"header": header, "items": items or [{"description": None, "amount": None, "vat": None}]}
 
 
 _OPL_LABELS = [
@@ -6667,6 +6731,8 @@ def _opl_date(value: Optional[str]) -> Optional[str]:
 
 
 def parse_opl(text: str) -> Dict:
+    if _is_opl_dn(text):
+        return _parse_opl_dn(text)
     lines = [ln.strip() for ln in text.splitlines() if ln.strip()]
     header = {
         "supplier": lines[0] if lines else None,
@@ -6701,6 +6767,8 @@ def parse_opl(text: str) -> Dict:
 
 
 def _opl_extract_total(text: str) -> Optional[float]:
+    if _is_opl_dn(text):
+        return _opl_dn_total(text)
     return _opl_amount(_search(r"SUB\s*TOTAL\s*:\s*([\d,.]+)", text))
 
 
