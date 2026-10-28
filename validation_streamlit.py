@@ -87,6 +87,9 @@ KNOWN_SOURCE_ISSUES: Dict[str, Dict[Tuple[str, str], Tuple[str, Optional[set]]]]
     "MAERSK": {
         ("arrive_date", "DATE_FORMAT"): ("MAERSK 原帳單的 ETA 本身就是「--」", {"--"}),
         ("arrive_date", "DATE_ORDER"): ("MAERSK 原帳單的 ETA 本身就早於 ETD", None),
+        # ETA 晚於今天 60 天以上 (例如 5617816192 ETD 14-Jul-2026 ETA 26-Feb-2027)：
+        # 照抄 PDF 的「ETA:」，使用者 2026-10-28：在 Excel 備註就好，不計入
+        ("arrive_date", "DATE_OUT_OF_RANGE"): ("MAERSK 原帳單的 ETA 本身就寫這個日期", None),
     },
     "DWIHARTA": {
         # 沒有船名時 Vessel 欄印佔位符號 ". / ." (使用者確認)、"- / -"、"0 / 0"
@@ -124,8 +127,6 @@ SUPPLIER_EXEMPTIONS: Dict[str, set] = {
     # 層級的扣款 (例如貨損)，使用者確認正確
     # PANCARAN：沒有船名時 VESSEL NAME 印 ". / ." "- / -" (使用者確認，不列入)
     "PANCARAN": {("vessel", "TEXT_NO_LETTER")},
-    # MAERSK：ETA 日期不合理 (例如 5617816192 的 ETA 26-Feb-2027) 是原帳單本身寫錯
-    "MAERSK": {("arrive_date", "DATE_OUT_OF_RANGE")},
     # DWIHARTA：到達日早於開船日是原帳單本身寫錯 (使用者確認，例如 INJK-2503-1051)
     "DWIHARTA": {("arrive_date", "DATE_ORDER")},
     "CONG_THANH": {("container_no", "CONTAINER_FORMAT"), ("vessel", "TEXT_NO_LETTER"),

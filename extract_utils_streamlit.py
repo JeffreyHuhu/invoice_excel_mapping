@@ -154,13 +154,26 @@ def _ocr_page_text(pdf_path: str, page_index: int, page) -> str:
             except Exception:
                 rotate_by = 0
             if rotate_by:
-                image = image.rotate(-rotate_by, expand=True)
+                # 方向偵測會誤判：MAERSK 掃描 Faktur Pajak (04002500040780943) 正的頁被判
+                # 轉 180 度，轉過去只讀到亂碼。兩個方向都算 OCR 平均信心，取高的
+                rotated = image.rotate(-rotate_by, expand=True)
+                if _ocr_confidence(image) > _ocr_confidence(rotated):
+                    rotate_by = 0
+                else:
+                    image = rotated
             text = pytesseract.image_to_string(image) or ""
         except Exception:
             text = ""
 
     _OCR_TEXT_CACHE[cache_key] = text
     return text
+
+
+def _ocr_confidence(image) -> float:
+    """tesseract 逐字信心的平均值 (0~100)。轉錯方向的圖約 20 出頭，正的約 35 以上。"""
+    data = pytesseract.image_to_data(image, output_type=pytesseract.Output.DICT)
+    confs = [float(c) for c, w in zip(data["conf"], data["text"]) if w.strip() and float(c) >= 0]
+    return sum(confs) / len(confs) if confs else 0.0
 
 
 # 掃描檔省算力 (使用者規定，所有供應商適用)：掃描頁先用低解析度、不做轉向
