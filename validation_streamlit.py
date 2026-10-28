@@ -147,6 +147,11 @@ SUPPLIER_VALUE_EXEMPTIONS: Dict[str, Dict[Tuple[str, str], set]] = {
     "INDOPROSTIME_TRANSPORT": {("bl_no", "ID_NO_DIGIT"): {"DIRECT TO CON", "DIRCET TO CON", "DIRET TO CONS"}},
 }
 
+# 不計入的客戶：CONSIGNEE 去掉空白與符號後包含這個字就列 ERROR (使用者 2026-10-28)
+EXCLUDED_CONSIGNEES: Dict[str, str] = {
+    "POUPHONG": "POU PHONG VIETNAM COMPANY LIMITED",
+}
+
 # 日期合理範圍：早於這一年，或晚於今天 + 這麼多天，視為可疑
 _MIN_REASONABLE_YEAR = 2015
 _MAX_FUTURE_DAYS = 60
@@ -216,6 +221,12 @@ def _check_header(row: Dict) -> List[Dict]:
         if _is_blank(row.get(code)):
             issues.append(_issue(ERROR, code, "MISSING_REQUIRED",
                                  f"必填欄位「{FIELD_LABELS[code]}」抓不到值"))
+    # 不計入的客戶 (使用者 2026-10-28：給 Pou Phong 的發票不計入，列 ERROR)
+    flat = re.sub(r"[^A-Z]", "", str(row.get("consignee") or "").upper())
+    for key, name in EXCLUDED_CONSIGNEES.items():
+        if key in flat:
+            issues.append(_issue(ERROR, "consignee", "EXCLUDED_CONSIGNEE",
+                                 f"客戶是 {name}，這張發票不計入"))
     issues.extend(_check_optional_formats(row))
 
     today = datetime.date.today()

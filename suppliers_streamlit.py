@@ -3167,11 +3167,67 @@ def _evergreen_extract_total(text: str) -> Optional[int]:
     return grand_total - vat
 
 
+# --- DWIHARTA Excel 對帳彙總表 rekap (使用者 2026-10-28：要當帳單擷取) --------
+# 一張工作表好幾個發票區塊 (2026-10-28 抽樣 "rekap 202602")：發票號碼 INJK-2602-0896
+# 在表頭上方，每列一趟車，TRUCKING 到 JUMLAH 之前都是費用，"TOTAL" 列勾稽，
+# 下方簽名日期 "Jakarta, 13 Feb 2026" 當發票日期。沒有稅額 (稅在 PDF 發票上)。
+def _dwiharta_sheets(book) -> Tuple[List[Dict], List[Dict]]:
+    docs, totals = [], []
+    for _, rows in book.sheets:
+        heads = [i for i, r in enumerate(rows)
+                 if {"TRUCKING", "JUMLAH", "FEET"} <= {_vn_text(c).strip().upper() for c in r}]
+        for n, head in enumerate(heads):
+            stop = heads[n + 1] if n + 1 < len(heads) else len(rows)
+            above = " ".join(_vn_text(c) for r in rows[max(0, head - 7):head] for c in r if c not in (None, ""))
+            inv = re.findall(r"INJK-\d{4}-\d{4}", above)
+            if not inv:
+                continue
+            labels = [_vn_text(c).strip().upper() for c in rows[head]]
+            start, end = labels.index("TRUCKING"), labels.index("JUMLAH")
+            cont_col = next((k for k, v in enumerate(labels) if "CONTAINER" in v), None)
+            feet_col = labels.index("FEET")
+            consignee = next((_vn_text(c).strip() for r in rows[max(0, head - 7):head] for c in r
+                              if _vn_text(c).strip().upper().startswith("PT.")), None)
+
+            def label(k):
+                sub = _vn_text(_vn_cell(rows[head + 1], k)).strip()
+                return re.sub(r"\s+", " ", f"{_vn_text(rows[head][k]).strip()} {sub}").strip()
+
+            items, total, date = [], None, None
+            for r in rows[head + 1:stop]:
+                text = " ".join(_vn_text(c) for c in r if c not in (None, ""))
+                if _vn_num(_vn_cell(r, 0)) is not None and total is None:
+                    box = _vn_text(_vn_cell(r, cont_col)).strip() if cont_col is not None else ""
+                    feet = _vn_text(_vn_cell(r, feet_col)).strip()
+                    extra = {"container_no": box if re.search(r"\d", box) else None,
+                             "volume": f"1X{feet}" if re.fullmatch(r"\d{2}'?", feet) else None}
+                    for k in range(start, end):
+                        amount = _vn_amount(_vn_cell(r, k))
+                        if amount:
+                            items.append({"description": label(k), "amount": amount, "vat": None, **extra})
+                elif total is None and re.search(r"\bTOTAL\b", text.upper()):
+                    total = _vn_num(_vn_cell(r, end))
+                m = re.search(r"Jakarta\s*,\s*(\d{1,2})\s+([A-Za-z]+)\s+(\d{4})", text, re.I)
+                if m and date is None:
+                    month = INDO_MONTHS.get(m.group(2).lower()) or next(
+                        (i for i in range(1, 13) if datetime.date(2000, i, 1).strftime("%b").lower()
+                         == m.group(2)[:3].lower()), None)
+                    if month:
+                        date = datetime.date(int(m.group(3)), int(month), int(m.group(1))).strftime("%d %b %Y")
+            if not items:
+                continue
+            docs.append({"header": {"invoice_no": inv[-1], "supplier": "PT. DWIHARTA LOGISTINDO",
+                                    "consignee": consignee, "invoice_date": date}, "items": items})
+            totals.append({"invoice_no": inv[-1], "total": total, "grand_total": None, "final_total": None})
+    return docs or [{"header": {}, "items": [{"description": None, "amount": None}]}], totals
+
+
 register_supplier(
     "DWIHARTA", "PT. DWIHARTA LOGISTINDO", detect_dwiharta, parse_dwiharta,
     extract_total=_dwiharta_extract_total,
     extract_vat_total=_dwiharta_extract_vat_total,
     extract_grand_total=_dwiharta_extract_grand_total,
+    sheet_parse=lambda book: _dwiharta_sheets(book)[0], sheet_totals=lambda book: _dwiharta_sheets(book)[1],
 )
 register_supplier(
     "KUEHNE_NAGEL", "KUEHNE NAGEL INDONESIA", detect_kuehne_nagel, parse_kuehne_nagel,
@@ -5022,9 +5078,84 @@ def _ecomet_extract_grand_total(text: str) -> Optional[int]:
     return _ecomet_clean_amount(m.group(1)) if m else None
 
 
+# --- ECOMET Excel 對帳彙總表 REKAP EXPORT (使用者 2026-10-28：要當帳單擷取) ----
+# 每張工作表一個品牌 (ASICS/NIKE/ADIDAS)，抬頭 "INV : D26-03-0224"，每列一個貨櫃：
+# TRUCKING 到 JUMLAH 之間的欄都是費用 (OT/ON、REPO、EARLY STACKING、LOLO / BANDARA…)，
+# 下一列是各欄合計 (JUMLAH = 全部費用，用來勾稽)。沒有稅額與含稅合計。
+# 表格下方留有舊範本 (2019 年資料、"TO : Bpk UUT")，只讀第一段。
+# 同一發票號碼另有 "xxx REVISE" 工作表時，以 REVISE 為準 (2026-10-28 抽樣
+# "REKAP EXPORT NIKOMAS PERIODE 23 FEBRUARI - 28 FEBRUARI 2026"：ASICS REVISE / ASICS)。
+_ECOMET_SUPPLIER = "PT. TRANS ECOMET GLOBAL"
+
+
+def _ecomet_rekap_sheet(name: str, rows: List[list]) -> Optional[Tuple[Dict, Dict]]:
+    head = next((i for i, r in enumerate(rows[:20])
+                 if {"TRUCKING", "JUMLAH", "CONTAINER"} <= {_vn_text(c).strip().upper() for c in r}), None)
+    if head is None:
+        return None
+    labels = [_vn_text(c).strip().upper() for c in rows[head]]
+    start, end = labels.index("TRUCKING"), labels.index("JUMLAH")
+    col = {k: labels.index(k) for k in ("CONTAINER", "FEET", "JOB NO :") if k in labels}
+    top = " ".join(_vn_text(c) for r in rows[:head] for c in r if c not in (None, ""))
+    inv = re.search(r"INV\s*:\s*([A-Z]\d{2}-\d{2}-\d+)", top)
+    if not inv:
+        return None
+    consignee = next((_vn_text(c).strip() for r in rows[1:head] for c in r
+                      if _vn_text(c).strip().upper().startswith("PT.") and "ECOMET" not in _vn_text(c).upper()), None)
+
+    def label(k):
+        sub = _vn_text(_vn_cell(rows[head + 1], k)).strip() if head + 1 < len(rows) else ""
+        return re.sub(r"\s+", " ", f"{_vn_text(rows[head][k]).strip()} {sub}").strip()
+
+    items: List[Dict] = []
+    total = None
+    dates = []
+    for r in rows[head + 1:]:
+        if _vn_num(_vn_cell(r, 0)) is not None:          # 明細列 (NO 欄是序號)
+            feet = _vn_text(_vn_cell(r, col.get("FEET"))).strip() if "FEET" in col else ""
+            extra = {"container_no": _vn_text(_vn_cell(r, col["CONTAINER"])).strip() or None
+                     if "CONTAINER" in col else None,
+                     "volume": f"1X{feet}" if re.fullmatch(r"\d{2}'?", feet) else None,
+                     "order_no": _vn_text(_vn_cell(r, col["JOB NO :"])).strip() or None
+                     if "JOB NO :" in col else None}
+            for k in range(start, end):
+                amount = _vn_amount(_vn_cell(r, k))
+                if amount:
+                    items.append({"description": label(k), "amount": amount, "vat": None, **extra})
+            d = _vn_cell(r, 2)
+            if isinstance(d, (datetime.date, datetime.datetime)):
+                dates.append(d)
+        elif not _vn_text(_vn_cell(r, 0)).strip() and _vn_num(_vn_cell(r, start)) is not None:
+            total = _vn_num(_vn_cell(r, end))                 # 各欄合計列：第一段到這裡結束
+            break
+    if not items:
+        return None
+    # 表上沒有發票日期：暫用最後一個裝櫃日 (TANGGAL STUFFING)，待使用者確認
+    date = max(dates).strftime("%d %b %Y") if dates else None
+    header = {"invoice_no": inv.group(1), "supplier": _ECOMET_SUPPLIER, "consignee": consignee,
+              "invoice_date": date}
+    return ({"header": header, "items": items},
+            {"invoice_no": inv.group(1), "total": total, "grand_total": None, "final_total": None})
+
+
+def _ecomet_sheets(book) -> Tuple[List[Dict], List[Dict]]:
+    found: Dict[str, Tuple[bool, Tuple[Dict, Dict]]] = {}
+    for name, rows in book.sheets:
+        got = _ecomet_rekap_sheet(name, rows)
+        if not got:
+            continue
+        inv, revise = got[1]["invoice_no"], "REVISE" in name.upper()
+        if inv not in found or (revise and not found[inv][0]):
+            found[inv] = (revise, got)
+    docs = [g[0] for _, g in found.values()]
+    return docs or [{"header": {}, "items": [{"description": None, "amount": None}]}], \
+        [g[1] for _, g in found.values()]
+
+
 register_supplier(
     "ECOMET", "PT. TRANS ECOMET GLOBAL", detect_ecomet, parse_ecomet,
     multi_page=True, extract_grand_total=_ecomet_extract_grand_total,
+    sheet_parse=lambda book: _ecomet_sheets(book)[0], sheet_totals=lambda book: _ecomet_sheets(book)[1],
 )
 
 
@@ -5419,7 +5550,70 @@ def detect_handal(text: str) -> bool:
     upper = text.upper()
     if "HANDAL MANDIRI TRANSINDO" in upper or "HANDAL" in upper:
         return True
+    # Excel 對帳彙總表 (2026-10-28 抽樣)：沒有公司名稱，用 "INVOICE NO : HET…" 加表頭 NO POL
+    if _HANDAL_XLS_INV_RE.search(upper) and "NO POL" in upper:
+        return True
     return bool(_HANDAL_INVOICE_NO_RE.search(text) and re.search(r"RUPIAH\s*#", upper))
+
+
+# --- HANDAL Excel 對帳彙總表 (使用者 2026-10-28：要當帳單擷取) -----------------
+# 每張工作表一張發票 (HT = 拖車 HET…、HL = 吊櫃 HEL…)，抬頭 "INVOICE NO : HET21691225"
+# 或 "NO INVOICE = HET20550425"；每列一個貨櫃，FEET 右邊到 JUMLAH 之前都是費用
+# (TRUCKING、CUSTOM、LIFT ON / LIFT OFF、BONGKARAN BANDARA…)，下一列是各欄合計。
+# 沒有稅額與發票日期。沒有發票號碼的工作表 ("ON ADIDAS" 加收紀錄) 不擷取。
+_HANDAL_XLS_INV_RE = re.compile(r"(?:INVOICE\s*NO|NO\s*INVOICE)\s*[:=]\s*(HE[A-Z]\d{8})")
+
+
+def _handal_rekap_sheet(rows: List[list]) -> Optional[Tuple[Dict, Dict]]:
+    head = next((i for i, r in enumerate(rows[:15])
+                 if {"NO POL", "FEET", "JUMLAH"} <= {_vn_text(c).strip().upper() for c in r}), None)
+    if head is None:
+        return None
+    top = " ".join(_vn_text(c) for r in rows[:head] for c in r if c not in (None, "")).upper()
+    inv = _HANDAL_XLS_INV_RE.search(top)
+    if not inv:
+        return None
+    labels = [_vn_text(c).strip().upper() for c in rows[head]]
+    feet_col, end = labels.index("FEET"), labels.index("JUMLAH")
+    cont_col = next((k for k, v in enumerate(labels) if v.startswith("NO CONT")), None)
+    consignee = next((_vn_text(c).strip() for r in rows[:head] for c in r
+                      if re.match(r"PT\.?\s", _vn_text(c).strip().upper())), None)
+
+    def label(k):
+        sub = _vn_text(_vn_cell(rows[head + 1], k)).strip() if head + 1 < len(rows) else ""
+        return re.sub(r"\s+", " ", f"{_vn_text(rows[head][k]).strip()} {sub}").strip()
+
+    items, total, dates = [], None, []
+    for r in rows[head + 1:]:
+        if _vn_num(_vn_cell(r, 0)) is not None:          # 明細列 (NO 欄是序號)
+            feet = _vn_text(_vn_cell(r, feet_col)).strip()
+            # 貨櫃欄寫車型 ("WINGBOX"、"BOX"，沒有數字) 時不是貨櫃號碼
+            box = _vn_text(_vn_cell(r, cont_col)).strip() if cont_col is not None else ""
+            extra = {"container_no": box if re.search(r"\d", box) else None,
+                     "volume": f"1X{feet}" if re.fullmatch(r"\d{2}'?", feet) else None}
+            for k in range(feet_col + 1, end):
+                amount = _vn_amount(_vn_cell(r, k))
+                if amount:
+                    items.append({"description": label(k), "amount": amount, "vat": None, **extra})
+            d = _vn_cell(r, 1)
+            if isinstance(d, (datetime.date, datetime.datetime)):
+                dates.append(d)
+        elif _vn_num(_vn_cell(r, end)) is not None:
+            total = _vn_num(_vn_cell(r, end))                 # 各欄合計列
+            break
+    if not items:
+        return None
+    # 表上沒有發票日期：暫用最後一個裝貨日 (TGL MUAT)，待使用者確認
+    header = {"invoice_no": inv.group(1), "supplier": "PT. HANDAL MANDIRI TRANSINDO", "consignee": consignee,
+              "invoice_date": max(dates).strftime("%d %b %Y") if dates else None}
+    return ({"header": header, "items": items},
+            {"invoice_no": inv.group(1), "total": total, "grand_total": None, "final_total": None})
+
+
+def _handal_sheets(book) -> Tuple[List[Dict], List[Dict]]:
+    got = [g for g in (_handal_rekap_sheet(rows) for _, rows in book.sheets) if g]
+    return ([g[0] for g in got] or [{"header": {}, "items": [{"description": None, "amount": None}]}],
+            [g[1] for g in got])
 
 
 def parse_handal(text: str) -> Dict:
@@ -5443,6 +5637,7 @@ register_supplier(
     "HANDAL", "PT. Handal Mandiri Transindo", detect_handal, parse_handal,
     multi_page=True, force_ocr=True,
     extract_total=_handal_extract_total,
+    sheet_parse=lambda book: _handal_sheets(book)[0], sheet_totals=lambda book: _handal_sheets(book)[1],
 )
 
 
@@ -5631,6 +5826,117 @@ def _pss_extract_total_paid(text: str) -> Optional[int]:
     return _pss_clean_amount(m.group(1)) if m else None
 
 
+# --- PUTRA Excel 帳單 (使用者 2026-10-28：REKAP TAGIHAN 要當帳單擷取) ----------
+# 兩種版面，每張顯示中的工作表是一張發票：
+#   1. REKAP TAGIHAN (REKAPITULASI BIAYA)：每列一趟車，費用欄用代號列 A.~G. 標示
+#      (A~F 課 PPN、G = LOLO NON-DPP)，H. = JUMLAH。表尾 DPP / PPN / Non DPP /
+#      GRAND TOTAL / PPH 23 / TOTAL YANG DITAGIHKAN。發票號碼在抬頭 "NO. INV : PSS-…"
+#      (ADIDAS 2025-01 抬頭有兩個 NO. INV，上一張的沒刪，取最後一個)。
+#   2. INVOICE (跟 PDF 發票同格式)：工作表轉成文字，沿用 PDF 的擷取與三段稽核。
+# 同一張發票 PDF 也有時，資料庫依「供應商 + 發票號碼」只留一份。
+_PSS_SUPPLIER = "PT. PUTRA SEJAHTERA SENTOSA"
+
+
+def _pss_cell_text(value) -> str:
+    """儲存格 -> PDF 文字寫法：整數金額加千分位 (153490000.0 -> 153,490,000)。"""
+    if isinstance(value, float) and abs(value - round(value)) < 0.01:
+        value = int(round(value))
+    if isinstance(value, int) and not isinstance(value, bool):
+        return f"{value:,}"
+    if isinstance(value, (datetime.date, datetime.datetime)):
+        return value.strftime("%d/%m/%Y")
+    return re.sub(r"\s+", " ", str(value)).strip()
+
+
+def _pss_sheet_as_text(rows: List[list]) -> str:
+    return "\n".join("  ".join(t for t in (_pss_cell_text(c) for c in r if c not in (None, "")) if t)
+                     for r in rows)
+
+
+def _pss_rekap_sheet(rows: List[list]) -> Optional[Tuple[Dict, Dict]]:
+    """REKAP TAGIHAN 一張工作表 -> (發票, 合計)；不是這個版面回傳 None。"""
+    head = next((i for i, r in enumerate(rows[:15])
+                 if {"TANGGAL", "TRUCKING"} <= {_vn_text(c).strip().upper() for c in r}), None)
+    if head is None:
+        return None
+    letters = next((i for i in range(head + 1, min(head + 4, len(rows)))
+                    if sum(bool(re.fullmatch(r"[A-H]\.?", _vn_text(c).strip())) for c in rows[i]) >= 3), None)
+    if letters is None:
+        return None
+    code = {k: _vn_text(c).strip().rstrip(".") for k, c in enumerate(rows[letters])
+            if re.fullmatch(r"[A-H]\.?", _vn_text(c).strip())}
+    fee_cols = [k for k, v in code.items() if v != "H"]
+    sum_col = next((k for k, v in code.items() if v == "H"), None)
+
+    def label(k):
+        parts = [_vn_text(_vn_cell(rows[i], k)).strip() for i in range(head, letters)]
+        return re.sub(r"\s+", " ", " ".join(p for p in parts if p))
+
+    labels = [_vn_text(c).strip().upper() for c in rows[head]]
+    container_col = labels.index("CONTAINER") if "CONTAINER" in labels else None
+    feet_col = labels.index("FEET") if "FEET" in labels else None
+    top = " ".join(_vn_text(c) for r in rows[:head] for c in r if c not in (None, ""))
+    inv = re.findall(r"NO\.\s*INV\s*:\s*(\S+)", top)
+    consignee = next((re.sub(r"\s*-\s*FCL.*$", "", _vn_text(c).strip()) for r in rows[:head] for c in r
+                      if _vn_text(c).strip().upper().startswith("PT.") and "PUTRA" not in _vn_text(c).upper()), None)
+    header = {"invoice_no": inv[-1] if inv else None, "supplier": _PSS_SUPPLIER, "consignee": consignee,
+              "invoice_date": None}
+    items: List[Dict] = []
+    totals = {"invoice_no": header["invoice_no"], "total": None, "grand_total": None, "final_total": None}
+    for r in rows[letters + 1:]:
+        first = _vn_text(_vn_cell(r, 0)).strip()
+        nums = [x for x in (_vn_num(c) for c in r) if x is not None]
+        if _vn_num(_vn_cell(r, 0)) is not None:          # 明細列 (NO 欄是序號)
+            box = _vn_text(_vn_cell(r, container_col)).strip() if container_col is not None else ""
+            feet = _vn_text(_vn_cell(r, feet_col)).strip() if feet_col is not None else ""
+            extra = {"container_no": box if box and box.upper() != "BOX" else None,
+                     "volume": f"1X{feet}" if re.fullmatch(r"\d{2}'?", feet) else None}
+            for k in fee_cols:
+                amount = _vn_amount(_vn_cell(r, k))
+                if amount:
+                    items.append({"description": label(k), "amount": amount, "vat": None, **extra})
+        elif not first and sum_col is not None and totals["total"] is None and nums:
+            totals["total"] = _vn_num(_vn_cell(r, sum_col))   # 各欄合計列：JUMLAH = 全部費用
+        elif nums:
+            text, value = first.upper(), nums[-1]
+            m = re.search(r"PPN\s*(\d[\d,]*)\s*%", text)
+            if m:
+                items.append({"description": f"PPN {m.group(1)} %", "amount": None, "vat": round(value, 2)})
+            m = re.search(r"PPH\s*(?:\d+\s*,\s*)?(\d[\d,]*)\s*%", text)
+            if m:
+                items.append({"description": f"PPH {m.group(1)}%", "amount": None, "vat": round(value, 2)})
+            if "GRAND TOTAL" in text:
+                totals["grand_total"] = value
+            elif "TOTAL YANG DITAGIH" in text or "TOTAL YANG DIBAYAR" in text:
+                totals["final_total"] = value
+        sign = re.search(r"JAKARTA\s*,\s*(\d{1,2})\s+([A-Za-z]+)\s+(\d{4})",
+                         " ".join(_vn_text(c) for c in r if c not in (None, "")), re.I)
+        if sign and INDO_MONTHS.get(sign.group(2).lower()):
+            header["invoice_date"] = _pss_format_date(sign.group(1), INDO_MONTHS[sign.group(2).lower()],
+                                                      sign.group(3))
+    return {"header": header, "items": items or [{"description": None, "amount": None, "vat": None}]}, totals
+
+
+def _pss_sheets(book) -> Tuple[List[Dict], List[Dict]]:
+    docs, totals = [], []
+    for name, rows in book.sheets:
+        rekap = _pss_rekap_sheet(rows)
+        if rekap:
+            docs.append(rekap[0])
+            totals.append(rekap[1])
+            continue
+        text = _pss_sheet_as_text(rows)
+        if not re.search(r"Invoice\s*No", text, re.I) or "TOTAL BIAYA" not in text.upper():
+            continue
+        doc = parse_putra_sejahtera_sentosa(text)
+        doc["header"]["supplier"] = doc["header"].get("supplier") or _PSS_SUPPLIER
+        docs.append(doc)
+        totals.append({"invoice_no": doc["header"].get("invoice_no"), "total": _pss_extract_dpp(text),
+                       "grand_total": _pss_extract_grand_total(text),
+                       "final_total": _pss_extract_total_paid(text)})
+    return docs or [{"header": {}, "items": [{"description": None, "amount": None}]}], totals
+
+
 register_supplier(
     "PUTRA_SEJAHTERA_SENTOSA", "PT. Putra Sejahtera Sentosa",
     detect_putra_sejahtera_sentosa, parse_putra_sejahtera_sentosa,
@@ -5639,6 +5945,7 @@ register_supplier(
     extract_grand_total=_pss_extract_grand_total,
     extract_final_total=_pss_extract_total_paid,
     deduction_prefixes=("PPH",),
+    sheet_parse=lambda book: _pss_sheets(book)[0], sheet_totals=lambda book: _pss_sheets(book)[1],
 )
 
 
@@ -6032,9 +6339,10 @@ _VN_CONSIGNEES = {
     "POU HUNG": "POU HUNG VIETNAM COMPANY LIMITED",
     "PRIME ASIA": "PRIME ASIA (VIETNAM) CO.,LTD.",
     # POU PHONG 不在 Top 20 清單 (2026-10-28 抽樣 "CÔNG NỢ POU PHONG T06.2026…"、資料夾
-    # "POUPHONG\…")：全名待使用者確認，先用簡稱
-    "POU PHONG": "POU PHONG",
-    "POUPHONG": "POU PHONG",
+    # "POUPHONG\…")：全名使用者 2026-10-28 確認；給 POU PHONG 的發票不計入，
+    # 由 validation 的 EXCLUDED_CONSIGNEES 列 ERROR
+    "POU PHONG": "POU PHONG VIETNAM COMPANY LIMITED",
+    "POUPHONG": "POU PHONG VIETNAM COMPANY LIMITED",
 }
 
 # 費用欄 (表頭轉大寫後完全相同)；PHI VAN CHUYEN/PHI DICH VU 兩組另外處理
@@ -7720,8 +8028,84 @@ def detect_trans_wagon(text: str) -> bool:
         "RED INV NO" in _vt_norm(text) and re.search(r"\b\dC\d{2}TYY\b", text) is not None)
 
 
-_vt_register("TRANS_WAGON", "CÔNG TY TNHH LIÊN VẬN QUỐC TẾ (TRANS WAGON)",
-             detect_trans_wagon, "CÔNG TY TNHH LIÊN VẬN QUỐC TẾ", _VT_TRANS_WAGON)
+# (e) PDF 電子增值稅發票 (HÓA ĐƠN GIÁ TRỊ GIA TĂNG，Serial 1C26TYY，2026-10-28 使用者
+#     提供 1_C26TYY_11198.pdf)：費用行 "1 Phí xếp dỡ (THC) X40' 1 1.943.250 1.943.250 8%
+#     155.460 2.098.710" (序號、名稱、單位、數量、單價、未稅、稅率、稅額、含稅)，每筆自帶
+#     稅額；下一行起是 "POL - POD _ 船名/航次 _ 提單號碼"。數字是越式千分位 (點)。
+_TW_PDF_ITEM_RE = re.compile(
+    r"^\d+\s+(?P<desc>.+?)\s+(?P<unit>\S+)\s+(?P<qty>[\d.,]+)\s+(?P<price>[\d.,]+)\s+"
+    r"(?P<amount>[\d.,]+)\s+(?P<rate>\d+%|KCT|KKKNT)\s+(?P<tax>[\d.,]+|-)\s+(?P<total>[\d.,]+)$",
+    re.MULTILINE)
+_TW_TAX_CODE = "0302101999"
+
+
+def _tw_num(text: Optional[str]):
+    """'1.943.250' -> 1943250 (越式千分位)。"""
+    if not text or text == "-":
+        return None
+    try:
+        value = float(text.replace(".", "").replace(",", "."))
+    except ValueError:
+        return None
+    return int(value) if value.is_integer() else value
+
+
+def detect_trans_wagon_pdf(text: str) -> bool:
+    upper = text.upper()
+    return _TW_TAX_CODE in text and "GIÁ TRỊ GIA TĂNG" in upper and "LIÊN VẬN QUỐC TẾ" in upper
+
+
+def parse_trans_wagon_pdf(text: str) -> Dict:
+    h: Dict[str, Optional[str]] = {"supplier": "CÔNG TY TNHH LIÊN VẬN QUỐC TẾ"}
+    # 號碼印在「Số(No.):」標籤上一行；越南發票號碼只用號碼 (使用者 2026-10-27)
+    h["invoice_no"] = (_search(r"^(\d{3,})\s*\n\s*S[ốo]\(No\.\)", text)
+                       or _search(r"S[ốo]\(No\.\):\s*(\d+)", text))
+    m = re.search(r"Ngày\(Date\)\s*(\d{1,2})\s*tháng\(month\)\s*(\d{1,2})\s*năm\(year\)\s*(\d{4})", text)
+    h["invoice_date"] = _format_date_en(*m.groups()) if m else None
+    h["consignee"] = _search(r"Mã của CQT[^\n]*\n\s*:\s*(.+)", text)
+    items, boxes = [], []
+    lines = text.splitlines()
+    for i, line in enumerate(lines):
+        m = _TW_PDF_ITEM_RE.match(line.strip())
+        if not m:
+            continue
+        # 費用行下面到下一個費用行 / 合計之前的文字：航線 _ 船名 _ 提單號碼
+        extra = []
+        for nxt in lines[i + 1:]:
+            if _TW_PDF_ITEM_RE.match(nxt.strip()) or "Tổng cộng" in nxt:
+                break
+            extra.append(nxt.strip())
+        item = {"description": m.group("desc").strip(), "amount": _tw_num(m.group("amount")),
+                "vat": _tw_num(m.group("tax"))}
+        parts = [p.strip() for p in " ".join(extra).split(" _ ")]
+        if len(parts) >= 3:
+            route = re.split(r"\s+-\s+", parts[0], maxsplit=1)
+            if len(route) == 2:
+                item["port_of_loading"], item["port_of_discharge"] = route
+            item["vessel"], item["bl_no"] = parts[1], parts[-1]
+        unit = re.match(r"^X?(20|40|45)'?(HC|GP|DC)?$", m.group("unit").upper())
+        if unit:
+            boxes.append((_tw_num(m.group("qty")), unit.group(1) + (unit.group(2) or "")))
+        items.append(item)
+    for field in ("port_of_loading", "port_of_discharge", "vessel", "bl_no"):
+        h[field] = next((it[field] for it in items if it.get(field)), None)
+    h["volume"] = _fmt_volume(containers=boxes)
+    return {"header": h, "items": items or [{"description": None, "amount": None, "vat": None}]}
+
+
+def _tw_pdf_totals(text: str):
+    m = re.search(r"Total payment\):\s*([\d.,]+)\s+([\d.,]+)\s+([\d.,]+)", text)
+    return tuple(_tw_num(g) for g in m.groups()) if m else (None, None, None)
+
+
+_tw_sheet_parse, _tw_sheet_totals = _vt_make("CÔNG TY TNHH LIÊN VẬN QUỐC TẾ", _VT_TRANS_WAGON)
+register_supplier(
+    "TRANS_WAGON", "CÔNG TY TNHH LIÊN VẬN QUỐC TẾ (TRANS WAGON)",
+    lambda text: detect_trans_wagon(text) or detect_trans_wagon_pdf(text), parse_trans_wagon_pdf,
+    extract_total=lambda text: _tw_pdf_totals(text)[0],
+    extract_grand_total=lambda text: _tw_pdf_totals(text)[2],
+    sheet_parse=_tw_sheet_parse, sheet_totals=_tw_sheet_totals,
+)
 
 
 # --- VN02 VĨNH HƯNG LONG (拖車行) --------------------------------------------
