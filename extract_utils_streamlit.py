@@ -631,7 +631,13 @@ def format_formula_issue(issue: Dict) -> str:
     return (f"原帳單問題 (Excel 公式有誤)：[{issue['sheet'].strip()}] 第 {issue['row']} 列 "
             f"{'/'.join(cols)} 欄 (例 {issue['formula']}) 只加到第 {issue['end']} 列，"
             f"明細到第 {issue['last']} 列，第 {issue['end'] + 1}~{issue['last']} 列沒算進合計"
-            + (f"；漏算 {amounts}" if amounts else ""))
+            + (f"；漏算 {amounts}" if amounts else "；漏算的儲存格都是空白，合計金額沒有少算"))
+
+
+def formula_issue_harmless(issue: Dict) -> bool:
+    """SUM 範圍比明細短，但漏算的儲存格在那幾欄都是空白或 0：合計金額是對的。
+    使用者 2026-10-28 規定 (所有供應商)：這種只列 INFO，不扣分；有少算金額仍是 ERROR。"""
+    return "missing" in issue and not any(issue["missing"].values())
 
 
 # ---------------------------------------------------------------------------

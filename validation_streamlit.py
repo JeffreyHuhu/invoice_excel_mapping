@@ -248,7 +248,7 @@ def _explain_by_formula_issue(issues: List[Dict]) -> List[Dict]:
     已經查到合計列公式錯誤時，整份帳單合計對不上就是這個錯誤造成的：合計
     不一致註明原因。使用者原則：沒通過金額稽核一律是重大 ERROR，原因是原
     帳單也一樣，所以不降級。"""
-    if not any(i["rule"] == RULE_EXCEL_FORMULA for i in issues):
+    if not any(i["rule"] == RULE_EXCEL_FORMULA and i["severity"] != INFO for i in issues):
         return issues
     explained = []
     for issue in issues:
