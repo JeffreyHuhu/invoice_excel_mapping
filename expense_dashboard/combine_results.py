@@ -5,7 +5,8 @@ combine_results.py — 把所有轉檔結果 Excel 整合成一份 (欄位跟轉
 【做什麼】
   1. 掃描資料夾底下「XXX-辨識等級(高)」「XXX-辨識等級(中)」裡的轉檔結果 Excel
      (沿用 process_data.scan_excel_files，規則一樣：跳過轉檔總表、原始 Excel 帳單)。
-  2. 依標題列找出 18 個標準欄位，只寫這 18 欄，順序與抬頭跟轉檔結果模板一樣。
+  2. 依標題列找出 18 個標準欄位，順序與抬頭跟轉檔結果模板一樣；最右邊加一欄
+     「辨識等級」(高/中)，讓主管分辨可能有錯的資料 (使用者 2026-10-28 指定)。
   3. 同一張發票 (供應商 + 發票號碼) 出現在多份 Excel 時，只保留第一份
      (等級高優先，再依路徑排序)，跟資料庫的重複判斷一樣。
   4. 寫成一個工作表「工作表」，日期欄位用 mmm-dd-yyyy 顯示。
@@ -49,6 +50,7 @@ TEMPLATE_HEADERS = {
     "shipper": "Shipper\n出貨方",
 }
 FIELDS = list(TEMPLATE_HEADERS)
+LEVEL_HEADER = "辨識等級"
 DATE_FIELDS = {"invoice_date", "arrive_date", "onboard_date"}
 DATE_FORMAT = "mmm-dd-yyyy"
 SHEET_NAME = "工作表"
@@ -88,6 +90,7 @@ def collect_rows(roots: Sequence[Path], levels: Sequence[str]):
             row = {code: values[col] for col, code in mapping.items() if col < len(values)}
             row = {k: (None if v == "" else v) for k, v in row.items()}
             if any(v is not None for v in row.values()):
+                row["level"] = level
                 file_rows.append(row)
         keys = {_invoice_key(r) for r in file_rows} - {None}
         dup_keys = keys & seen
@@ -111,7 +114,7 @@ def write_workbook(rows: List[dict], out_path: Path) -> None:
     ws.freeze_panes = "A2"
     bold, wrap = Font(bold=True), Alignment(wrap_text=True, vertical="center")
     header = []
-    for text in TEMPLATE_HEADERS.values():
+    for text in [*TEMPLATE_HEADERS.values(), LEVEL_HEADER]:
         cell = WriteOnlyCell(ws, value=text)
         cell.font, cell.alignment = bold, wrap
         header.append(cell)
@@ -126,6 +129,7 @@ def write_workbook(rows: List[dict], out_path: Path) -> None:
                 out.append(cell)
             else:
                 out.append(value)
+        out.append(row["level"])
         ws.append(out)
     out_path.parent.mkdir(parents=True, exist_ok=True)
     wb.save(out_path)
