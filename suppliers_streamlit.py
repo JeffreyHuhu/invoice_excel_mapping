@@ -5669,7 +5669,12 @@ def _vn_num(value) -> Optional[float]:
         return None
     if isinstance(value, (int, float)):
         return float(value)
-    text = _vn_text(value).replace(",", "")
+    text = _vn_text(value)
+    # 逗號當小數點的文字："237,60" (2026-10-28 抽樣 VN14 TOTAL USD 欄)。只有一個逗號、
+    # 後面剛好 2 位數才算小數；"5,000" 這類千分位 (3 位數) 不受影響
+    if re.fullmatch(r"-?\d+,\d{2}", text.strip()):
+        text = text.strip().replace(",", ".")
+    text = text.replace(",", "")
     try:
         return float(text) if text else None
     except ValueError:
@@ -6021,6 +6026,10 @@ _VN_CONSIGNEES = {
     "POU LI": "POU LI VIETNAM COMPANY LIMITED",
     "POU HUNG": "POU HUNG VIETNAM COMPANY LIMITED",
     "PRIME ASIA": "PRIME ASIA (VIETNAM) CO.,LTD.",
+    # POU PHONG 不在 Top 20 清單 (2026-10-28 抽樣 "CÔNG NỢ POU PHONG T06.2026…"、資料夾
+    # "POUPHONG\…")：全名待使用者確認，先用簡稱
+    "POU PHONG": "POU PHONG",
+    "POUPHONG": "POU PHONG",
 }
 
 # 費用欄 (表頭轉大寫後完全相同)；PHI VAN CHUYEN/PHI DICH VU 兩組另外處理
@@ -6029,6 +6038,9 @@ _RAC_CHARGE_LABELS = {
     "LIFTOFF FEE", "LIFT ON/OFF FEE", "CSHT", "FUMIGATION FEE", "FREIGHT AIR PER P/L",
     "FREIGHT SEA PER P/L", "CFS", "CIC", "THC", "D/O", "HANDLING", "STORAGE", "INCURRED",
     "EXTRA CUSTOM SHEET", "DEMURRAGE", "PHAT SINH", "SERVICE ALL",
+    # 2026-10-28 抽樣 POU PHONG 對帳表 ("CÔNG NỢ POU PHONG T03.2026 ĐỢT 1 -NHAP" 等) 的右表欄名
+    "CFS,THC,CIC PER P/L", "D/O, H/L FEE PER P/L", "STORAGE PER P/L", "THC/CIC/ DO VS CONT",
+    "LIFT ON/OFF", "CFS,THC, CIC FEE", "CFS,THC,CIC FEE", "D/O, H/L FEE",
 }
 # SERVICE ALL 存在時，它的組成欄不另外轉 (避免重複計算)
 _RAC_SERVICE_ALL_PARTS = {"SERVICE FEE", "EXTRA CUSTOM SHEET"}
@@ -6062,9 +6074,13 @@ def _rac_consignee(path: str) -> Optional[str]:
 
 
 def _rac_sheet_kind(name: str) -> str:
-    upper = name.upper()
-    if "IMPORT" in upper:
-        return "fcl_import" if upper.strip().startswith("FCL") else "lcl_import"
+    upper = _vt_norm(name)
+    # 越南文 "NHAP" (nhập = 進口) 也算進口 (2026-10-28 抽樣 POU PHONG："NHAP FCL  DOT 1"、
+    # "NHAP LCL+AIR+NKTC  DOT 1")；FCL 可能不在開頭，有 LCL 字樣時以 LCL 為準
+    if "IMPORT" in upper or re.search(r"\bNHAP\b", upper):
+        fcl = upper.strip().startswith("FCL") or (
+            re.search(r"\bFCL\b", upper) and "LCL" not in upper)
+        return "fcl_import" if fcl else "lcl_import"
     return "export"
 
 
@@ -6214,10 +6230,14 @@ def _rac_parse_sheet(name: str, rows: List[list]):
             amount = _vn_num(_vn_cell(row, j))
             if amount:
                 items.append({"description": charge, "amount": amount, "vat": None, **shared})
+        vat = sum(_vn_num(_vn_cell(row, j)) or 0 for j in table["vat_cols"])
         if kind != "export":
-            vat = sum(_vn_num(_vn_cell(row, j)) or 0 for j in table["vat_cols"])
             items.append({"description": "VAT" if kind == "lcl_import" else "VAT PASS THROUGH",
                           "amount": None, "vat": vat or None, **shared})
+        elif vat:
+            # 出口表也有 VAT PASS THROUGH 欄時 (2026-10-28 抽樣 POU PHONG "XKTC" 工作表)，
+            # 有金額才列；原本沒有 VAT 欄的出口表不受影響
+            items.append({"description": "VAT PASS THROUGH", "amount": None, "vat": vat, **shared})
     return items, total, vat_total, invoice_totals
 
 
@@ -7522,6 +7542,27 @@ def _vt_year(book) -> Optional[str]:
     return years[-1] if years else None
 
 
+_VT_PATH_CUSTOMERS = (
+    # 路徑寫法 (去空白、去聲調大寫) -> 客戶簡稱，寫法同工作表名稱備援 "POU xxx"
+    ("POUYUEN", "POU YUEN"), ("POUHUNG", "POU HUNG"), ("POUCHEN", "POU CHEN"),
+    ("POUSUNG", "POU SUNG"), ("POUPHONG", "POU PHONG"), ("POULI", "POU LI"),
+    ("YUEDE", "YUE DE"),
+)
+
+
+def _vt_path_customer(book) -> Optional[str]:
+    """檔案內與工作表名稱都沒有客戶時，看檔名、再看所在資料夾 (2026-10-28 抽樣：
+    VN06 "20260629-20260704(EXP-TOTAL).xls" 放在 "…\\POU HUNG\\2026\\08\\"、
+    VN14 放在 "…\\YUEDE\\2026\\")。由檔名往上找，離檔案最近的為準。"""
+    path = getattr(book, "path", "") or ""
+    for part in reversed(re.split(r"[\\/]", path)):
+        flat = re.sub(r"[^A-Z]", "", _vt_norm(part))
+        for key, name in _VT_PATH_CUSTOMERS:
+            if key in flat:
+                return name
+    return None
+
+
 def _vt_make(supplier: str, cfgs: List[Tuple[str, Dict]]):
     """產生這家供應商的 (sheet_parse, sheet_totals)。"""
     def sheet_parse(book) -> List[Dict]:
@@ -7537,7 +7578,8 @@ def _vt_make(supplier: str, cfgs: List[Tuple[str, Dict]]):
         items = [{**known.get(it["invoice_no"], {}), **{k: v for k, v in it.items() if v not in (None, "")},
                   "vat": it.get("vat"), "amount": it.get("amount")} for it in items]
         # 一本對帳表只有一個客戶：沒有客戶名稱的工作表 (VN03 TẠI CHỖ) 用其他表的
-        customer = next((it["consignee"] for it in items if it.get("consignee")), None)
+        customer = next((it["consignee"] for it in items if it.get("consignee")), None) \
+            or _vt_path_customer(book)
         # 沒有日期的列 (整張表的 VAT 列、額外費用列)：用同一本對帳表最晚的日期 (VN16 Hang Xe Tai)
         dated = [datetime.datetime.strptime(it["invoice_date"], "%d %b %Y") for it in items
                  if isinstance(it.get("invoice_date"), str) and re.fullmatch(r"\d{2} \w{3} \d{4}", it["invoice_date"])]
@@ -7875,7 +7917,9 @@ _VT_ORIENTAL = [
                   "THC VND", "THC USD", "=EBS", "EFS USD", "CFS VND", "CFS USD", "=TRUCKING", "=LOCAL CHARGE",
                   "TCS CHARGE", "=AMS", "=BAF", "=EDI", "=SCANNING", "=RR", "=LSS", "OCEAN FREIGHT",
                   "AIR FREIGHT", "HANDLING FEE VND", "HANDLING FEE USD", "FUMIGATION VND",
-                  "FUMIGATION USD", "SEAL FEE", "TELEX FEE", "BILL FEE")],
+                  "FUMIGATION USD", "SEAL FEE", "TELEX FEE", "BILL FEE",
+                  # 2026-10-28 抽樣 "POUYUEN T6-2026 EXP"：另有一欄只寫 "SEAL" (USD)
+                  "=SEAL")],
               "total": "TOTAL USD", "total_add": "TOTAL VND", "vat": "=VAT", "vat_desc": "VAT",
               "date": "NGAY HD", "boxes": {"20": "CY QUANTITY 20", "40": "CY QUANTITY 40"}, "cbm": "CFS CBM",
               "fields": {"bl_no": "H-B/L", "mbl_no": "M-B/L", "order_no": "LOT NO",
