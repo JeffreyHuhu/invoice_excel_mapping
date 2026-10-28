@@ -4481,6 +4481,10 @@ def detect_apl(text: str) -> bool:
     # 越南 APL (VN11，越南文電子發票) 另有規則 APL_VN
     if "APL LOGISTICS VIỆT NAM" in upper or "HÓA ĐƠN GIÁ TRỊ GIA TĂNG" in upper or _is_dhl_vnpt(text):
         return False
+    # DSV 越南帳單的出貨方可能是 "APL Logistics Vietnam Company Limited"
+    # (2026-10-28 DSV AIR & SEA_JUL.2026_BY SHIPMENT.pdf 第 169 頁)，不是 APL 開的帳單
+    if "DSV AIR & SEA" in upper:
+        return False
     return "APL LOGISTICS" in upper
 
 
