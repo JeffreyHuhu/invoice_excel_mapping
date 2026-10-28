@@ -2,34 +2,30 @@
 """
 fx.py — 匯率表 (換算成 USD 用)
 
-fx_rates 資料表：每個幣別、每個月一筆「1 USD = 多少該幣別」(per_usd)。
-  - 自動：update_fx_rates() 依資料庫裡出現的幣別與發票日期範圍，向
-          Frankfurter (歐洲央行 ECB 公布的每日參考匯率) 抓每日匯率，取每月
-          平均。只送出幣別代碼與日期，不會送出任何發票資料。
-  - 台灣銀行：source = '台灣銀行 月平均' 的列 (主要來源，使用者 2026-10-25
-          指定)。台銀網站有防機器人驗證，由 invoice-expense-db skill 用
-          Claude in Chrome 抓牌告匯率 (即期買賣中價，沒有即期改用現金中價)，
-          再用 import_rates() 寫入。ECB 只補台灣銀行沒有的幣別或月份。
-  - 手動：source = '手動' 的列 (在儀表板「資料管理」頁修改的) 不會被自動
-          更新覆蓋。
-優先順序：手動 > 台灣銀行 > ECB (自動更新不會覆蓋前面兩種)。
-換算時找不到當月匯率 (例如本月 ECB 還沒公布) 就用該幣別最近一個月的匯率。
+fx_rates 資料表：每個幣別一筆「1 USD = 多少該幣別」(per_usd)。
+  - 作帳匯率 (使用者 2026-10-28 指定，唯一的自動來源)：資料庫旁邊的
+          「作帳匯率 YYYYMMDD-MMDD.xlsm」，檔名日期最新的那份。讀「ALL」工作表，
+          每個幣別只取最新一期，所有發票都用這個匯率換算 (不分發票月份)。
+          不再上網抓匯率 (台灣銀行、ECB 都已移除)。
+  - 手動：source = '手動' 的列 (在儀表板「資料管理」頁修改的)。只用在
+          作帳匯率檔沒有的幣別；作帳匯率檔有的幣別一律以作帳匯率為準。
+換算時找不到當月匯率就用該幣別最近一期的匯率，所以每幣別一筆就會套用到全部月份。
 """
 
-import json
-import urllib.request
-from collections import defaultdict
-from datetime import date
-from typing import Dict, List, Tuple
+import re
+from datetime import datetime
+from pathlib import Path
+from typing import Dict, Optional, Tuple
 
 import duckdb
 
-API_URL = "https://api.frankfurter.dev/v1/{start}..{end}?base=USD&symbols={symbols}"
-CURRENCIES_URL = "https://api.frankfurter.dev/v1/currencies"
-SOURCE_ECB = "ECB 月平均"
 SOURCE_MANUAL = "手動"
-SOURCE_BOT = "台灣銀行 月平均"
-TIMEOUT = 20
+SOURCE_BOOK = "作帳匯率"
+BOOK_FILE_GLOB = "作帳匯率 *.xls*"
+BOOK_SHEET = "ALL"
+# 期間文字，例如 "2026/10/21-2026/10/31"
+_PERIOD_RE = re.compile(r"(\d{4})/(\d{1,2})/(\d{1,2})\s*-\s*(\d{4})/(\d{1,2})/(\d{1,2})")
+_FILE_DATE_RE = re.compile(r"(\d{8})")
 
 
 def ensure_table(con: duckdb.DuckDBPyConnection) -> None:
@@ -39,77 +35,68 @@ def ensure_table(con: duckdb.DuckDBPyConnection) -> None:
         PRIMARY KEY (currency, year, month))""")
 
 
-def fetch_monthly_rates(currencies: List[str], start: date, end: date
-                        ) -> Tuple[Dict[Tuple[str, int, int], float], List[str]]:
-    """回傳 ({(幣別, 年, 月): 1 USD 兌換數}, ECB 沒有提供的幣別)。
-    一次抓一年，避免單次請求範圍太大。請求裡只要有一個 ECB 不支援的幣別
-    (例如越南盾 VND) 整個請求就會失敗，所以先查支援清單、只要支援的幣別。"""
-    req = urllib.request.Request(CURRENCIES_URL, headers={"User-Agent": "expense-dashboard"})
-    with urllib.request.urlopen(req, timeout=TIMEOUT) as resp:
-        supported = set(json.load(resp))
-    unsupported = [c for c in currencies if c not in supported]
-    currencies = [c for c in currencies if c in supported]
-    sums: Dict[Tuple[str, int, int], List[float]] = defaultdict(list)
-    seen = set()
-    if not currencies:
-        return {}, unsupported
-    for year in range(start.year, end.year + 1):
-        s = max(start, date(year, 1, 1))
-        e = min(end, date(year, 12, 31))
-        url = API_URL.format(start=s.isoformat(), end=e.isoformat(), symbols=",".join(currencies))
-        req = urllib.request.Request(url, headers={"User-Agent": "expense-dashboard"})
-        with urllib.request.urlopen(req, timeout=TIMEOUT) as resp:
-            data = json.load(resp)
-        for day, rates in data.get("rates", {}).items():
-            d = date.fromisoformat(day)
-            if not (s <= d <= e):  # API 會往前補到最近一個有匯率的營業日
+def latest_book_file(folder: Path) -> Optional[Path]:
+    """資料夾裡檔名日期最新的作帳匯率檔 (同日期再看修改時間)；沒有回傳 None。"""
+    files = [f for f in Path(folder).glob(BOOK_FILE_GLOB) if not f.name.startswith("~$")]
+    if not files:
+        return None
+
+    def key(f: Path):
+        m = _FILE_DATE_RE.search(f.name)
+        return (m.group(1) if m else "", f.stat().st_mtime)
+    return max(files, key=key)
+
+
+def read_book_rates(path: Path) -> Dict[str, Tuple[str, datetime, float]]:
+    """作帳匯率檔 -> {幣別: (期間文字, 期間起日, 1 USD 兌換數)}，每幣別只留最新一期。"""
+    from openpyxl import load_workbook
+    wb = load_workbook(path, read_only=True, data_only=True)
+    try:
+        ws = wb[BOOK_SHEET]
+        latest: Dict[str, Tuple[str, datetime, float]] = {}
+        for row in ws.iter_rows(min_row=3, max_col=4, values_only=True):
+            period, src, cur, rate = (list(row) + [None] * 4)[:4]
+            m = _PERIOD_RE.search(str(period or ""))
+            if not m or str(src).strip().upper() != "USD" or not cur or not rate:
                 continue
-            for cur, value in rates.items():
-                sums[(cur, d.year, d.month)].append(float(value))
-                seen.add(cur)
-    monthly = {k: sum(v) / len(v) for k, v in sums.items()}
-    return monthly, unsupported + [c for c in currencies if c not in seen]
+            begin = datetime(int(m.group(1)), int(m.group(2)), int(m.group(3)))
+            cur = str(cur).strip().upper()
+            if cur not in latest or begin > latest[cur][1]:
+                latest[cur] = (m.group(0), begin, float(rate))
+        return latest
+    finally:
+        wb.close()
 
 
-def update_fx_rates(con: duckdb.DuckDBPyConnection) -> str:
-    """依資料庫裡的幣別與日期範圍更新 ECB 月平均匯率，回傳結果說明。
-    網路失敗會丟出例外，由呼叫端決定要不要中斷。"""
+def update_book_rates(con: duckdb.DuckDBPyConnection, folder: Path) -> str:
+    """用最新的作帳匯率檔更新 fx_rates，回傳結果說明。檔案裡有的幣別先刪掉
+    全部舊匯率 (含手動)，再寫入最新一期一筆；舊的上網來源 (ECB/台灣銀行) 一併清掉。"""
     ensure_table(con)
-    row = con.execute("""SELECT list(DISTINCT currency), min(invoice_date), max(invoice_date)
-        FROM expense_items WHERE currency IS NOT NULL AND currency <> 'USD'
-          AND invoice_date IS NOT NULL""").fetchone()
-    currencies, start, end = row
-    if not currencies:
-        return "資料裡沒有需要換匯的幣別"
-    end = min(end, date.today())
-    monthly, missing = fetch_monthly_rates(sorted(currencies), start, end)
-    rows = [(cur, y, m, rate, SOURCE_ECB) for (cur, y, m), rate in monthly.items()]
-    if rows:
-        # 手動輸入、台灣銀行的匯率不覆蓋
-        con.executemany(f"""
-            INSERT INTO fx_rates (currency, year, month, per_usd, source) VALUES (?, ?, ?, ?, ?)
-            ON CONFLICT (currency, year, month) DO UPDATE
-              SET per_usd = excluded.per_usd, source = excluded.source,
-                  updated_at = now()
-              WHERE fx_rates.source NOT IN ('{SOURCE_MANUAL}', '{SOURCE_BOT}')""", rows)
-    msg = f"已更新 {len(rows)} 筆月平均匯率 ({', '.join(sorted(currencies))}，{start:%Y-%m} ~ {end:%Y-%m})"
+    path = latest_book_file(folder)
+    if path is None:
+        return f"找不到作帳匯率檔 ({Path(folder) / BOOK_FILE_GLOB})，沿用資料庫裡現有的匯率"
+    rates = read_book_rates(path)
+    if not rates:
+        return f"作帳匯率檔沒有可用的匯率：{path.name}，沿用資料庫裡現有的匯率"
+    con.execute("BEGIN")
+    con.execute(f"DELETE FROM fx_rates WHERE source <> '{SOURCE_MANUAL}'")
+    con.executemany("DELETE FROM fx_rates WHERE currency = ?", [[c] for c in rates])
+    con.executemany(
+        "INSERT INTO fx_rates (currency, year, month, per_usd, source) VALUES (?, ?, ?, ?, ?)",
+        [(c, b.year, b.month, r, f"{SOURCE_BOOK} {p}") for c, (p, b, r) in rates.items()])
+    con.execute("COMMIT")
+    msg = f"已套用作帳匯率 {path.name}：" + "、".join(
+        f"{c} {r:g}" for c, (_, _, r) in sorted(rates.items()))
+    used = [c for (c,) in con.execute(
+        "SELECT DISTINCT currency FROM expense_items WHERE currency IS NOT NULL "
+        "AND currency <> 'USD'").fetchall()] if con.execute(
+        "SELECT count(*) FROM information_schema.tables WHERE table_name = 'expense_items'"
+    ).fetchone()[0] else []
+    has = {c for (c,) in con.execute("SELECT DISTINCT currency FROM fx_rates").fetchall()}
+    missing = sorted(set(used) - has)
     if missing:
-        msg += f"；ECB 沒有提供 {', '.join(missing)}，請在匯率表手動輸入"
+        msg += f"；作帳匯率檔沒有 {', '.join(missing)}，請在儀表板「資料管理」頁手動輸入"
     return msg
-
-
-def import_rates(con: duckdb.DuckDBPyConnection, rows: List[Tuple[str, int, int, float]],
-                 source: str = SOURCE_BOT) -> int:
-    """寫入外部來源 (台灣銀行) 的月平均匯率 [(幣別, 年, 月, 1 USD 兌換數)]，
-    覆蓋 ECB 的匯率，但不覆蓋手動輸入的。回傳寫入筆數。"""
-    ensure_table(con)
-    con.executemany(f"""
-        INSERT INTO fx_rates (currency, year, month, per_usd, source) VALUES (?, ?, ?, ?, ?)
-        ON CONFLICT (currency, year, month) DO UPDATE
-          SET per_usd = excluded.per_usd, source = excluded.source, updated_at = now()
-          WHERE fx_rates.source <> '{SOURCE_MANUAL}'""",
-                    [(c.upper(), int(y), int(m), float(r), source) for c, y, m, r in rows])
-    return len(rows)
 
 
 def rate_sql(fixed: Dict[str, float] = None) -> Tuple[str, list]:

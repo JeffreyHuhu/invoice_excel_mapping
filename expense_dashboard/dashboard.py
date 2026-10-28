@@ -7,7 +7,7 @@ dashboard.py — 主管級費用分析儀表板頁 (由 app.py 載入)
 資料再多也秒開。每次查詢用唯讀連線、查完就關，資料更新時 (資料庫檔案修改
 時間變了) 快取自動失效。
 
-金額可選「換算 USD」(依發票月份的 ECB 月平均匯率，或自訂固定匯率) 或
+金額可選「換算 USD」(作帳匯率檔最新一期，或自訂固定匯率) 或
 「原幣」。所有查詢都從 items 這個 CTE 讀，它依幣別設定把 amount / vat
 換好，下面的圖表/KPI 不用管換匯。
 """
@@ -28,7 +28,7 @@ from settings import get_db_path
 MAX_TABLE_ROWS = 2_000
 EXCEL_MAX_ROWS = 1_000_000
 MODE_USD, MODE_ORIG = "換算 USD", "原幣"
-FX_MONTHLY, FX_FIXED = "每月平均匯率 (ECB)", "固定匯率"
+FX_MONTHLY, FX_FIXED = "作帳匯率", "固定匯率"
 
 # 類別色 (固定順序，顏色跟著項目走，不跟排名走)
 SERIES_COLORS = ["#2a78d6", "#eb6834", "#1baf7a", "#eda100",
@@ -235,7 +235,7 @@ if mode == MODE_ORIG:
 
 st.title("費用分析儀表板")
 if mode == MODE_USD:
-    fx_note = ("依發票月份的 ECB 月平均匯率換算" if not fixed_rates else
+    fx_note = ("依作帳匯率換算" if not fixed_rates else
                "固定匯率：" + "、".join(f"1 USD = {r:,.2f} {c}" for c, r in fixed_rates.items()))
 else:
     fx_note = "未換匯"

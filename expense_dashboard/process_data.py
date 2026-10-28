@@ -19,8 +19,8 @@ process_data.py — 第一階段：把上萬份「辨識等級(高)」轉檔結�
      轉了兩次)，只保留其中一份，其餘標記 is_duplicate，儀表板預設不計入。
   7. 讀不了/格式不符的 Excel 記進 etl_files 與 logs/expense_etl.log，
      不中斷整批處理。
-  8. 每列記錄金額幣別 (currency)，最後更新 ECB 月平均匯率 (fx.py)，儀表板
-     用它換算成 USD。抓匯率失敗 (例如沒有網路) 只提示，不影響資料匯入。
+  8. 每列記錄金額幣別 (currency)，最後用資料庫旁邊最新的作帳匯率檔更新匯率
+     (fx.py)，儀表板用它換算成 USD。讀不了匯率檔只提示，不影響資料匯入。
 
 儀表板「資料管理」頁 (data_admin.py) 也是呼叫這裡的 run()。
 
@@ -322,15 +322,14 @@ def mark_duplicates(con: duckdb.DuckDBPyConnection) -> int:
 
 
 def _drop_db_keep_manual_rates(db_path: Path) -> List[tuple]:
-    """完整重建用：記下手動輸入與台灣銀行的匯率後刪掉整個資料庫檔。DuckDB 刪除資料
+    """完整重建用：記下現有匯率 (手動、作帳匯率) 後刪掉整個資料庫檔。DuckDB 刪除資料
     不會縮小檔案，直接開新檔才不會越用越肥 (資料庫要放共用資料夾給大家讀)。"""
     if not db_path.exists():
         return []
     con = duckdb.connect(str(db_path))
     try:
         fx.ensure_table(con)
-        rows = con.execute("SELECT currency, year, month, per_usd, source FROM fx_rates "
-                           "WHERE source IN (?, ?)", [fx.SOURCE_MANUAL, fx.SOURCE_BOT]).fetchall()
+        rows = con.execute("SELECT currency, year, month, per_usd, source FROM fx_rates").fetchall()
     finally:
         con.close()
     for path in (db_path, db_path.with_name(db_path.name + ".wal")):
@@ -413,8 +412,8 @@ def run(roots: List[Path], db_path: Path, level: str = "高",
         fx_message = None
         if update_fx:
             try:
-                fx_message = fx.update_fx_rates(con)
-            except Exception as e:  # noqa: BLE001  沒網路等狀況不影響資料匯入
+                fx_message = fx.update_book_rates(con, db_path.parent)
+            except Exception as e:  # noqa: BLE001  匯率檔損壞等狀況不影響資料匯入
                 fx_message = f"匯率更新失敗 (沿用資料庫裡現有的匯率)：{e}"
                 log.warning("匯率更新失敗 | %s", e)
             echo(fx_message)
@@ -461,7 +460,7 @@ def main(argv: Optional[List[str]] = None) -> int:
     parser.add_argument("--default-currency", default=DEFAULT_CURRENCY,
                         help="帳單、供應商、國家資料夾都判斷不出幣別時用的幣別 "
                              "(預設不指定：幣別留空，再詢問使用者)")
-    parser.add_argument("--no-fx", action="store_true", help="不要上網更新匯率")
+    parser.add_argument("--no-fx", action="store_true", help="不要用作帳匯率檔更新匯率")
     args = parser.parse_args(argv)
 
     missing = [str(r) for r in args.roots if not r.is_dir()]

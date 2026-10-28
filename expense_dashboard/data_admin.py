@@ -7,8 +7,8 @@ data_admin.py — 資料管理頁 (由 app.py 載入)
      dashboard_config.json，下次開啟沿用。
   2. 更新資料：輸入轉檔結果所在的資料夾，按按鈕就執行 process_data.run()
      (增量更新，只處理新增/修改的 Excel)。
-  3. 匯率：一鍵抓 ECB 月平均匯率，或直接在表格裡修改/新增 (改過的列標成
-     「手動」，之後自動更新不會覆蓋)。
+  3. 匯率：一鍵套用資料庫旁邊最新的作帳匯率檔 (作帳匯率 *.xlsm)，或在表格裡
+     修改/新增作帳匯率檔沒有的幣別 (改過的列標成「手動」)。
   4. 讀取失敗的檔案清單。
 """
 
@@ -128,14 +128,14 @@ if not db_path.is_file():
     st.stop()
 
 col_a, col_b = st.columns([1, 3])
-if col_a.button("🌐 從 ECB 更新匯率", help="向歐洲央行 (Frankfurter API) 抓每日匯率算月平均；只送出幣別與日期"):
+if col_a.button("📄 套用作帳匯率", help=f"讀 {db_path.parent} 裡檔名日期最新的「{fx.BOOK_FILE_GLOB}」，每幣別取最新一期"):
     con = connect_rw()
     try:
         process_data.init_db(con)
-        msg = fx.update_fx_rates(con)
+        msg = fx.update_book_rates(con, db_path.parent)
         st.cache_data.clear()
         col_b.success(msg)
-    except Exception as e:  # noqa: BLE001  網路失敗等
+    except Exception as e:  # noqa: BLE001  匯率檔損壞等
         col_b.error(f"更新失敗：{e}")
     finally:
         con.close()
