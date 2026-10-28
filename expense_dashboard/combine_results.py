@@ -8,7 +8,7 @@ combine_results.py — 把所有轉檔結果 Excel 整合成一份 (欄位跟轉
   2. 依標題列找出 18 個標準欄位，順序與抬頭跟轉檔結果模板一樣；最右邊加一欄
      「辨識等級」(高/中)，讓主管分辨可能有錯的資料 (使用者 2026-10-28 指定)。
   3. 同一張發票 (供應商 + 發票號碼) 出現在多份 Excel 時，只保留第一份
-     (等級高優先，再依路徑排序)，跟資料庫的重複判斷一樣。
+     (等級高優先，再依路徑排序)，跟資料庫的重複判斷一樣 (含逐列比對的供應商)。
   4. 寫成一個工作表「工作表」，日期欄位用 mmm-dd-yyyy 顯示。
      讀不了的檔案記到 log，不中斷整批處理。
 
@@ -26,6 +26,7 @@ from openpyxl import Workbook
 from openpyxl.cell import WriteOnlyCell
 from openpyxl.styles import Alignment, Font
 
+from expense_normalize import is_no_own_invoice
 from process_data import _find_header, _read_rows, get_logger, scan_excel_files
 
 # 抬頭跟 extract_utils_streamlit.DISPLAY_HEADERS 一致 (那支檔案要載入 PDF 套件，這裡不 import)
@@ -58,11 +59,15 @@ EXCEL_MAX_ROWS = 1_048_575
 
 
 def _invoice_key(row: dict):
-    """(供應商, 發票號碼)；沒有發票號碼就不做重複判斷。"""
+    """(供應商, 發票號碼)；沒有發票號碼就不做重複判斷。SUPPLIER_NO_OWN_INVOICE
+    的供應商要整列 (發票號碼+費用名稱+金額+提單號碼) 相同才算重複 (跟資料庫一樣)。"""
     no = row.get("invoice_no")
     if no in (None, ""):
         return None
-    return (str(row.get("supplier") or "").strip().upper(), str(no).strip().upper())
+    key = (str(row.get("supplier") or "").strip().upper(), str(no).strip().upper())
+    if is_no_own_invoice(row.get("supplier")):
+        key += tuple(str(row.get(f)) for f in ("description", "amount", "bl_no"))
+    return key
 
 
 def collect_rows(roots: Sequence[Path], levels: Sequence[str]):

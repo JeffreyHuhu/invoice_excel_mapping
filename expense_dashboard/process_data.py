@@ -48,9 +48,11 @@ import pandas as pd
 import fx
 from expense_normalize import (
     DEFAULT_CURRENCY,
+    SUPPLIER_NO_OWN_INVOICE,
     clean_text,
     detect_currency,
     folder_currency,
+    is_no_own_invoice,
     normalize_expense,
     normalize_port,
     parse_amount,
@@ -198,6 +200,8 @@ def clean_record(raw: Dict[str, object],
                  default_currency: Optional[str] = DEFAULT_CURRENCY) -> Dict[str, object]:
     """一列原始值 -> 清洗後的明細 (不含 source_file/source_folder)。"""
     invoice_date = parse_date(raw.get("invoice_date"))
+    if invoice_date is None and is_no_own_invoice(raw.get("supplier")):
+        invoice_date = parse_date(raw.get("onboard_date"))  # 帳單沒有發票日期
     item, category = normalize_expense(raw.get("description"))
     return {
         "invoice_date": invoice_date,
@@ -305,19 +309,33 @@ def _flush(con: duckdb.DuckDBPyConnection, items: List[tuple], files: List[tuple
 
 def mark_duplicates(con: duckdb.DuckDBPyConnection) -> int:
     """同一個 (供應商, 發票號碼) 出現在好幾份 Excel 時，只保留路徑排序第一
-    份，其餘的明細標記 is_duplicate。回傳被標記的列數。"""
+    份，其餘的明細標記 is_duplicate。SUPPLIER_NO_OWN_INVOICE 的供應商改成整列
+    (發票號碼+費用名稱+金額+提單號碼) 相同才算重複。回傳被標記的列數。"""
     con.execute("UPDATE expense_items SET is_duplicate = FALSE WHERE is_duplicate")
-    con.execute("""
+    row_level = list(SUPPLIER_NO_OWN_INVOICE)
+    # 開頭比對 (名稱後面可能有英文備註)
+    match = " OR ".join("starts_with(upper(coalesce(supplier, '')), ?)" for _ in row_level) or "FALSE"
+    con.execute(f"""
         UPDATE expense_items AS e SET is_duplicate = TRUE
         FROM (
             SELECT coalesce(supplier, '') AS sup, invoice_no, min(source_file) AS keep
             FROM expense_items
-            WHERE invoice_no IS NOT NULL
+            WHERE invoice_no IS NOT NULL AND NOT ({match})
             GROUP BY 1, 2
             HAVING count(DISTINCT source_file) > 1
         ) AS d
         WHERE coalesce(e.supplier, '') = d.sup AND e.invoice_no = d.invoice_no
-          AND e.source_file <> d.keep""")
+          AND e.source_file <> d.keep""", row_level)
+    if row_level:
+        con.execute(f"""
+            UPDATE expense_items AS e SET is_duplicate = TRUE
+            FROM (
+                SELECT rowid AS rid, source_file, min(source_file) OVER (
+                    PARTITION BY supplier, invoice_no, description_raw, amount, bl_no) AS keep
+                FROM expense_items
+                WHERE invoice_no IS NOT NULL AND ({match})
+            ) AS d
+            WHERE e.rowid = d.rid AND d.source_file <> d.keep""", row_level)
     return con.execute("SELECT count(*) FROM expense_items WHERE is_duplicate").fetchone()[0]
 
 

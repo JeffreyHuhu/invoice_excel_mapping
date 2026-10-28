@@ -395,6 +395,22 @@ SUPPLIER_CURRENCY: dict = {
     "CÔNG TY TNHH DỊCH VỤ GIAO NHẬN VẬN TẢI VÀ THƯƠNG MẠI CÔNG THÀNH": "VND",
 }
 
+# INVOICE NO 不是供應商自己的帳單號碼 (例如寶成的發票號)、帳單也沒有發票日期的
+# 供應商 (key：SUPPLIER 欄位轉大寫；使用者 2026-10-28 指定)：
+#   - 分析日期：發票日期空白時改用 on board date (轉檔結果仍是 N/A)。
+#   - 重複判斷：同一個發票號碼會出現在不同週的帳單、費用項目不同，所以不能
+#     用 (供應商, 發票號碼) 判斷；改成整列 (發票號碼+費用名稱+金額+提單號碼) 相同才算。
+SUPPLIER_NO_OWN_INVOICE = {
+    "CÔNG TY TNHH GIAO NHẬN THƯƠNG MẠI RỒNG Á CHÂU",
+}
+
+
+def is_no_own_invoice(supplier) -> bool:
+    """用開頭比對：轉檔結果的名稱後面可能有英文備註 "(… English …)"。"""
+    sup = clean_text(supplier)
+    return bool(sup) and sup.upper().startswith(tuple(SUPPLIER_NO_OWN_INVOICE))
+
+
 # 幣別判斷順序 (使用者 2026-10-25 指定)：
 #   1. 帳單上的幣別 (金額文字裡的幣別代碼/符號，_CURRENCY_RES)
 #   2. 供應商 (SUPPLIER_CURRENCY 指定名稱 -> 公司名稱的國別特徵)
