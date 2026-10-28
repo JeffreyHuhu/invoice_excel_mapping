@@ -1024,8 +1024,11 @@ def is_multi_page_supplier(key: Optional[str]) -> bool:
     """這家供應商是不是『一份 PDF 裡有好幾張各自獨立的發票，一頁一張』
     (參見 register_supplier() 的 multi_page 說明)。找不到這家供應商時視為
     False (走一般的單張發票流程)。
+    呼叫端都是 PDF 流程，所以看 PDF 自己的設定 (multi_page_pdf)：同一家另有 Excel
+    規則時 "multi_page" 會被設成 True，但 PDF 仍可能是一份一張 (例如 DWIHARTA，
+    2026-10-28)。Excel 帳單在 find_best_extraction() 另外用 invoice_no 分組。
     """
-    return bool(key and key in SUPPLIER_REGISTRY and SUPPLIER_REGISTRY[key].get("multi_page"))
+    return bool(key and key in SUPPLIER_REGISTRY and SUPPLIER_REGISTRY[key].get("multi_page_pdf"))
 
 
 # ---------------------------------------------------------------------------
@@ -1068,6 +1071,19 @@ def _faktur_seller_by_line(text: str) -> Optional[str]:
         if key:
             return key
     return None
+
+
+# 提單 (B/L) 不是帳單 (使用者 2026-10-28：VN01 "BL - PPVH0810118338.pdf" 要列 ERROR)
+_BL_FILE_RE = re.compile(r"^\s*(?:H|M)?B\s*/?\s*L\b", re.IGNORECASE)
+_BL_TEXT_RE = re.compile(r"BILL\s+OF\s+LADING", re.IGNORECASE)
+
+
+def is_bill_of_lading(pdf_path: str, text: str, rows: List[Dict]) -> bool:
+    """這份是提單 (B/L)，不是帳單：檔名以 BL / B/L / HBL / MBL 開頭，或內文有
+    BILL OF LADING，而且沒有擷取到任何金額 (有金額的是帳單夾帶提單，照常處理)。"""
+    if any(str(r.get("amount") or "").strip() not in ("", "N/A") for r in rows or []):
+        return False
+    return bool(_BL_FILE_RE.match(os.path.basename(pdf_path)) or _BL_TEXT_RE.search(text or ""))
 
 
 def standalone_tax_invoice_owner(pdf_path: str, text: str) -> Optional[str]:
