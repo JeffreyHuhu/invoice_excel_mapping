@@ -110,6 +110,8 @@ KNOWN_SOURCE_ISSUES: Dict[str, Dict[Tuple[str, str], Tuple[str, Optional[set]]]]
         ("arrive_date", "DATE_ORDER"): ("ECOMET 原帳單的到達日本身就早於開船日", {"21 May 2024"}),
         ("container_no", "CONTAINER_FORMAT"): ("ECOMET 原帳單的貨櫃號碼本身就少一個英文字母",
                                                {"BSI8184133"}),
+        # HB/L No 欄只印 "BSWCG" 沒有號碼 (使用者 2026-10-28 確認是原帳單問題，不計入)
+        ("bl_no", "ID_NO_DIGIT"): ("ECOMET 原帳單的 HB/L No 本身就只有 BSWCG", {"BSWCG", "BSWCG:"}),
     },
     "INDOPROSTIME_TRANSPORT": {
         # 帳單印 "2026-JUN-31" (6 月沒有 31 日)
@@ -140,8 +142,9 @@ SUPPLIER_EXEMPTIONS: Dict[str, set] = {
 # 只對特定值的供應商例外 (同樣連附註都不列)
 SUPPLIER_VALUE_EXEMPTIONS: Dict[str, Dict[Tuple[str, str], set]] = {
     # INDOPROSTIME 空運直送收貨人，HAWB 欄印 "DIRECT TO CON"，照抄 (使用者 2026-10-25 確認)
-    "INDOPROSTIME": {("bl_no", "ID_NO_DIGIT"): {"DIRECT TO CON", "DIRCET TO CON"}},
-    "INDOPROSTIME_TRANSPORT": {("bl_no", "ID_NO_DIGIT"): {"DIRECT TO CON", "DIRCET TO CON"}},  # 帳單本身拼錯 DIRCET (抽樣 POU CHEN JUNI 2025)
+    # 帳單本身拼錯 DIRCET (抽樣 POU CHEN JUNI 2025)、DIRET TO CONS (使用者 2026-10-28 確認不標警告)
+    "INDOPROSTIME": {("bl_no", "ID_NO_DIGIT"): {"DIRECT TO CON", "DIRCET TO CON", "DIRET TO CONS"}},
+    "INDOPROSTIME_TRANSPORT": {("bl_no", "ID_NO_DIGIT"): {"DIRECT TO CON", "DIRCET TO CON", "DIRET TO CONS"}},
 }
 
 # 日期合理範圍：早於這一年，或晚於今天 + 這麼多天，視為可疑
