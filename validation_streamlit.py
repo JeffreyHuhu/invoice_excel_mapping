@@ -91,6 +91,11 @@ KNOWN_SOURCE_ISSUES: Dict[str, Dict[Tuple[str, str], Tuple[str, Optional[set]]]]
         # 照抄 PDF 的「ETA:」，使用者 2026-10-28：在 Excel 備註就好，不計入
         ("arrive_date", "DATE_OUT_OF_RANGE"): ("MAERSK 原帳單的 ETA 本身就寫這個日期", None),
     },
+    # DSV 越南 CargoWise 帳單的 ETA 照抄「ORIGIN ETD DESTINATION ETA」那一行 (例如
+    # SSGN0458587 ETD 13-Jul-26 ETA 04-Jun-27)；使用者 2026-10-28：比照 MAERSK 列附註
+    "DSV_VN": {
+        ("arrive_date", "DATE_OUT_OF_RANGE"): ("DSV 原帳單的 ETA 本身就寫這個日期", None),
+    },
     "DWIHARTA": {
         # 沒有船名時 Vessel 欄印佔位符號 ". / ." (使用者確認)、"- / -"、"0 / 0"
         ("vessel", "TEXT_NO_LETTER"): ("DWIHARTA 沒有船名時 Vessel 欄原文就是佔位符號",
