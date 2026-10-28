@@ -7339,6 +7339,10 @@ register_supplier(
     "DSV_VN", "CÔNG TY TNHH DSV AIR & SEA", detect_dsv_vn, parse_dsv_vn,
     extract_total=_dsv_vn_extract_total, extract_grand_total=_dsv_vn_extract_grand_total,
     page_text=_cargowise_pages,
+    # PRO FORMA 合輯裡夾的 VNPT 電子 VAT 發票頁是附件，不擷取 (費用與 PRO FORMA 重複；
+    # 使用者 2026-10-28，JUL.2026_BY SHIPMENT 第 176 頁)。整份只有電子發票時一頁都
+    # 不符合，invoice_text() 會改用全部頁面，照常擷取
+    invoice_page=lambda page: not _is_dsv_vn_einvoice(page),
 )
 
 
