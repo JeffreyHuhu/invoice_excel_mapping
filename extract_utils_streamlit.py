@@ -1837,6 +1837,23 @@ def audit_invoice_totals(
         totals_found: Dict[str, float] = {}
         grand_totals_found: Dict[str, float] = {}
         final_totals_found: Dict[str, float] = {}
+
+        def _assign(found: Dict[str, float], value, page_upper: str) -> None:
+            """這一頁抓到的總額歸給頁面上印的那張發票 (整個字比對，避免 "4521"
+            誤配 "45217")；擷取函式回傳 {發票號碼: 總額} 時逐票歸屬 (越南 KN 附件清單)。"""
+            if isinstance(value, dict):
+                for k, v in value.items():
+                    nk = normalize_value(k)
+                    if nk in raw_invoice_no and v is not None:
+                        found.setdefault(nk, v)
+                return
+            for inv_key, inv_raw in raw_invoice_no.items():
+                if inv_key in found or not inv_raw:
+                    continue
+                if re.search(rf"(?<![A-Z0-9]){re.escape(str(inv_raw).upper())}(?![A-Z0-9])", page_upper):
+                    found[inv_key] = value
+                    break
+
         for page_text in pages:
             # 大部分供應商的『未稅總額』就印在發票抬頭頁本身 (detect_fn 認得
             # 的那一頁)；但少數供應商 (例如 DSV) 是「一張發票的資料跨好幾頁」
@@ -1846,48 +1863,27 @@ def audit_invoice_totals(
             # 『這一頁的文字裡有沒有出現某張發票的發票號碼』來判斷這個未稅
             # 總額屬於哪一張發票 (發票抬頭頁跟附屬頁通常都會重複印一次發票
             # 號碼，例如 DSV 附屬頁開頭就是 "INVOICE ID610413182")。
-            page_upper = None
             if extract_total_fn:
                 try:
                     invoice_total = extract_total_fn(page_text)
                 except Exception:
                     invoice_total = None
                 if invoice_total is not None:
-                    page_upper = page_text.upper()
-                    for inv_key, inv_raw in raw_invoice_no.items():
-                        if inv_key in totals_found or not inv_raw:
-                            continue
-                        if str(inv_raw).upper() in page_upper:
-                            totals_found[inv_key] = invoice_total
-                            break
+                    _assign(totals_found, invoice_total, page_text.upper())
             if extract_grand_total_fn:
                 try:
                     grand_total = extract_grand_total_fn(page_text)
                 except Exception:
                     grand_total = None
                 if grand_total is not None:
-                    if page_upper is None:
-                        page_upper = page_text.upper()
-                    for inv_key, inv_raw in raw_invoice_no.items():
-                        if inv_key in grand_totals_found or not inv_raw:
-                            continue
-                        if str(inv_raw).upper() in page_upper:
-                            grand_totals_found[inv_key] = grand_total
-                            break
+                    _assign(grand_totals_found, grand_total, page_text.upper())
             if extract_final_total_fn:
                 try:
                     final_total = extract_final_total_fn(page_text)
                 except Exception:
                     final_total = None
                 if final_total is not None:
-                    if page_upper is None:
-                        page_upper = page_text.upper()
-                    for inv_key, inv_raw in raw_invoice_no.items():
-                        if inv_key in final_totals_found or not inv_raw:
-                            continue
-                        if str(inv_raw).upper() in page_upper:
-                            final_totals_found[inv_key] = final_total
-                            break
+                    _assign(final_totals_found, final_total, page_text.upper())
 
         for inv_key in set(totals_found) | set(grand_totals_found) | set(final_totals_found):
             group_rows = groups.get(inv_key) or []
