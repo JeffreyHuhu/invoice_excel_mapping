@@ -6945,7 +6945,78 @@ def _parse_dsv_vn_einvoice(text: str) -> Dict:
     return {"header": h, "items": items or [{"description": None, "amount": None, "vat": None}]}
 
 
+#   (d) 每週合輯的對帳表 (2026-10-28 抽樣 "DSV AIR & SEA_JAN.2026_BY WEEKLY"，BẢNG KÊ ĐÍNH KÈM
+#       HÓA ĐƠN)：費用欄比 (b) 多 (TIO fee、OT、BKG fee)，空白欄從文字分不出是哪一欄；SWB 也
+#       可能是純數字 (空運 507586059429)。_cargowise_pages() 用 pdfplumber 表格附上
+#       "##DSVHDR## 欄名 | …" 與 "##DSVROW## 值 | …"，這裡依欄名對應：RATE 與
+#       Thành tiền trước thuế 之間是費用，Thuế 8% VAT 單獨一筆，每票 (SWB) 自己勾稽。
+def _dsv_vn_grid_lines(page) -> str:
+    out = ""
+    for table in page.extract_tables() or []:
+        if not table or not any("SOA" in (c or "") for c in table[0]):
+            continue
+        cell = lambda c: re.sub(r"\s+", " ", c or "").strip()  # noqa: E731
+        out += "\n##DSVHDR## " + " | ".join(cell(c) for c in table[0])
+        for row in table[1:]:
+            out += "\n##DSVROW## " + " | ".join(cell(c) for c in row)
+    return out
+
+
+def _dsv_vn_grid_num(value: str) -> Optional[int]:
+    digits = re.sub(r"[\s,]", "", value or "")
+    return int(digits) if digits.isdigit() else None
+
+
+def _dsv_vn_grid_rows(text: str) -> List[Dict]:
+    rows, labels = [], []
+    for line in text.splitlines():
+        if line.startswith("##DSVHDR## "):
+            labels = line[len("##DSVHDR## "):].split(" | ")
+            continue
+        if not line.startswith("##DSVROW## ") or not labels:
+            continue
+        cells = dict(zip(labels, line[len("##DSVROW## "):].split(" | ")))
+        swb = cells.get("Số SWB", "")
+        if not re.fullmatch(r"[A-Z0-9]{8,}", swb):
+            continue                                       # TOTAL 列
+        start = labels.index("RATE") + 1 if "RATE" in labels else None
+        end = next((i for i, lb in enumerate(labels) if lb.startswith("Thành tiền")), None)
+        vat_label = next((lb for lb in labels if lb.startswith("Thuế")), None)
+        total_label = next((lb for lb in labels if lb.startswith("Tổng")), None)
+        if start is None or end is None:
+            continue
+        soa = re.search(r"(\d{4})$", cells.get("SOA #", ""))
+        day = re.fullmatch(r"(\d{1,2})-([A-Za-z]{3})", cells.get("DATE", ""))
+        rows.append({
+            "swb": swb, "fcr": cells.get("FCR") or None, "po": cells.get("PO#") or None,
+            "date": _format_date_en_from_month_name(day.group(1), day.group(2), soa.group(1))
+            if day and soa else None,
+            "cbm": cells.get("CBM") or None,
+            "fees": [(labels[i], _dsv_vn_grid_num(cells.get(labels[i]))) for i in range(start, end)],
+            "subtotal": _dsv_vn_grid_num(cells.get(labels[end])),
+            "vat_desc": vat_label, "vat": _dsv_vn_grid_num(cells.get(vat_label)) if vat_label else None,
+            "total": _dsv_vn_grid_num(cells.get(total_label)) if total_label else None,
+        })
+    return rows
+
+
+def _parse_dsv_vn_grid(text: str) -> Dict:
+    doc = _parse_dsv_vn_table(text)          # 抬頭 (供應商、客戶) 沿用 (b)
+    items = []
+    for r in _dsv_vn_grid_rows(text):
+        common = {"invoice_no": r["swb"], "invoice_date": r["date"], "order_no": r["po"],
+                  "bl_no": r["fcr"], "mbl_no": r["swb"], "volume": f"{r['cbm']} M3" if r["cbm"] else None}
+        items += [{"description": desc, "amount": amount, "vat": None, **common}
+                  for desc, amount in r["fees"] if amount]
+        if r["vat"] is not None:
+            items.append({"description": r["vat_desc"], "amount": None, "vat": r["vat"], **common})
+    doc["items"] = items or [{"description": None, "amount": None}]
+    return doc
+
+
 def parse_dsv_vn(text: str) -> Dict:
+    if "##DSVROW## " in text:
+        return _parse_dsv_vn_grid(text)
     if _is_dsv_vn_einvoice(text):
         return _parse_dsv_vn_einvoice(text)
     if _DSV_VN_ROW_RE.search(text):        # 只判斷版型，不先解析整張表
@@ -6955,6 +7026,8 @@ def parse_dsv_vn(text: str) -> Dict:
 
 def _dsv_vn_extract_total(text: str):
     """未稅總額：對帳表是每票 Thành tiền trước thuế；PRO FORMA 是每張 SUBTOTAL。"""
+    if "##DSVROW## " in text:
+        return {r["swb"]: r["subtotal"] for r in _dsv_vn_grid_rows(text)}
     if _is_dsv_vn_einvoice(text):
         return _dsv_vn_dot_amount(_search(r"Cộng doanh thu trên hóa đơn \(Amount\)\s*:\s*([\d.]+)", text))
     rows = _dsv_vn_table_rows(text)
@@ -6962,6 +7035,8 @@ def _dsv_vn_extract_total(text: str):
 
 
 def _dsv_vn_extract_grand_total(text: str):
+    if "##DSVROW## " in text:
+        return {r["swb"]: r["total"] for r in _dsv_vn_grid_rows(text)}
     if _is_dsv_vn_einvoice(text):
         return _dsv_vn_dot_amount(_search(r"\(Total amount\)\s*:\s*([\d.]+)", text))
     rows = _dsv_vn_table_rows(text)
@@ -7040,6 +7115,8 @@ def _cargowise_pages(pdf_path: str) -> List[str]:
                                and w["x0"] < cons["x0"] - 1), key=lambda w: w["x0"])
                 if line:
                     text += "\n##SHIPPER## " + " ".join(w["text"] for w in line)
+            if "SOA #" in text and "SWB" in text:
+                text += _dsv_vn_grid_lines(clean)
             pages.append(text + _CW_PAGE_MARK)
     return pages
 
@@ -7139,7 +7216,8 @@ def _cw_after(text: str, header_re: str, line_re: str, look: int = 4):
 def _cw_parse_doc(doc: str, supplier: Optional[str]) -> List[Dict]:
     h: Dict[str, Optional[str]] = {"supplier": supplier}
     h["invoice_no"] = _cw_invoice_no(doc)
-    h["invoice_date"] = _cw_date(_search(r"\bDATE\s*[\[|(]?\s*(\d{1,2}-[A-Za-z]{3}-\d{2})", doc))
+    # 掃描頁 OCR 會在標籤後多讀一個符號 ("INVOICE DATE) 19-Apr-26"，2026-10-28 抽樣 DHL 合輯)
+    h["invoice_date"] = _cw_date(_search(r"\bDATE\s*[\[|()/]?\s*(\d{1,2}-[A-Za-z]{3}-\d{2})", doc))
     m = re.search(r"^(?!SHIPMENT)(.+?)\s*(?:INVOICE DATE|SHIPMENT\s*[A-Z][A-Z0-9]{5,})",
                   doc, re.MULTILINE)
     h["consignee"] = m.group(1).strip() if m else None
@@ -9265,7 +9343,8 @@ register_supplier(
 # 2026-10-27)；整張一個 VAT，發票號碼用表尾的 Invoice No.。
 _APL_VN_ITEM_RE = re.compile(
     r"^\d+\s+(?P<desc>.+?)\s+(?P<unit>[A-Z]{2,4})\s+(?P<qty>[\d.,]+)\s+(?P<price>[\d.]+)\s+"
-    r"(?P<amount>[\d.]+)\s+(?P<rate>\d+%|KCT)\s+(?P<tax>[\d.]+)\s+(?P<total>[\d.]+)$", re.MULTILINE)
+    # 稅率欄也可能印 "X" (代收代付 Thu hộ，2026-10-28 抽樣 "APL_APR.2026_LOCAL CHARGES" 第 1 頁)
+    r"(?P<amount>[\d.]+)\s+(?P<rate>\d+%|KCT|X)\s+(?P<tax>[\d.]+)\s+(?P<total>[\d.]+)$", re.MULTILINE)
 
 
 def detect_apl_vn(text: str) -> bool:
