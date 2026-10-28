@@ -113,12 +113,6 @@ KNOWN_SOURCE_ISSUES: Dict[str, Dict[Tuple[str, str], Tuple[str, Optional[set]]]]
         ("arrive_date", "DATE_FORMAT"): ("INDOPROSTIME 原帳單的日期本身就不存在", {"2026-JUN-31"}),
         ("onboard_date", "DATE_FORMAT"): ("INDOPROSTIME 原帳單的日期本身就不存在", {"2026-JUN-31"}),
     },
-    # 使用者 2026-10-28：CONG THANH 每票 AMOUNT + VAT = TOTAL 通過就 PASS。
-    # 代墊款清單的日期欄只打日數 (例如 5)，Excel 顯示成 1900 年 1 月；只限這 31 個值
-    "CONG_THANH": {
-        ("invoice_date", "DATE_OUT_OF_RANGE"): ("CONG THANH 原帳單的日期欄只填了日數",
-                                                {f"{d:02d} Jan 1900" for d in range(1, 32)}),
-    },
 }
 # INDO PROSTIME EXPRESS 與 TRANSPORT 是同一套帳單格式
 KNOWN_SOURCE_ISSUES["INDOPROSTIME"] = KNOWN_SOURCE_ISSUES["INDOPROSTIME_TRANSPORT"]
@@ -266,14 +260,16 @@ def _explain_by_formula_issue(issues: List[Dict]) -> List[Dict]:
     return explained
 
 
-# 只看每票勾稽的供應商：合計列公式錯誤只列成 INFO，不扣分 (使用者 2026-10-28：
-# CONG THANH 全部版面「每票通過就 PASS」，例如 CHI HO 清單 E360 =D360*8% 把 8%
-# 套在不課稅的費用上)。整份合計勾稽 (若有) 仍照常判 ERROR。
+# 只看每票勾稽的帳單：合計列公式錯誤只列成 INFO，不扣分 (使用者 2026-10-28：
+# CONG THANH 代墊款清單「每票通過就 PASS」，例如 CHI HO 清單 E360 =D360*8% 把 8%
+# 套在不課稅的費用上)。有整份合計勾稽的版面 (運費對帳單、POU CHEN 對帳表)，
+# 公式錯誤仍是 ERROR (使用者 2026-10-28 確認)。
 PER_TICKET_FORMULA_INFO_SUPPLIERS = {"CONG_THANH"}
 
 
-def _formula_issue_as_info(issues: List[Dict], supplier_key: Optional[str]) -> List[Dict]:
-    if supplier_key not in PER_TICKET_FORMULA_INFO_SUPPLIERS:
+def _formula_issue_as_info(issues: List[Dict], supplier_key: Optional[str],
+                           has_whole_audit: bool) -> List[Dict]:
+    if supplier_key not in PER_TICKET_FORMULA_INFO_SUPPLIERS or has_whole_audit:
         return issues
     return [dict(i, severity=INFO, no_penalty=True,
                  message=f"{i['message']}（這家供應商只看每票勾稽，合計列公式錯誤屬原帳單問題）")
@@ -442,6 +438,8 @@ def validate_extraction(
     for ar in audit_results or []:
         # 跟 _group_rows_by_invoice() 用同一套正規化，才能把稽核結果對回發票
         audit_by_invoice[normalize_value(ar.get("invoice_no"))] = ar
+    # 整份帳單合計的勾稽 (invoice_no 為 None)
+    has_whole_audit = any(ar.get("invoice_no") is None for ar in audit_results or [])
 
     base_issues = list(extra_issues or [])
     if not supplier_key:
@@ -467,7 +465,7 @@ def validate_extraction(
                   if str(group_rows[0].get(i["field"], "")).strip()
                   not in value_exempt.get((i["field"], i["rule"]), ())]
         issues = _explain_by_formula_issue(issues)
-        issues = _formula_issue_as_info(issues, supplier_key)
+        issues = _formula_issue_as_info(issues, supplier_key, has_whole_audit)
         issues = _mark_known_source_issues(issues, supplier_key, group_rows[0])
         confidence = _confidence(issues)
         results.append({

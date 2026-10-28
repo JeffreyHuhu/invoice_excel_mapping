@@ -5871,7 +5871,20 @@ def _ct_paid_on_behalf(rows: List[list]) -> Optional[Dict]:
     items: List[Dict] = []
     row_totals: Dict[str, float] = {}
     total = vat_total = bill_total = None
+    # 日期欄只打日數 (例如 5)，Excel 顯示成 1900 年 1 月：用清單裡最常見的年月補上
+    # (使用者 2026-10-28 確認 T05.2026 DOT1 的 "5" 是 2026 年 5 月)
+    months = collections.Counter((v.year, v.month) for v in (_vn_cell(r, c_date) for r in rows[head_i + 1:])
+                     if isinstance(v, (datetime.datetime, datetime.date)) and v.year > 1900)
     for row in rows[head_i + 1:]:
+        cell = _vn_cell(row, c_date)
+        if isinstance(cell, (datetime.datetime, datetime.date)) and cell.year == 1900 \
+                and cell.month == 1 and months:
+            year, month = months.most_common(1)[0][0]
+            try:
+                row = list(row)
+                row[c_date] = datetime.date(year, month, cell.day)
+            except ValueError:      # 該月沒有這一天：保留原值
+                pass
         inv = _vn_text(_vn_cell(row, c_inv))
         decl = _vn_text(_vn_cell(row, c_decl))
         amount = _vn_amount(_vn_cell(row, c_net))
@@ -5906,8 +5919,6 @@ def _ct_paid_on_behalf(rows: List[list]) -> Optional[Dict]:
         item["bl_no"] = item["mbl_no"] = ",".join(item.pop("decls")) or None
     # 勾稽：只核對每一票 AMOUNT + VAT = 該列 TOTAL，不核對整份清單的 TỔNG CỘNG
     # (使用者 2026-10-28 規定；total / vat_total / bill_total 只用來找合計列)
-    # 日期欄只打日數 (Excel 顯示 1900 年 1 月) 是原帳單問題，已登記在
-    # validation_streamlit.KNOWN_SOURCE_ISSUES，不要改日期擷取規則
     audit = [{"invoice_no": inv, "total": None, "grand_total": round(value, 2),
               "final_total": None} for inv, value in row_totals.items()]
     return {"header": header, "items": items, "audit": audit}
