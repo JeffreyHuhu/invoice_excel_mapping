@@ -5906,6 +5906,8 @@ def _ct_paid_on_behalf(rows: List[list]) -> Optional[Dict]:
         item["bl_no"] = item["mbl_no"] = ",".join(item.pop("decls")) or None
     # 勾稽：只核對每一票 AMOUNT + VAT = 該列 TOTAL，不核對整份清單的 TỔNG CỘNG
     # (使用者 2026-10-28 規定；total / vat_total / bill_total 只用來找合計列)
+    # 日期欄只打日數 (Excel 顯示 1900 年 1 月) 是原帳單問題，已登記在
+    # validation_streamlit.KNOWN_SOURCE_ISSUES，不要改日期擷取規則
     audit = [{"invoice_no": inv, "total": None, "grand_total": round(value, 2),
               "final_total": None} for inv, value in row_totals.items()]
     return {"header": header, "items": items, "audit": audit}
