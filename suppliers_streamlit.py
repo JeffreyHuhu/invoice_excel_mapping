@@ -7505,7 +7505,16 @@ def _vt_sheets(book, cfgs: List[Tuple[str, Dict]]):
     整本都沒有名稱符合的工作表時 (2026-10-28 抽樣：工作表叫 "POU HUNG"、"TỔNG"、
     "XUAT"…)，改用表頭判斷：表頭列找得到、而且至少有一個費用欄的第一個設定。"""
     matched, rest = False, []
+    # 內容完全相同的工作表只算一次 (2026-10-28 抽樣 VN02 "POU HUNG 09-2025"：
+    # "HÀNG RỜI" 是 "NEO" 的副本，兩張都算會重複請款)
+    seen = set()
+    sheets = []
     for name, rows in book.sheets:
+        sig = repr(rows)
+        if sig not in seen:
+            seen.add(sig)
+            sheets.append((name, rows))
+    for name, rows in sheets:
         for pattern, cfg in cfgs:
             if re.search(pattern, _vt_norm(name)) and _vt_requires_ok(rows, cfg):
                 matched = True
@@ -7704,11 +7713,16 @@ _VT_VINH_HUNG_LONG = [
                "fees": [(x, None) for x in ("=CUOC VAN CHUYEN", "=CUOC VC", "CUOC VC TRONG", "CUOC VC NGOAI",
                                             "HO TRO PHI CO SO HA TANG", "BD NANG", "=BDNH",
                                             "=PHI NANG", "=PHI HA", "PHI HA BAI SOM", "PHI HA CONT SOM", "=VSC",
-                                            "PHI D/O VSC", "=CAN CONT", "=CAN XE", "PHI NEO XE")],
+                                            "PHI D/O VSC", "=CAN CONT", "=CAN XE", "PHI NEO XE",
+                                            # "PHÍ CÂN" 算在 TỔNG CỘNG HĐ NÂNG HẠ 裡 (2026-10-28 抽樣
+                                            # "POU HUNG 05-2025 Vinh Hung Long" XUAT NB 表)
+                                            "=PHI CAN")],
                # "CÂN" 欄 (過磅費) 不算進 TỔNG CỘNG，另在磅櫃表請款，這裡不取 (f007 BK 072025)
                "grand": ("=TONG CONG", "TONG CONG CUOC & PHI", "=TONG")}),
+    # 壓車表 (NEO)：PHÍ NEO XE 是每日單價，TỔNG CỘNG = 單價 × SỐ NGÀY NEO 才是金額
+    # (2026-10-28 抽樣 "POU HUNG 09-2025 Vinh Hung Long"：1,500,000 × 2 天 = 3,000,000)
     (r"(?!)", {**_VT_VHL_COMMON, "date": "NGAY VAO XUONG", "require": "PHI NEO XE",
-               "fees": [("PHI NEO XE", None)], "grand": "=TONG CONG"}),
+               "fees": [("=TONG CONG", "PHÍ NEO XE")], "grand": "=TONG CONG"}),
     # 磅櫃 / 附加費表 (CÂN CONT、cân-phụ thu)
     (r"(?!)", {**_VT_VHL_COMMON, "date": ("=NGAY", "NGAY LAY"), "require": ("PHI CAN CONT", "CHI HO CAN"),
                "fees": [(x, None) for x in ("PT CAN CONT", "=PTCC", "PHI CAN CONT", "=PHU THU", "PHU THU CAN",
