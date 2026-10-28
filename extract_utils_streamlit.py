@@ -222,11 +222,18 @@ def _ocr_page_with_psm(pdf_path: str, page_index: int, psm: int, contrast: bool 
     return _OCR_PSM_CACHE[cache_key]
 
 
+def limited_pages(pdf):
+    """抽樣/診斷用：環境變數 INVOICE_MAX_PAGES (例如 50) 有設定時只讀前 N 頁
+    (使用者 2026-10-28：超過 50 頁的 PDF 抽樣時只跑約 50 頁)。正式轉檔不設定，讀整份。"""
+    limit = os.environ.get("INVOICE_MAX_PAGES", "").strip()
+    return pdf.pages[:int(limit)] if limit.isdigit() and int(limit) > 0 else pdf.pages
+
+
 def _scanned_page_indexes(pdf_path: str) -> List[int]:
     """沒有文字層的頁 (掃描頁)。"""
     try:
         with pdfplumber.open(pdf_path) as pdf:
-            return [i for i, p in enumerate(pdf.pages) if not (p.extract_text() or "").strip()]
+            return [i for i, p in enumerate(limited_pages(pdf)) if not (p.extract_text() or "").strip()]
     except Exception:
         return []
 
@@ -337,7 +344,7 @@ def extract_pages_from_pdf_force_ocr(pdf_path: str) -> List[str]:
     """
     pages_text = []
     with pdfplumber.open(pdf_path) as pdf:
-        for i, page in enumerate(pdf.pages):
+        for i, page in enumerate(limited_pages(pdf)):
             if _page_is_scanned_image(page):
                 text = _ocr_page_text_enhanced(pdf_path, i, page)
             else:
@@ -406,7 +413,7 @@ def extract_pages_from_pdf(pdf_path: str, **pdfplumber_kwargs) -> List[str]:
     pages_text = []
     with pdfplumber.open(pdf_path) as pdf:
         scanned = []
-        for i, page in enumerate(pdf.pages):
+        for i, page in enumerate(limited_pages(pdf)):
             text = page.extract_text(**pdfplumber_kwargs) or ""
             if not text.strip():
                 scanned.append(i)

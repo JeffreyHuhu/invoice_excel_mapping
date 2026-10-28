@@ -28,7 +28,7 @@ import re
 import datetime
 from typing import Dict, List, Optional, Tuple
 
-from extract_utils_streamlit import register_supplier, set_supplier_number
+from extract_utils_streamlit import limited_pages, register_supplier, set_supplier_number
 
 # 印尼文月份對照表 (DWIHARTA 帳單用印尼文寫月份)
 INDO_MONTHS = {
@@ -6580,7 +6580,7 @@ def _cargowise_pages(pdf_path: str) -> List[str]:
     from extract_utils_streamlit import _ocr_page_with_psm
     pages = []
     with pdfplumber.open(pdf_path) as pdf:
-        for page_index, pg in enumerate(pdf.pages):
+        for page_index, pg in enumerate(limited_pages(pdf)):
             if not any(c["text"].strip() for c in pg.chars):
                 # 掃描頁 (YUSEN 把整份帳單掃描附在後面)：400 dpi + psm 6 才讀得對金額
                 # (使用者 2026-10-27 要求掃描頁也要到等級高)
@@ -8321,7 +8321,8 @@ def _vn_pdf_date(text: Optional[str]) -> Optional[str]:
 # (名稱、FCR、幣別、單位、數量、單價、稅率、未稅金額)，稅額只有總數 -> 單獨一筆 VAT。
 # Excel：Late come charge 對帳表，每列有自己的發票號碼 (INVOICE NO.)。
 _MAERSK_VN_ITEM_RE = re.compile(
-    r"^(?P<desc>.+?)\s+(?P<ref>FCR\d+|[A-Z]{3,}\d{5,})\s+(?P<cur>[A-Z]{3})\s+(?P<unit>\S+)\s+"
+    # 參考號碼也可能數字開頭 ("26HCM0018482"，2026-10-28 抽樣)
+    r"^(?P<desc>.+?)\s+(?P<ref>FCR\d+|[A-Z]{3,}\d{5,}|\d{2}[A-Z]{2,4}\d{5,})\s+(?P<cur>[A-Z]{3})\s+(?P<unit>\S+)\s+"
     r"(?P<qty>[\d,.]+)\s+(?P<price>[\d,.]+)\s+(?P<rate>\d+%|KCT)\s+(?P<amount>[\d,.]+)$", re.MULTILINE)
 
 
