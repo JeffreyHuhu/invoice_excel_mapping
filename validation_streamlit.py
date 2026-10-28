@@ -266,6 +266,20 @@ def _explain_by_formula_issue(issues: List[Dict]) -> List[Dict]:
     return explained
 
 
+# 只看每票勾稽的供應商：合計列公式錯誤只列成 INFO，不扣分 (使用者 2026-10-28：
+# CONG THANH 全部版面「每票通過就 PASS」，例如 CHI HO 清單 E360 =D360*8% 把 8%
+# 套在不課稅的費用上)。整份合計勾稽 (若有) 仍照常判 ERROR。
+PER_TICKET_FORMULA_INFO_SUPPLIERS = {"CONG_THANH"}
+
+
+def _formula_issue_as_info(issues: List[Dict], supplier_key: Optional[str]) -> List[Dict]:
+    if supplier_key not in PER_TICKET_FORMULA_INFO_SUPPLIERS:
+        return issues
+    return [dict(i, severity=INFO, no_penalty=True,
+                 message=f"{i['message']}（這家供應商只看每票勾稽，合計列公式錯誤屬原帳單問題）")
+            if i["rule"] == RULE_EXCEL_FORMULA else i for i in issues]
+
+
 def _mark_known_source_issues(issues: List[Dict], supplier_key: Optional[str],
                               row: Dict) -> List[Dict]:
     """符合 KNOWN_SOURCE_ISSUES 的問題改成 INFO，說明後面註記屬原帳單問題
@@ -453,6 +467,7 @@ def validate_extraction(
                   if str(group_rows[0].get(i["field"], "")).strip()
                   not in value_exempt.get((i["field"], i["rule"]), ())]
         issues = _explain_by_formula_issue(issues)
+        issues = _formula_issue_as_info(issues, supplier_key)
         issues = _mark_known_source_issues(issues, supplier_key, group_rows[0])
         confidence = _confidence(issues)
         results.append({
