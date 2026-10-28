@@ -116,8 +116,18 @@ def collect_rows(roots: Sequence[Path], levels: Sequence[str]):
     return rows, stats
 
 
+def _ticket_key(row: dict):
+    """票數的單位：B/L NO. (有數字的才算)；沒有就用 INVOICE NO
+    (跟本機轉檔總表 local_quality._shipment_count 一樣)。"""
+    bl = str(row.get("bl_no") or "").strip()
+    if bl and bl.upper() != "N/A" and any(ch.isdigit() for ch in bl):
+        return ("BL", bl.upper())
+    inv = str(row.get("invoice_no") or "").strip()
+    return ("INV", inv.upper()) if inv and inv.upper() != "N/A" else None
+
+
 def compute_totals(rows: List[dict], fx_folder: Path):
-    """依幣別加總 -> ([(幣別, 列數, 費用, VAT, TOTAL, 1 USD 兌換數或 None)], 匯率檔名)。
+    """依幣別加總 -> ([(幣別, 總票數 (不重複), 費用, VAT, TOTAL, 1 USD 兌換數或 None)], 匯率檔名)。
     幣別判斷跟資料庫一樣：帳單幣別 > 供應商 > 國家資料夾。"""
     from collections import OrderedDict
     import fx
@@ -125,63 +135,72 @@ def compute_totals(rows: List[dict], fx_folder: Path):
     for row in rows:
         cur = detect_currency(row.get("amount"), row.get("supplier"),
                               folder_currency(row.get("_path"))) or "(未知)"
-        amount = parse_amount(row.get("amount")) or 0.0
-        vat = parse_amount(row.get("vat")) or 0.0
-        s = sums.setdefault(cur, [0, 0.0, 0.0])
-        s[0] += 1
-        s[1] += amount
-        s[2] += vat
+        s = sums.setdefault(cur, [set(), 0.0, 0.0])
+        key = _ticket_key(row)
+        if key:
+            s[0].add(key)
+        s[1] += parse_amount(row.get("amount")) or 0.0
+        s[2] += parse_amount(row.get("vat")) or 0.0
     book = fx.latest_book_file(fx_folder)
     rates = fx.read_book_rates(book) if book else {}
     out = []
-    for cur, (n, amount, vat) in sums.items():
+    for cur, (tickets, amount, vat) in sums.items():
         rate = 1.0 if cur == "USD" else (rates[cur][2] if cur in rates else None)
-        out.append((cur, n, amount, vat, amount + vat, rate))
+        out.append((cur, len(tickets), amount, vat, amount + vat, rate))
     return out, (book.name if book else None)
 
 
 def _write_totals_sheet(wb: Workbook, totals, book_name) -> None:
+    """格式照使用者 2026-10-28 改好的 RONG_A_CHAU 範例：黃底標題；三個區塊
+    (幣別/總票數、當地幣別金額、USD 金額) 各一種淺色底 (主題色 9/6/8，淡化 80%)，
+    新細明體、全部靠右，區塊之間空兩列。"""
+    from openpyxl.styles import Color, PatternFill
     ws = wb.create_sheet(TOTALS_SHEET_NAME)
-    bold = Font(bold=True)
-    money = "#,##0.00"
-    for col, width in zip("ABCDEFGHIJ", (12, 10, 20, 20, 20, 14, 18, 18, 18)):
+    for col, width in zip("ABCDEFGHI", (18.9, 19.7, 23.7, 24.0, 23.3, 20.0, 20.4, 21.0, 23.9)):
         ws.column_dimensions[col].width = width
-    title = WriteOnlyCell(ws, value="費用總和 (當地幣別 & 美金)")
-    title.font = Font(bold=True, size=14)
-    ws.append([title])
-    ws.append([f"匯率：{book_name or '找不到作帳匯率檔'} (每幣別最新一期；USD = 當地幣別 ÷ 1 USD 兌換數)"])
-    ws.append(["TOTAL = 費用 + VAT；收「辨識等級」高與中的全部明細 (重複發票已略過)"])
-    ws.append([])
-    header = ["幣別", "明細列數", "費用總和", "VAT 總和", "TOTAL 總和", "1 USD 兌換數",
-              "費用總和 (USD)", "VAT 總和 (USD)", "TOTAL 總和 (USD)"]
-    cells = []
-    for text in header:
-        c = WriteOnlyCell(ws, value=text)
-        c.font = bold
-        cells.append(c)
-    ws.append(cells)
-    usd_sum = [0.0, 0.0, 0.0]
-    missing = []
+    font_name = "新細明體"
+    yellow = PatternFill("solid", fgColor="FFFFFF00")
+    fills = [PatternFill("solid", fgColor=Color(theme=t, tint=0.7999816888943144)) for t in (9, 6, 8)]
+    right = Alignment(horizontal="right")
 
-    def num(v, fmt=money):
-        c = WriteOnlyCell(ws, value=v)
-        c.number_format = fmt
+    def cell(value, fill, bold=False, fmt=None, size=11, align=right):
+        c = WriteOnlyCell(ws, value=value)
+        c.font = Font(name=font_name, bold=bold, size=size)
+        c.fill = fill
+        if align is not None:
+            c.alignment = align
+        if fmt:
+            c.number_format = fmt
         return c
 
+    def block(fill, header, values, fmt=None):
+        ws.append([cell(h, fill, bold=True) for h in header])
+        for vals in values:
+            ws.append([cell(v, fill, fmt=fmt if isinstance(v, (int, float)) and fmt else None)
+                       for v in vals])
+
+    money = "#,##0.00"
+    ws.append([cell("費用總和 (當地幣別 & 美金)", yellow, bold=True, size=14, align=None),
+               cell(None, yellow, align=None), cell(None, yellow, align=None)])
+    ws.append([])
+    block(fills[0], ["幣別", "總票數 (不重複)", None], [[cur, n, None] for cur, n, *_ in totals])
+    missing = []
+    usd_sum = [0.0, 0.0, 0.0]
     for cur, n, amount, vat, total, rate in totals:
-        usd = [v / rate for v in (amount, vat, total)] if rate else [None, None, None]
+        ws.append([])
+        ws.append([])
+        block(fills[1], [f"費用總和 ({cur})", f"VAT 總和 ({cur})", f"TOTAL 總和  ({cur})"],
+              [[amount, vat, total]], money)
         if rate:
-            usd_sum = [a + b for a, b in zip(usd_sum, usd)]
+            usd_sum = [x + v / rate for x, v in zip(usd_sum, (amount, vat, total))]
         else:
             missing.append(cur)
-        ws.append([cur, n, num(amount), num(vat), num(total), num(rate, "#,##0.0000") if rate else "沒有匯率",
-                   *(num(v) for v in usd)])
-    label = WriteOnlyCell(ws, value="合計 (USD)")
-    label.font = bold
-    ws.append([label, sum(t[1] for t in totals), None, None, None, None, *(num(v) for v in usd_sum)])
+    ws.append([])
+    ws.append([])
+    block(fills[2], ["費用總和 (USD)", "VAT 總和 (USD)", "TOTAL 總和 (USD)"], [usd_sum], money)
     if missing:
         ws.append([])
-        ws.append([f"注意：{'、'.join(missing)} 沒有匯率，沒有算進 USD 合計"])
+        ws.append([f"注意：{'、'.join(missing)} 沒有匯率 ({book_name or '找不到作帳匯率檔'})，沒有算進 USD"])
 
 
 def write_workbook(rows: List[dict], out_path: Path, totals=None) -> None:
@@ -228,7 +247,7 @@ def run(out_path: Path, roots: Sequence[Path], levels: Sequence[str] = ("高", "
     print(f"  共 {len(rows):,} 列；重複發票略過 {stats['dup_rows']:,} 列；讀取失敗 {stats['failed']:,} 份")
     for cur, n, amount, vat, total, rate in (summary[0] if summary else []):
         usd = f"{total / rate:,.2f} USD" if rate else "沒有匯率"
-        print(f"  {cur}：費用 {amount:,.2f}、VAT {vat:,.2f}、TOTAL {total:,.2f} ({usd})")
+        print(f"  {cur}：總票數 {n:,}、費用 {amount:,.2f}、VAT {vat:,.2f}、TOTAL {total:,.2f} ({usd})")
     return out_path
 
 
