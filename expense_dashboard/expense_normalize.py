@@ -404,6 +404,9 @@ SUPPLIER_CURRENCY: dict = {
 #     用 (供應商, 發票號碼) 判斷；改成整列 (發票號碼+費用名稱+金額+提單號碼) 相同才算。
 SUPPLIER_NO_OWN_INVOICE = {
     "CÔNG TY TNHH GIAO NHẬN THƯƠNG MẠI RỒNG Á CHÂU",
+    # 台灣曜捷 (OPL) 美金 Debit Note：發票號碼是 FILE NO (使用者 2026-10-28)，同一個 FILE NO
+    # 會有好幾張 HB/L 各自請款，要逐列判斷重複 (提單號碼不同就不是重複)
+    "ORIENTAL POWER LOGISTICS CO., LTD.",
 }
 
 

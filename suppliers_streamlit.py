@@ -6669,10 +6669,13 @@ def _parse_opl_dn(text: str) -> Dict:
     fcl = re.search(r"\s\d+X\d{2}'", text) is not None
     header = {
         "supplier": _OPL_DN_SUPPLIER,
-        # 同一個 FILE NO 會有好幾張 HB/L 各自請款 (2026-10-28 抽樣 CT-2609648)，發票號碼用 HB/L
-        "invoice_no": _search(r"HB/L\s*:\s*(\S+)", text),
-        # 沒有 DATE 的 Debit Note 暫用開船日 (待使用者確認)
-        "invoice_date": _opl_dn_date(_search(r"(?m)^\s*DATE\s*:\s*(\d{1,2}/\d{1,2}/\d{4})", text)) or onboard,
+        # 使用者 2026-10-28：發票號碼 = FILE NO (例 CT-2609538)，發票日期 = 印表日期 (09/24/2026)。
+        # 同一個 FILE NO 可能有好幾張 HB/L 各自請款 (抽樣 CT-2609648)：資料庫對這個供應商
+        # 改用逐列判斷重複 (expense_normalize.SUPPLIER_NO_OWN_INVOICE)，不會少算
+        "invoice_no": _search(r"FILE NO\s*:\s*(\S+)", text),
+        # 沒有印表日期時用 DATE，再沒有用開船日
+        "invoice_date": _opl_dn_date(_search(r"印表日期\s*:\s*(\d{1,2}/\d{1,2}/\d{4})", text))
+        or _opl_dn_date(_search(r"(?m)^\s*DATE\s*:\s*(\d{1,2}/\d{1,2}/\d{4})", text)) or onboard,
         "consignee": _search(r"CNEE\s*:\s*(.+?)(?:\s+CLOSING\s*:|$)", text),
         "order_no": _search(r"S/O#\s*:\s*(\S+)", text),
         "onboard_date": onboard,
@@ -7197,7 +7200,17 @@ def _cw_docs(text: str) -> List[str]:
         else:
             docs.append([page])
             current = inv
-    return ["\n".join(d) for d in docs] or [text]
+    # 同一張單據掃描兩次 (號碼與 TOTAL 都相同) 只留一張 (使用者 2026-10-28：DHL 合輯第 19、20 頁
+    # S2601526262)。同號碼但總額不同的是另一張發票 (YUSEN SSGN0316461)，照常保留
+    out, seen = [], set()
+    for d in ("\n".join(d) for d in docs):
+        total = re.findall(r"(?m)^[\s|\"'`]*TOTAL\b[^\n]*?(\d[\d.,]*\d)\s*$", d)
+        key = (_cw_invoice_no(d), total[-1] if total else None)
+        if key[0] and key[1] and key in seen:
+            continue
+        seen.add(key)
+        out.append(d)
+    return out or [text]
 
 
 def _cw_after(text: str, header_re: str, line_re: str, look: int = 4):

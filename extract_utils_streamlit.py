@@ -613,6 +613,10 @@ def _rate_total_issues(sheet: str, formulas: Dict[Tuple[int, str], str],
             continue                      # 只看合計列 (淨額欄是 =SUM 的那一列)
         start, end = sum_range[(f_row, base)]
         c, b = column_index_from_string(col) - 1, column_index_from_string(base) - 1
+        if all(num(r, c) is None for r in range(start, end + 1)):
+            # 明細列在這一欄完全沒有稅額：是表格旁的手算格，不是帳單的稅額欄
+            # (使用者 2026-10-28：DWIHARTA "rekap 202602" P293 =+N293*11% 不算帳單內容)
+            continue
         detail = sum(num(r, c) or 0 for r in range(start, end + 1))
         total = num(f_row, c)
         if total is None or abs(total - detail) <= 1:
