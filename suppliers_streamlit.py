@@ -3481,10 +3481,14 @@ def _pancaran_extract_container_no(text: str) -> Optional[str]:
             continue
         parts = [m.group(1).strip()]
         prev = lines[i - 1].strip() if i else ""
-        if (re.match(r"\d{7}\b", parts[0]) and re.fullmatch(r"[A-Z0-9,]+", prev)
-                and re.search(r"[A-Z]{4}$", prev)):
-            # 貨櫃清單在 JOB NO. 上一行，最後一個號碼被切開
-            # ("…,DENU9999888,TCLU" + "JOB NO. : EXPJK25110020 6576305,"，使用者 2026-10 樣本 INV.2511.0045)
+        # 貨櫃清單在 JOB NO. 上一行，最後一個號碼被切開
+        # ("…,DENU9999888,TCLU" + "JOB NO. : EXPJK25110020 6576305,"，使用者 2026-10 樣本 INV.2511.0045)；
+        # 也會切在英文字母中間 ("…,MTK" + "U4230035," INV.2505.0004、"…,BM" + "OU4893979," INV.2511.0044)：
+        # 兩段英文字母合起來 4 碼才接
+        tail = re.search(r"(?:^|,)([A-Z]{1,4})$", prev)
+        head = re.match(r"([A-Z]{0,3})\d{7}\b", parts[0])
+        if (tail and head and re.fullmatch(r"[A-Z0-9,]+", prev)
+                and len(tail.group(1)) + len(head.group(1)) == 4):
             parts = [(prev + parts[0]).rstrip(",")]
         j = i + 1
         while j < len(lines):
