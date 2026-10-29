@@ -6136,13 +6136,25 @@ def _ct_statement(rows: List[list]) -> Optional[Dict]:
 
     items = []
     total = vat = grand = None
+    sum_col = None
     prev = {"date": None, "remark": None, "cont": None, "plate": None}
     for row in rows[head_i + 1:]:
         labels = [_vn_label(v) for v in row if isinstance(v, str) and _vn_label(v)]
         # 合計區 (TOTAL / Total / VAT: (8%) / Grand total)：金額不一定在明細的
-        # 金額欄 (服務費表是在前一欄)，取該列最右邊的數字
-        numbers = [n for n in (_vn_num(v) for v in row if not isinstance(v, str)) if n is not None]
-        summary = numbers[-1] if numbers else None
+        # 金額欄 (服務費表是在前一欄)，取該列最右邊的數字。同一列有兩欄數字時
+        # (2026-10-29 "POUSUNG EX T10.2025 DOT1.xls" DV 表：L 欄 = 明細加總、O 欄多
+        # 1,250,000)，使用者確認 L 欄才是請款金額：Total 取等於明細加總的那一欄，
+        # VAT / Grand total 取同一欄
+        cells = [(j, _vn_num(v)) for j, v in enumerate(row) if not isinstance(v, str)]
+        cells = [(j, n) for j, n in cells if n is not None]
+        summary = cells[-1][1] if cells else None
+        if labels and ("TOTAL" in labels or any(lb.startswith("VAT") for lb in labels)) and len(cells) > 1:
+            detail = sum(it["amount"] or 0 for it in items)
+            if "TOTAL" in labels and not any(lb.startswith("VAT") for lb in labels):
+                sum_col = next((j for j, n in cells if abs(n - detail) <= 1), sum_col)
+            summary = next((n for j, n in cells if j == sum_col), summary)
+        elif sum_col is not None and cells and "GRAND TOTAL" in labels:
+            summary = next((n for j, n in cells if j == sum_col), summary)
         if "GRAND TOTAL" in labels:
             grand = summary
             break
@@ -8302,7 +8314,8 @@ _VT_TRANS_WAGON = [
     # (b) TỔNG：每票一列，每項費用 USD / VND 兩欄 (取 VND)，GRAND TOTAL = 當地費用含稅 + O/F + EXWORK
     (r"(?!)", {"header": "BILL NO", "key": ["BILL NO"], "fees": [],
                "fees_re": r"TOTAL\(VND\)\s*(?:NOT VAT\s+)?(.+?)(?:\s+DUONG B(?:AY|IEN))?$",
-               "fees_skip": r"LOCAL CHARGE|O/F\+EXW",
+               # 小計欄：表頭有 "O/F+EXW" 也有 "VAT OF+EXW 0%" (2026-10-29 抽樣 POU LI T07/T08-2026)
+               "fees_skip": r"LOCAL CHARGE|F\+EXW",
                "vat": ("VAT (8%)", "=VAT"), "vat_desc": "VAT 8%", "grand": "GRAND TOTAL",
                "boxes": {"20": "MEASUREMENT 20", "40": "MEASUREMENT 40"}, "cbm": "MEASUREMENT CMB",
                "kg": "MEASUREMENT KGS",
@@ -8325,6 +8338,18 @@ _VT_TRANS_WAGON = [
                "date": "=INVOICE DATE", "carry_fields": ["bl_no", "port_of_loading"],
                "boxes": {"20": "MEASUREMENT 20'", "40": "MEASUREMENT 40'"}, "cbm": "MEASUREMENT CMB",
                "fields": {"bl_no": "BOOKING NO", "port_of_loading": "NOTE PORT"}}),
+    # (f) FREIGHT STATEMENT (POU CHEN 2025-06 進口，2026-10-29 抽樣 "CONG NO T06-25 POU CHEN-IMP")：
+    #     每票兩列，各是一張發票 (右邊 INVOICE NO "1C25TYY - 5297"、DATE、未稅、VAT、含稅)；
+    #     越南盾費用欄 FREIGHT SEA / AIR FREIGHT / THC,CFS FEE / D/O, HDLG FEE (Total local charges
+    #     與 TOTAL 是小計)
+    (r"(?!)", {"header": "BOOKING NO", "key": ["=INVOICE NO"], "einv_key": True,
+               "require": "D/O, HDLG FEE",
+               "fees": [("=FREIGHT SEA VND", "FREIGHT SEA"), ("=AIR FREIGHT VND", "AIR FREIGHT"),
+                        ("=THC,CFS FEE VND", "THC,CFS FEE"), ("=D/O, HDLG FEE VND", "D/O, HDLG FEE")],
+               "vat": "=VAT", "vat_desc": "VAT 8%", "total": "AMOUNT (NOT VAT)", "grand": "=TOTAL AMOUNT",
+               "date": "=INVOICE DATE", "carry_fields": ["bl_no"],
+               "boxes": {"20": "MEASUREMENT 20'", "40": "MEASUREMENT 40'"}, "cbm": "MEASUREMENT CMB",
+               "fields": {"bl_no": "BOOKING NO"}}),
     # (d) 紅色發票清單：每列一張發票 (Red inv no，只用號碼)，金額已含稅 (沒有另列 VAT)
     (r"(?!)", {"header": "RED INV NO", "two_rows": False, "key": ["RED INV NO"], "einv_key": True,
                "fees": [("FREIGHT AIR", "Freight AIR"), ("FREIGHT SEA", "Freight SEA"),
