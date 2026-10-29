@@ -843,7 +843,12 @@ def _indo_extract_vessel_code(raw_flight: Optional[str]) -> Optional[str]:
     _indo_parse_flight_date()/_ipt_parse_flight_date() 轉成開船日。"""
     if not raw_flight:
         return None
-    return raw_flight.split("/")[0].strip()
+    code = raw_flight.split("/")[0].strip()
+    # FLIGHT 欄只印日期、沒有航班代碼 ("FLIGHT : 19-11-2025"，INV. POU CHEN DESEMBER 2025)：
+    # 沒有船名，日期仍由 _indo_parse_flight_date() 取開船日
+    if re.fullmatch(r"\d{1,2}-\d{1,2}-\d{4}|\d{8}", code):
+        return None
+    return code
 
 
 def _indo_add_space_after_pt(value: Optional[str]) -> Optional[str]:
@@ -857,7 +862,8 @@ def _indo_add_space_after_pt(value: Optional[str]) -> Optional[str]:
 
 
 def _indo_parse_flight_date(raw_flight: Optional[str]) -> Optional[str]:
-    """從 FLIGHT 欄位原始值反推開船日，支援兩種常見寫法：
+    """從 FLIGHT 欄位原始值反推開船日，支援兩種常見寫法 (帳單日期印錯時照抄，例如
+    "CI761/287052025" -> 2025-MAY-87，已登記 validation_streamlit.KNOWN_SOURCE_ISSUES，不要改這裡)：
     - 'CX 777/01092026' (尾碼 8 碼數字無分隔，DDMMYYYY)
     - 'VJ0855/05-08-2026' (尾碼用 - 分隔，DD-MM-YYYY)
     回傳跟 Arrive Date 共用的 'YYYY-MON-DD' 格式 (_indo_format_date())，
@@ -876,11 +882,17 @@ def _indo_parse_flight_date(raw_flight: Optional[str]) -> Optional[str]:
 
 
 def _indo_clean_amount(text: Optional[str]) -> Optional[int]:
-    """英式數字 '416,729' (逗號千分位) -> 416729。"""
+    """英式數字 '416,729' (逗號千分位) -> 416729。美金計價的帳單金額帶小數
+    ('8,132,460.00'，[NIKOMAS]_IPE MARET 第 102 頁) -> 8132460。"""
     if not text:
         return None
     text = text.strip().replace(",", "")
-    return int(text) if text.isdigit() else None
+    m = re.fullmatch(r"(\d+)(?:\.(\d{1,2}))?", text)
+    if not m:
+        return None
+    if m.group(2) and int(m.group(2)):
+        return float(text)
+    return int(m.group(1))
 
 
 # 費用明細行，例如：
@@ -894,13 +906,13 @@ def _indo_clean_amount(text: Optional[str]) -> Optional[int]:
 # 一律先完整抓到「最後一個金額數字」前的所有文字當描述，再用
 # _indo_clean_item_desc() 去掉已知的雜訊/備註尾碼。
 _INDO_ITEM_LINE_RE = re.compile(
-    r"^(?!Total\b)(?!V\.?A\.?T\.?\s)(?P<desc>\S.*?)\s+(?P<amount>[\d,]+)\s*$",
+    r"^(?!Total\b)(?!V\.?A\.?T\.?\s)(?P<desc>\S.*?)\s+(?P<amount>[\d,]+(?:\.\d{2})?)\s*$",
     re.MULTILINE,
 )
 # V.A.T. 另起一列印出 (例如 "V.A.T. 34,769")，正確答案範本把這一列當成
 # 獨立一筆品項：description 固定寫 "VAT"、amount 留空、金額改填在 vat 欄位
 # (不是把 VAT 金額當成第五筆品項的 amount)。
-_INDO_VAT_LINE_RE = re.compile(r"^V\.?A\.?T\.?\s+(?P<vat>[\d,]+)\s*$", re.MULTILINE)
+_INDO_VAT_LINE_RE = re.compile(r"^V\.?A\.?T\.?\s+(?P<vat>[\d,]+(?:\.\d{2})?)\s*$", re.MULTILINE)
 # 费用明細只會出現在 "D E S C R I P T I O N AMOUNT" 這個表頭之後、
 # "Total" 小計行之前這一段範圍內；只在這個範圍內掃描品項，才不會把帳單
 # 上其他「文字 + 一串數字」的雜訊行 (地址裡的郵遞區號、電話分機、發票號碼
@@ -3072,7 +3084,7 @@ def _indo_extract_grand_total(text: str) -> Optional[int]:
     V.A.T. 的話，已經把 VAT 加進去了)，所以要註冊成 extract_grand_total
     (跟『擷取到的費用明細加總 + VAT 加總』互相稽核)，不是 extract_total
     (未稅總額)——這家供應商帳單本文沒有單獨印出未稅小計。"""
-    return _indo_clean_amount(_search(r"^Total\s+([\d,]+)\s*$", text))
+    return _indo_clean_amount(_search(r"^Total\s+([\d,]+(?:\.\d{2})?)\s*$", text))
 
 
 def _hyper_extract_total(text: str) -> Optional[int]:

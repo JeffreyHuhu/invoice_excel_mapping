@@ -120,9 +120,16 @@ KNOWN_SOURCE_ISSUES: Dict[str, Dict[Tuple[str, str], Tuple[str, Optional[Union[s
         ("bl_no", "ID_NO_DIGIT"): ("ECOMET 原帳單的 HB/L No 本身就只有 BSWCG", {"BSWCG", "BSWCG:"}),
     },
     "INDOPROSTIME_TRANSPORT": {
-        # 帳單印 "2026-JUN-31" (6 月沒有 31 日)
-        ("arrive_date", "DATE_FORMAT"): ("INDOPROSTIME 原帳單的日期本身就不存在", {"2026-JUN-31"}),
-        ("onboard_date", "DATE_FORMAT"): ("INDOPROSTIME 原帳單的日期本身就不存在", {"2026-JUN-31"}),
+        # 帳單印 "2026-JUN-31" (6 月沒有 31 日)；[POUCHEN]_IPE JUNI 的 FLIGHT 印
+        # "CI761/287052025" (日期多一碼，得到 2025-MAY-87，使用者 2026-10-30 確認)
+        ("arrive_date", "DATE_FORMAT"): ("INDOPROSTIME 原帳單的日期本身就不存在",
+                                         {"2026-JUN-31", "2025-MAY-87"}),
+        ("onboard_date", "DATE_FORMAT"): ("INDOPROSTIME 原帳單的日期本身就不存在",
+                                          {"2026-JUN-31", "2025-MAY-87"}),
+        # HAWB 欄印 "DIRECT TO COS"/"DIRECT TO CON" (直送收貨人，沒有分提單)；
+        # 使用者 2026-10-30 確認是原帳單問題
+        ("bl_no", "ID_NO_DIGIT"): ("INDOPROSTIME 直送收貨人的 HAWB 欄原文就是 DIRECT TO",
+                                   {"DIRECT TO COS", "DIRECT TO CON"}),
     },
     # 陸運帳單 (TRUCKING CHARGE TRAGA，INV.2510.0007~0012) 的 Container No. 欄印車牌
     # ("B 9197 PCC,")；使用者 2026-10-30：保留車牌，屬原帳單問題。只限印尼車牌格式
