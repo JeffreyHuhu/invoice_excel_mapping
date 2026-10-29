@@ -6886,6 +6886,30 @@ def _opl_dn_date(value: Optional[str]) -> Optional[str]:
     return _format_date_en_from_month_name(m.group(2), m.group(1), m.group(3)) if m else value
 
 
+# 使用者 2026-10-29：OPL 美金 DN 的 CONSIGNEE 統一成標準全名。掃描檔 OCR 會讀出各種寫法與雜字
+# ("PT.POUYUEN INDONESTA"、"PT GLOSTAR INDONESIA a"、"PT. NIKOMAS GEMILANG ON BOARD: …")。
+# 比對時只看大寫字母 (去掉空白、標點)；對不到的維持原值。
+_OPL_STD_CONSIGNEES = [
+    (r"NIK\w{0,2}AS|GEM[IT1L]LANG", "PT. NIKOMAS GEMILANG"),
+    (r"GLOSTAR", "PT. GLOSTAR INDONESIA"),
+    (r"POUY[UV][ER]?[NR]", "PT. POU YUEN INDONESIA"),
+    (r"POUCHENI", "PT. POU CHEN INDONESIA"),
+    (r"HARDASES|HARD\w{0,4}NDONE", "PT. HARDASES ABADI INDONESIA"),
+    (r"KAYUEN", "PT. KA YUEN INDONESIA"),
+    (r"CHANGYANG", "PT. CHANG YANG MATERIAL PLASTICS"),
+]
+
+
+def _opl_std_consignee(value: Optional[str]) -> Optional[str]:
+    if not value:
+        return value
+    letters = re.sub(r"[^A-Z]", "", value.upper())
+    for pattern, name in _OPL_STD_CONSIGNEES:
+        if re.search(pattern, letters):
+            return name
+    return value
+
+
 def _opl_cnee(text: str) -> Optional[str]:
     """CNEE 欄。文字版 PDF 有時 CNEE 跟收件人 email 疊印，抽出來變成一個字一個字交錯
     ("E P m T a . i l N : I K p O …"，"SHKJKT25090149A")：這種值不用，改用 MESSR。"""
@@ -6902,12 +6926,18 @@ def _opl_messr(text: str) -> Optional[str]:
     value = _search(r"(?m)MESS[RK]\s*:\s*(.+?)(?:\s+(?:POL|ON\s*BOARD)\s*:|$)", text)
     if not value:
         return None
+    # 集團公司直接用標準全名 (帳單也有大小寫混合的 "PT. Glostar Indonesia"，"HKGJKT25090023")
+    std = _opl_std_consignee(value)
+    if std != value:
+        return std
     words = []
     for word in value.split():
         if re.search(r"[a-z]", word) or not re.search(r"[A-Z]{2}", word) and words[-1:] != ["PT."]:
             break
         words.append(word)
-    return " ".join(words).strip(" |,") or None
+    # 只讀到 "PT." 不算 (讓 _opl_fill_header 從其他 OCR 版本或單行 OCR 補)
+    name = " ".join(words).strip(" |,")
+    return name if re.search(r"[A-Z]{3}", re.sub(r"^P[TY][.,]?", "", name)) else None
 
 
 def _opl_header_lines(text: str) -> Dict[str, Optional[str]]:
@@ -6974,7 +7004,7 @@ def _parse_opl_dn(text: str) -> Dict:
         "invoice_date": _opl_dn_date(_search(r"印表日期\s*:\s*(\d{1,2}/\d{1,2}/\d{4})", text))
         or _opl_dn_date(_search(r"(?m)^\s*DATE\s*:\s*(\d{1,2}/\d{1,2}/\d{4})", text)) or onboard,
         # 有些 DN 沒有 CNEE 欄 ("HKGJKT25080662")：改用 MESSR (請款對象)
-        "consignee": _opl_cnee(text) or _opl_messr(text),
+        "consignee": _opl_std_consignee(_opl_cnee(text) or _opl_messr(text)),
         # 掃描檔 OCR 會在冒號前後多讀 "=" / ";" ("S/O# =: 25110203"、"HB/L =: HKGJKT…")
         # "S/O# :; 25110369" ("OESIN25100084")
         "order_no": _search(r"S/O#\s*[=:;]*\s*:[\s;]*(\S+)", text) or _search(r"S/O#\s*[=;]+\s*(\d+)", text),
