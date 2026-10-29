@@ -6760,7 +6760,10 @@ _OPL_SCAN_ITEM_RE = re.compile(
     # "1CNTR" 讀成 "ICNTR" ("VN25E1609"、"VN25E1682")；"1 SET" 讀成一串雜字 "=—S—s1sSSET"
     # ("JKTHCSE2509073J")：有數字、結尾是單位就算數量
     r"|\d?[{(\[\])]\s*[A-Z]{2,5}|[LI1]?[SOA0](?:BLS?|SETS?|SHPTS?|CBM)|MIN[ITl1]{1,2}[\]|]?\d*"
-    r"|[|iIl]CNTRS?|\S*\d\S*(?:SETS?|SHPTS?|CNTRS?))"
+    r"|[|iIl]CNTRS?|\S*\d\S*(?:SETS?|SHPTS?|CNTRS?)"
+    # 數量沒有單位 ("CUSTOM CLEARANCE-WAN 1 US$ 130.00"、"PORT SECURITY-C 4.63 US$ 1.30"，
+    # 文字版 "JKTHCSE2508031A"、"JKTHCSE2508057A-G")
+    r"|\d[\d.,]*(?=\s+U[S$]))"
     r"(?:\s+|(?<=KGS)(?=USD))(?P<rest>.*U[S$]{1,2}.*)$")
 _OPL_SCAN_MONEY_RE = re.compile(r"(?<![\d.])(\d{1,3}(?:,\s?\d{3})*\.\d{2})(?![\d])")
 
