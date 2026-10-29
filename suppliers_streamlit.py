@@ -7261,7 +7261,11 @@ def _cargowise_pages(pdf_path: str) -> List[str]:
             if not any(c["text"].strip() for c in pg.chars):
                 # 掃描頁 (YUSEN 把整份帳單掃描附在後面)：400 dpi + psm 6 才讀得對金額
                 # (使用者 2026-10-27 要求掃描頁也要到等級高)
-                pages.append(_ocr_page_with_psm(pdf_path, page_index, 6) + _CW_PAGE_MARK)
+                text = _ocr_page_with_psm(pdf_path, page_index, 6)
+                ship = _cw_ocr_shipment(pg)
+                if ship:
+                    text = f"SHIPMENT {ship}\n{text}"
+                pages.append(text + _CW_PAGE_MARK)
                 continue
             # 粗體疊印三次的頁 ("BBB///LLL FFFEEEEEE")：同位置重複的字只留一個。
             # dedupe_chars() 很慢 (一頁約 0.8 秒)，先確認真的有疊印才做
@@ -7289,7 +7293,12 @@ def _cargowise_pages(pdf_path: str) -> List[str]:
                 lo, hi = min(cur) - 3, tail[0]["top"]
                 drop |= {(round(c["x0"], 2), round(c["top"], 2), c["text"]) for c in chars
                          if c.get("size", 0) >= 7.9 and lo < c["top"] < hi - 1}
-            keep = {(round(c["x0"], 2), round(c["top"], 2), c["text"]) for c in chars} - drop
+            # YUSEN：貨物說明 (Helvetica 8 號字) 太長，溢出到費用表 (LucidaConsole 9 號字)，
+            # 跟費用行疊在一起 (YUSEN_DEC.2025 SSGN0300089 "CTEARRMGIONEASL R EHMANADINLEIDN OG")。
+            # 費用表標題 "DESCRIPTION … CHARGES IN" 到 "Continued Over" / "TOTAL CHARGES" 之間，
+            # 只留 LucidaConsole 的字
+            drop |= _cw_overflow_chars(pg, chars)
+            keep ={(round(c["x0"], 2), round(c["top"], 2), c["text"]) for c in chars} - drop
 
             def _keep(obj, keep=keep):
                 if obj.get("object_type") != "char":
@@ -7318,6 +7327,48 @@ def _cargowise_pages(pdf_path: str) -> List[str]:
                 text = _ocr_page_with_psm(pdf_path, page_index, 6)
             pages.append(text + _CW_PAGE_MARK)
     return pages
+
+
+def _cw_ocr_shipment(pg) -> Optional[str]:
+    """掃描頁右上角表頭的 SHIPMENT 號碼，單獨放大重新 OCR。整頁 OCR 常讀錯
+    或漏掉這一格 (2026-10-29 YUSEN_SEP.2026：SSGN0315898 讀成 15596/15808、
+    SSGN0315454 整格漏掉)。讀不到回傳 None，照用整頁 OCR 的結果。"""
+    try:
+        import pytesseract
+        image = pg.to_image(resolution=300).original.convert("L")
+        w, h = image.size
+        # 表頭表格在右上角 (x 55%~100%、y 12%~26%)；只截這一塊，psm 6
+        head = image.crop((int(w * 0.55), int(h * 0.12), w, int(h * 0.26)))
+        text = pytesseract.image_to_string(head, config="--psm 6")
+    except Exception:
+        return None
+    m = re.search(r"SHIPMENT\W*([A-Z]{3,5}?)(O*)([0-9O]{6,8})\b", text)
+    if not m:
+        return None
+    prefix, extra, num = m.groups()
+    num = num.replace("O", "0")
+    if len(num) == 6 and extra:          # "SSGNO315640"：O 就是開頭的 0
+        num = "0" + num
+    return prefix + num if re.fullmatch(r"\d{7}", num) else None
+
+
+def _cw_overflow_chars(pg, chars) -> set:
+    """費用表範圍內、不是 LucidaConsole 費用字型的字 (溢出的貨物說明)。
+    頁面沒有 LucidaConsole 費用字時不刪 (其他 CargoWise 版面不受影響)。"""
+    words = pg.extract_words(extra_attrs=["fontname"])
+    hdr = next((w for w in words if w["text"] == "DESCRIPTION" and "Bold" in w["fontname"]
+                and any(v["text"] == "CHARGES" and v["x0"] > 400 and abs(v["top"] - w["top"]) < 2
+                        for v in words)), None)
+    if not hdr:
+        return set()
+    ends = [w["top"] for w in words if w["top"] > hdr["top"]
+            and w["text"] in ("Continued", "TOTAL") and w["x0"] < 300]
+    lo, hi = hdr["bottom"], min(ends) if ends else pg.height
+    if not any("Lucida" in c.get("fontname", "") and lo < c["top"] < hi for c in chars):
+        return set()
+    return {(round(c["x0"], 2), round(c["top"], 2), c["text"]) for c in chars
+            if lo < c["top"] < hi - 1 and "Lucida" not in c.get("fontname", "")
+            and "Bold" not in c.get("fontname", "") and c.get("size", 0) < 8.5}
 
 
 _CW_DATE = r"\d{1,2}-(?:[A-Za-z]{3}|\d{2})-\d{2}"
@@ -7396,7 +7447,9 @@ def _cw_docs(text: str) -> List[str]:
         first_page = re.search(r"\bPage 1 of \d+", page)
         if inv is None and not re.search(r"\bPage \d+ of \d+", page):
             continue
-        if docs and not first_page and (inv is None or inv == current):
+        # "Page 2 of N" 以後一定是上一張的續頁 (掃描頁 OCR 號碼可能讀錯，不能只靠號碼)
+        later_page = re.search(r"\bPage (?:[2-9]|\d{2,}) of \d+", page)
+        if docs and not first_page and (inv is None or inv == current or later_page):
             docs[-1].append(page)
         else:
             docs.append([page])
@@ -7524,7 +7577,7 @@ def _cw_parse(text: str, supplier: Optional[str]) -> Dict:
 def _cw_totals(text: str, patterns, conv=_cw_vn_number):
     """每張發票的總額 {SHIPMENT 號碼: 金額}。patterns 依序試，第一個抓得到的
     為準 (同一個 pattern 抓到好幾個就加總，例如 MOL 每個幣別一行 GRAND TOTAL)。"""
-    out = {}
+    out, missing = {}, set()
     for doc in _cw_docs(text):
         inv = _cw_invoice_no(doc)
         for pattern in patterns:
@@ -7533,18 +7586,25 @@ def _cw_totals(text: str, patterns, conv=_cw_vn_number):
                 # 同一個 SHIPMENT 開兩張時，總額相加 (明細也會併在同一組勾稽)
                 out[inv] = out.get(inv, 0) + sum(conv(v) for v in vals)
                 break
-    return out
+        else:
+            missing.add(inv)
+    # 同號碼的另一張讀不到總額 (掃描頁 OCR)：只有一半的總額，不勾稽這個號碼
+    return {k: v for k, v in out.items() if k not in missing}
 
 
 def _cw_extract_total(text: str):
-    return _cw_totals(text, [r"SUBTOTAL[ \t]+(\d[\d.]*(?:,\d+)?)"])
+    # 掃描頁 OCR 可能漏掉 "SUBTOTAL" 標籤，金額仍接在 "discrepancies." 後面 (YUSEN_SEP.2026)
+    return _cw_totals(text, [r"SUBTOTAL[ \t]+(\d[\d.]*(?:,\d+)?)",
+                             r"discrepancies\.[ \t]+(\d{1,3}(?:\.\d{3})+(?:,\d+)?)[ \t]*$"])
 
 
 def _cw_extract_grand_total(text: str):
     # YUSEN 的金額有時印在 "TOTAL VND" 上一行 (字的高度略高，被拆成兩行)
     # 外幣發票是 "TOTAL USD" (金額 "31,86" 逗號是小數點)
     return (_cw_totals(text, [r"^TOTAL[ \t]+(?:VND|USD)[ \t]+(\d[\d.]*(?:,\d+)?)",
-                              r"^(\d[\d.]*(?:,\d+)?)[ \t]*\nTOTAL[ \t]+(?:VND|USD)\s*$"])
+                              r"^(\d[\d.]*(?:,\d+)?)[ \t]*\nTOTAL[ \t]+(?:VND|USD)\s*$",
+                              # 掃描頁 OCR 漏掉 "TOTAL VND" 標籤時，用頁尾 "Invoiced VND 7.171.200"
+                              r"Invoiced[ \t]+(?:VND|USD)[ \t]+(\d{1,3}(?:\.\d{3})+(?:,\d+)?)\b"])
             or _cw_totals(text, [r"GRAND TOTAL for [A-Z]{3}[ \t]+(\d[\d,]*(?:\.\d+)?)"],
                           conv=_cw_comma_number))
 
@@ -7637,7 +7697,13 @@ def detect_yusen(text: str) -> bool:
 
 
 def parse_yusen(text: str) -> Dict:
-    return _cw_parse(text, _search(r"(YUSEN LOGISTICS \(VIETNAM\) CO\., LTD\.[^\n]*?BRANCH)", text))
+    supplier = _search(r"(YUSEN LOGISTICS \(VIETNAM\) CO\., LTD\.[^\n]*?BRANCH)", text)
+    if not supplier:
+        # 2025 上半年舊版：名稱分兩行 "YUSEN LOGISTICS (VIETNAM) CO.LTD" / (Bank) / "HO CHI MINH BRANCH,…"
+        m = re.search(r"(YUSEN LOGISTICS \(VIETNAM\) CO\.\s*,?\s*LTD\.?)\s*\n(?:Bank\s*\n)?\s*"
+                      r"(HO CHI MINH BRANCH)", text)
+        supplier = f"{m.group(1)} - {m.group(2)}" if m else None
+    return _cw_parse(text, supplier)
 
 
 register_supplier(
