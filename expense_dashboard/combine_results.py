@@ -61,6 +61,9 @@ DATE_FORMAT = "mmm-dd-yyyy"
 SHEET_NAME = "工作表"
 TOTALS_SHEET_NAME = "費用總和"
 EXCEL_MAX_ROWS = 1_048_575
+FONT_NAME = "新細明體"
+SHEET_WIDTHS = {"A": 18.0, "B": 12.7, "C": 14.5, "G": 15.7, "I": 12.3, "J": 17.2, "K": 16.5,
+                "L": 19.3, "M": 14.8, "N": 18.7, "Q": 15.3}
 
 
 def _invoice_key(row: dict):
@@ -150,15 +153,34 @@ def compute_totals(rows: List[dict], fx_folder: Path):
     return out, (book.name if book else None)
 
 
-def _write_totals_sheet(wb: Workbook, totals, book_name) -> None:
-    """格式照使用者 2026-10-28 改好的 RONG_A_CHAU 範例：黃底標題；三個區塊
-    (幣別/總票數、當地幣別金額、USD 金額) 各一種淺色底 (主題色 9/6/8，淡化 80%)，
-    新細明體、全部靠右，區塊之間空兩列。"""
+def supplier_label(key: str) -> str:
+    """費用總和標題用的「VN-05 CONG_THANH」：編號取 suppliers(_streamlit).py 的
+    SUPPLIER_NUMBERS (用 ast 讀，不載入 PDF 套件)；找不到編號就只用 KEY。"""
+    import ast
+    import re
+    for name in ("suppliers_streamlit.py", "suppliers.py"):
+        path = Path(__file__).resolve().parent.parent / name
+        try:
+            for node in ast.parse(path.read_text(encoding="utf-8")).body:
+                if (isinstance(node, ast.Assign) and getattr(node.targets[0], "id", "") == "SUPPLIER_NUMBERS"):
+                    number = ast.literal_eval(node.value).get(key, ("",))[0]
+                    number = re.sub(r"^([A-Z]+)(\d)", r"\1-\2", number)
+                    return f"{number} {key}".strip()
+        except (OSError, SyntaxError, ValueError):
+            continue
+    return key
+
+
+def _write_totals_sheet(wb: Workbook, totals, book_name, supplier_key: str = None) -> None:
+    """格式照使用者 2026-10-29 改好的 CONG_THANH 範例：黃底標題「VN-05 CONG_THANH 總和
+    (當地幣別 & 美金)」；三個區塊 (總票數/幣別、當地幣別金額、USD 金額) 各一種淺色底
+    (主題色 9/6/8，淡化 80%)，新細明體、全部靠右，區塊之間空兩列。"""
     from openpyxl.styles import Color, PatternFill
     ws = wb.create_sheet(TOTALS_SHEET_NAME)
-    for col, width in zip("ABCDEFGHI", (18.9, 19.7, 23.7, 24.0, 23.3, 20.0, 20.4, 21.0, 23.9)):
+    for col, width in zip("ABCDEFGHI", (20.1, 19.7, 28.8, 24.0, 23.3, 20.0, 20.4, 21.0, 23.9)):
         ws.column_dimensions[col].width = width
-    font_name = "新細明體"
+    ws.row_dimensions[1].height = 19.5
+    font_name = FONT_NAME
     yellow = PatternFill("solid", fgColor="FFFFFF00")
     fills = [PatternFill("solid", fgColor=Color(theme=t, tint=0.7999816888943144)) for t in (9, 6, 8)]
     right = Alignment(horizontal="right")
@@ -180,16 +202,17 @@ def _write_totals_sheet(wb: Workbook, totals, book_name) -> None:
                        for v in vals])
 
     money = "#,##0.00"
-    ws.append([cell("費用總和 (當地幣別 & 美金)", yellow, bold=True, size=14, align=None),
+    title = f"{supplier_label(supplier_key)} 總和" if supplier_key else "費用總和"
+    ws.append([cell(f"{title} (當地幣別 & 美金)", yellow, bold=True, size=14, align=None),
                cell(None, yellow, align=None), cell(None, yellow, align=None)])
     ws.append([])
-    block(fills[0], ["幣別", "總票數 (不重複)", None], [[cur, n, None] for cur, n, *_ in totals])
+    block(fills[0], ["總票數 (不重複)", "幣別"], [[n, cur] for cur, n, *_ in totals])
     missing = []
     usd_sum = [0.0, 0.0, 0.0]
     for cur, n, amount, vat, total, rate in totals:
         ws.append([])
         ws.append([])
-        block(fills[1], [f"費用總和 ({cur})", f"VAT 總和 ({cur})", f"TOTAL 總和  ({cur})"],
+        block(fills[1], [f"費用項目 ({cur})", f"VAT ({cur})", f"TOTAL 總和  ({cur})"],
               [[amount, vat, total]], money)
         if rate:
             usd_sum = [x + v / rate for x, v in zip(usd_sum, (amount, vat, total))]
@@ -197,20 +220,28 @@ def _write_totals_sheet(wb: Workbook, totals, book_name) -> None:
             missing.append(cur)
     ws.append([])
     ws.append([])
-    block(fills[2], ["費用總和 (USD)", "VAT 總和 (USD)", "TOTAL 總和 (USD)"], [usd_sum], money)
+    block(fills[2], ["費用項目 (USD)", "VAT (USD)", "TOTAL 總和 (USD)"], [usd_sum], money)
     if missing:
         ws.append([])
         ws.append([f"注意：{'、'.join(missing)} 沒有匯率 ({book_name or '找不到作帳匯率檔'})，沒有算進 USD"])
 
 
-def write_workbook(rows: List[dict], out_path: Path, totals=None) -> None:
+def write_workbook(rows: List[dict], out_path: Path, totals=None, supplier_key: str = None) -> None:
     """write_only 模式寫檔，大量資料也不佔太多記憶體。"""
     if len(rows) > EXCEL_MAX_ROWS:
         raise SystemExit(f"明細 {len(rows):,} 列，超過 Excel 上限 {EXCEL_MAX_ROWS:,} 列。")
+    # 樣式照使用者 2026-10-29 改好的 CONG_THANH 範例：全部新細明體、表頭列高 58、
+    # 篩選整個表、指定欄寬 (其餘欄用預設寬度)
     wb = Workbook(write_only=True)
     ws = wb.create_sheet(SHEET_NAME)
     ws.freeze_panes = "A2"
-    bold, wrap = Font(bold=True), Alignment(wrap_text=True, vertical="center")
+    for col, width in SHEET_WIDTHS.items():
+        ws.column_dimensions[col].width = width
+    ws.row_dimensions[1].height = 58
+    ws.auto_filter.ref = f"A1:{chr(ord('A') + len(FIELDS))}{len(rows) + 1}"
+    bold = Font(name=FONT_NAME, bold=True, size=11)
+    plain = Font(name=FONT_NAME, size=11)
+    wrap = Alignment(wrap_text=True, vertical="center")
     header = []
     for text in [*TEMPLATE_HEADERS.values(), LEVEL_HEADER]:
         cell = WriteOnlyCell(ws, value=text)
@@ -221,26 +252,28 @@ def write_workbook(rows: List[dict], out_path: Path, totals=None) -> None:
         out = []
         for field in FIELDS:
             value = row.get(field)
+            cell = WriteOnlyCell(ws, value=value)
+            cell.font = plain
             if field in DATE_FIELDS and isinstance(value, (date, datetime)):
-                cell = WriteOnlyCell(ws, value=value)
                 cell.number_format = DATE_FORMAT
-                out.append(cell)
-            else:
-                out.append(value)
-        out.append(row["level"])
+            out.append(cell)
+        cell = WriteOnlyCell(ws, value=row["level"])
+        cell.font = plain
+        out.append(cell)
         ws.append(out)
     if totals is not None:
-        _write_totals_sheet(wb, *totals)
+        _write_totals_sheet(wb, *totals, supplier_key=supplier_key)
     out_path.parent.mkdir(parents=True, exist_ok=True)
     wb.save(out_path)
 
 
 def run(out_path: Path, roots: Sequence[Path], levels: Sequence[str] = ("高", "中"),
-        totals_fx_folder: Path = None) -> Path:
-    """totals_fx_folder：放作帳匯率檔的資料夾；有給就加「費用總和」工作表。"""
+        totals_fx_folder: Path = None, supplier_key: str = None) -> Path:
+    """totals_fx_folder：放作帳匯率檔的資料夾；有給就加「費用總和」工作表。
+    supplier_key：個別供應商的 KEY，放進「費用總和」標題 (例如 VN-05 CONG_THANH)。"""
     rows, stats = collect_rows(roots, levels)
     summary = compute_totals(rows, totals_fx_folder) if totals_fx_folder else None
-    write_workbook(rows, out_path, summary)
+    write_workbook(rows, out_path, summary, supplier_key)
     print(f"已整合轉檔結果 Excel：{out_path}")
     for lv in levels:
         print(f"  等級({lv})：{stats[lv]['files']:,} 份、{stats[lv]['rows']:,} 列")
