@@ -3233,6 +3233,8 @@ register_supplier(
     "KUEHNE_NAGEL", "KUEHNE NAGEL INDONESIA", detect_kuehne_nagel, parse_kuehne_nagel,
     extract_total=_kn_extract_total, extract_grand_total=_kn_extract_grand_total,
     invoice_page=kn_invoice_page,
+    # FA Single Invoice 後面約 20 頁是掃描附件：不 OCR (一份 1~7 分鐘 → 1~2 秒)
+    ocr_attachments=False,
 )
 register_supplier(
     "INDOPROSTIME", "PT. INDO PROSTIME EXPRESS", detect_indoprostime, parse_indoprostime,
@@ -6724,7 +6726,10 @@ _OPL_SCAN_ITEM_RE = re.compile(
     # "1 SET" 讀成 "{ SET"/"1s SET"、MINI 讀成 "MINT"/"MINTI"/"MINI]"、"KGS USD" 黏成 "KGSUSD"
     r"(?P<qty>\d+\s*[Xx]\s*\d{2}\S*|\d+\s*4\s*\d{2}\s?'\S*|[\d.,]+\s*KGS(?=USD)"
     r"|S?\d[\d.,]*[a-z]?\s*[A-Z]{2,5}|[|iIlt]\s+[A-Z]{2,5}"
-    r"|\d?[{(\[\])]\s*[A-Z]{2,5}|[LI1]?[SOA0](?:BLS?|SETS?|SHPTS?|CBM)|MIN[ITl1]{1,2}[\]|]?\d*)"
+    # "1CNTR" 讀成 "ICNTR" ("VN25E1609"、"VN25E1682")；"1 SET" 讀成一串雜字 "=—S—s1sSSET"
+    # ("JKTHCSE2509073J")：有數字、結尾是單位就算數量
+    r"|\d?[{(\[\])]\s*[A-Z]{2,5}|[LI1]?[SOA0](?:BLS?|SETS?|SHPTS?|CBM)|MIN[ITl1]{1,2}[\]|]?\d*"
+    r"|[|iIl]CNTRS?|\S*\d\S*(?:SETS?|SHPTS?|CNTRS?))"
     r"(?:\s+|(?<=KGS)(?=USD))(?P<rest>.*U[S$]{1,2}.*)$")
 _OPL_SCAN_MONEY_RE = re.compile(r"(?<![\d.])(\d{1,3}(?:,\s?\d{3})*\.\d{2})(?![\d])")
 

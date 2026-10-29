@@ -436,6 +436,12 @@ def extract_pages_from_pdf(pdf_path: str, **pdfplumber_kwargs) -> List[str]:
             # 文字層已經認得出供應商，而且這家的 page_text 會自己 OCR 掃描頁：
             # 這裡不用再 OCR (掃描頁留空字串，由 supplier_pages() 補上)
             scanned = []
+        entry = SUPPLIER_REGISTRY.get(text_key, {}) if text_key else {}
+        if entry.get("ocr_attachments") is False and entry.get("invoice_page") \
+                and any(t.strip() and entry["invoice_page"](t) for t in pages_text):
+            # 文字層已經有帳單頁，掃描頁只是附件 (見 register_supplier 的 ocr_attachments)：
+            # 不 OCR，留空字串
+            scanned = []
         if scanned:
             # 沒有文字層的掃描頁：先低解析度，認得出是帳單頁的再高解析度重做；
             # 低解析度一頁都認不出 (例如整份掃歪) 時全部用高解析度，跟以前一樣
@@ -954,8 +960,14 @@ def register_supplier(key: str, label: str,
                        extract_vat_total: Optional[Callable[[str], Optional[float]]] = None,
                        invoice_page: Optional[Callable[[str], bool]] = None,
                        ocr_psm: Optional[int] = None,
-                       page_text: Optional[Callable[[str], List[str]]] = None) -> None:
+                       page_text: Optional[Callable[[str], List[str]]] = None,
+                       ocr_attachments: bool = True) -> None:
     """註冊一家供應商。
+
+    ocr_attachments (可選，要搭配 invoice_page)：False 時，文字層已經有這家的
+    帳單頁，就不 OCR 掃描頁 (掃描頁一定是附件，本來就不擷取)。例如 KN「FA
+    Single Invoice」第 1 頁是文字帳單、後面約 20 頁是掃描附件，OCR 一份要
+    1~7 分鐘，不 OCR 只要 1~2 秒，擷取結果相同 (2026-10-29 實測 5 份)。
 
     page_text (可選)：這家供應商自己的逐頁文字擷取 (傳入 PDF 路徑，回傳每頁
     文字)，取代預設的 extract_pages_from_pdf()。用在需要看字元大小/位置才分得
@@ -1036,6 +1048,7 @@ def register_supplier(key: str, label: str,
         "sheet_parse": sheet_parse, "sheet_totals": sheet_totals,
         "extract_vat_total": extract_vat_total, "invoice_page": invoice_page,
         "ocr_psm": ocr_psm, "page_text": page_text, "multi_page_pdf": multi_page,
+        "ocr_attachments": ocr_attachments,
         # Excel 供應商一份檔案可能有好幾張對帳單，比對時跟 multi_page 一樣用
         # invoice_no 分組
         "multi_page": multi_page or sheet_parse is not None,
