@@ -389,6 +389,26 @@ _KN_LABEL_WORDS = [
 _KN_NEXT = "(?:" + "|".join(_KN_LABEL_WORDS) + ")"
 _KN_STOP = rf"(?=\s{{2,}}|\n|$|\s*{_KN_NEXT}\b)"
 
+# 另一種版面 (2026-10-30 使用者抽查 JKT1365247)：兩個標籤在一行、值在下一行，
+#   "P. OF LOADING ETD/ATD"
+#   ": JAKARTA : 07.01.2025"
+# 先合併成一般版面 "P. OF LOADING : JAKARTA ETD/ATD : 07.01.2025"，後面的規則不用改
+_KN_LABEL_PAIRS = [
+    (r"FIRST VESSEL(?: NA)?", r"FIRST VOYAGE(?: NU)?"), (r"VESSEL NAME", r"VOYAGE"),
+    (r"PL\. OF RECEIPT", r"MOVEMENT TYPE"), (r"P\. OF LOADING", r"ETD/ATD"),
+    (r"P\. OF DISCHARGE", r"ETA/ATA"), (r"PL\. OF DELIVERY", r"DANGEROUS GOODS"),
+    (r"TERMS OF TRADE", r"INSURAN\. STATUS"),
+]
+_KN_SPLIT_LABEL_RE = re.compile(
+    r"(?m)^(?P<a>" + "|".join(a for a, _ in _KN_LABEL_PAIRS) + r")\s+"
+    r"(?P<b>" + "|".join(b for _, b in _KN_LABEL_PAIRS) + r")[ \t]*\n"
+    r":[ \t]*(?P<v1>[^\n:]*?)[ \t]*:[ \t]*(?P<v2>[^\n]*)$")
+
+
+def _kn_join_split_labels(text: str) -> str:
+    return _KN_SPLIT_LABEL_RE.sub(
+        lambda m: f"{m['a']} : {m['v1']}  {m['b']} : {m['v2']}", text)
+
 
 def _kn_clean_amount(text: Optional[str]) -> Optional[int]:
     """印尼式數字 '1.521.098,00' (句點=千分位、逗號=小數) -> 1521098。"""
@@ -439,8 +459,11 @@ _KN_AMOUNT = r"\d{1,3}(?:,\d{3})+(?:\.\d{2})?|\d{1,3}\.\d{2}"
 _KN_CHARGE_LINE_PATTERN = re.compile(
     r"^(?P<desc>[A-Z][A-Za-z0-9 /\-\.,()&]+?)\s+"
     r"(?:[\d,]+\.\d{2}\s*[A-Z]{3}\s+)?"
-    # 行尾是 VAT 代碼：數字，或 "Z" (N/A OUT OF SCOPE OF VAT，使用者 2026-10 樣本 JKT1394609)
-    rf"(?P<amount>{_KN_AMOUNT})\s+(?:\d|Z)\s*$",
+    # 行尾是 VAT 代碼：數字，或 "Z" (N/A OUT OF SCOPE OF VAT，使用者 2026-10 樣本 JKT1394609)，
+    # 或 "E" (0 % ZERO RATED EXPORT OF SERVICE，2026-10-30 JKT1418536 DEMURRAGE AND DETENTION)、
+    # "O" (JKT1425521)。只收已知代碼 (貨物說明 "PRS 1,072 C" 不是費用)，而且要在同一行
+    # (不可跨行：「GW 51.63」下一行的「G」不是代碼)
+    rf"(?P<amount>{_KN_AMOUNT})[ \t]+(?:\d|[ZEO])[ \t]*$",
     re.MULTILINE,
 )
 # 不含稅的帳單 VAT 合計是 "0"，合計行剛好也像費用行，要排除
@@ -469,7 +492,8 @@ def _kn_clean_amount_comma_thousands(text: Optional[str]):
 # SUBTOTAL / 含稅總額行，幣別代碼用任意三個大寫字母 (不寫死 IDR)：
 #   "SUBTOTAL IDR 12,244,622 1,346,908"   (未稅合計 + VAT 合計)
 #   "INVOICE TOTAL IDR 13,591,530"         (含稅總額；有些國家寫 AMOUNT DUE)
-_KN_SUBTOTAL_PATTERN = r"SUBTOTAL\s+[A-Z]{3}\s+([\d,.]+)\s+([\d,.]+)"
+# 幣別前面可能多一個字母 ("SUBTOTAL N IDR 19,099,286 2,100,921"，2026-10-30 JKT1370073)
+_KN_SUBTOTAL_PATTERN = r"SUBTOTAL\s+(?:[A-Z]\s+)?[A-Z]{3}\s+([\d,.]+)\s+([\d,.]+)"
 _KN_GRAND_TOTAL_PATTERN = r"(?:INVOICE\s+TOTAL|AMOUNT\s+DUE|TOTAL\s+DUE)\s+[A-Z]{3}\s+([\d,.]+)"
 
 
@@ -525,7 +549,8 @@ def _kn_extract_po_numbers(text: str) -> Optional[str]:
     """DESCRIPTION OF GOODS 裡的 "PO NO." 清單：PO NO. 下面逐行都是 PO 號碼，
     遇到第一行不是純號碼的 (例如 "INV NO."、"INV."、"HS CODE") 就停止。
     這段常夾著直排水印的單一字母 (C/L/A/T...)，比對前先把它們去掉。"""
-    m = re.search(r"PO NO\.[^\n]*\n(.*)", text, re.DOTALL)
+    # 也有寫成 "PO NO#" 的 (JKT1365247、JKT1370073)
+    m = re.search(r"PO NO[.#][^\n]*\n(.*)", text, re.DOTALL)
     if not m:
         return None
     numbers: List[str] = []
@@ -594,6 +619,7 @@ def _kn_extract_shipper_via_notify(text: str) -> Optional[str]:
 
 
 def parse_kuehne_nagel(text: str) -> Dict:
+    text = _kn_join_split_labels(text)
     header: Dict[str, Optional[str]] = {}
 
     # SUPPLIER 以 KN 帳單右下角為準；只有右下角抓不到時才退回稅務發票的賣方名稱
@@ -628,6 +654,9 @@ def parse_kuehne_nagel(text: str) -> Dict:
         _search(rf"COMMERCIAL INVOICE NUMBER\s*\n\s*(.+?){_KN_STOP}", text)
         or _kn_extract_po_numbers(text)
     )
+    # 使用者 2026-10-30：寫「AS PER ATTACHED」但 PDF 裡沒有附件號碼 (CAK1107369 等) -> N/A
+    if header["order_no"] and not re.search(r"\d", header["order_no"]):
+        header["order_no"] = _kn_extract_po_numbers(text)
     # Vessel 欄位使用者確認要「船名+航次」(例如 "VANCOUVER 058N")，不是只
     # 取船名；VESSEL NAME/VOYAGE 兩個欄位左右並排在同一行 ("VESSEL NAME :
     # VANCOUVER VOYAGE : 058N")，這裡兩個都抓出來、中間用一個空白接起來。
