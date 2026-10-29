@@ -571,6 +571,7 @@ def excel_formula_issues(path: str) -> Optional[List[Dict]]:
                 g["missing"][col] = missing
             issues.extend(grouped.values())
             issues.extend(_rate_total_issues(ws.title, formulas, sums, grid))
+            issues.extend(_row_gap_issues(ws.title, formulas, grid))
             # 公式沒有存計算結果 (用程式產生、沒在 Excel 開過的 xlsx)：讀不到金額，
             # 使用者 2026-10-27 規定標 ERROR
             blank = [f"{col}{r}" for (r, col) in formulas
@@ -629,8 +630,83 @@ def _rate_total_issues(sheet: str, formulas: Dict[Tuple[int, str], str],
     return issues
 
 
+# 每列合計 (橫向) 只加一段欄位 + 幾個單格，例如 AI3 '=SUM(AC3:AH3)+AA3'
+_ROW_SUM_RE = re.compile(r"^=\+?SUM\(\$?([A-Z]{1,3})\$?(\d+):\$?([A-Z]{1,3})\$?(\d+)\)((?:\+\$?[A-Z]{1,3}\$?\d+)*)$",
+                         re.I)
+# 費用欄表頭 (漏在合計左邊的欄要是費用欄才算)；數量/重量/費率類的欄不算
+_FEE_HEADER_RE = re.compile(r"FEE|CHARGE|PH[IÍ]|FREIGHT|CUSTOM|SURCHARGE|TRUCKING|SERVICE", re.I)
+_NOT_FEE_HEADER_RE = re.compile(r"KG|CBM|WEIGHT|QTY|QUANTITY|RATE|%|DATE|NGÀY|\bNO\b|SỐ|CONT|20'|40'", re.I)
+
+
+def _row_gap_issues(sheet: str, formulas: Dict[Tuple[int, str], str], grid: List[list]) -> List[Dict]:
+    """每列合計公式漏了費用欄 (2026-10-29 RỒNG Á CHÂU 抽樣：FCL 表 AI '=SUM(AC:AH)+AA'
+    漏 Z extra custom sheet、AB SERVICE FEE；LCL 表 AW '=SUM(AL:AV)' 漏 AK TRUCKING FEE)：
+    該列的合計就少算這幾欄。漏的欄要有金額，且是：(a) 公式範圍中間沒被加到的欄，
+    或 (b) 緊接在範圍左邊、表頭是費用名稱的欄。同一張表、同一欄、同一組漏算欄合併成一筆：
+    {"kind": "row_gap", "sheet", "col", "formula", "rows": [列號], "missing": {欄: 漏算金額}}。"""
+    from openpyxl.utils import column_index_from_string as ci, get_column_letter as gl
+
+    def num(r, c):
+        v = grid[r - 1][c - 1] if r - 1 < len(grid) and c - 1 < len(grid[r - 1]) else None
+        return v if isinstance(v, (int, float)) and not isinstance(v, bool) else None
+
+    def header(c, before):
+        for r in range(min(before, 10) - 1, 0, -1):
+            v = grid[r - 1][c - 1] if r - 1 < len(grid) and c - 1 < len(grid[r - 1]) else None
+            if isinstance(v, str) and v.strip():
+                return v.strip()
+        return ""
+
+    # 每一列被公式用到的欄 (同列的 TOTAL 欄可能把合計欄漏的費用加回去，例如
+    # '=AL3+AD3+AB3'，那就不是漏算)
+    used: Dict[int, set] = {}
+    for (r, own), f in formulas.items():
+        cols = set()
+        for a, ra, b, rb in re.findall(r"\$?([A-Z]{1,3})\$?(\d+):\$?([A-Z]{1,3})\$?(\d+)", f.upper()):
+            if int(ra) == r == int(rb):
+                cols |= set(range(ci(a), ci(b) + 1))
+        for a, ra in re.findall(r"(?<![A-Z:$])\$?([A-Z]{1,3})\$?(\d+)(?![\d:])", f.upper()):
+            if int(ra) == r:
+                cols.add(ci(a))
+        used.setdefault(r, {})[ci(own)] = cols
+
+    grouped: Dict[tuple, Dict] = {}
+    for (f_row, col), formula in formulas.items():
+        m = _ROW_SUM_RE.match(formula)
+        if not m or int(m.group(2)) != f_row or int(m.group(4)) != f_row:
+            continue
+        refs = set(range(ci(m.group(1).upper()), ci(m.group(3).upper()) + 1))
+        refs |= {ci(re.sub(r"[\d$+]", "", t).upper()) for t in m.group(5).split("+") if t}
+        lo, hi = min(refs), max(refs)
+        gaps = [j for j in range(lo, hi + 1) if j not in refs
+                and not _NOT_FEE_HEADER_RE.search(header(j, f_row))]
+        j = lo - 1
+        while j >= 1 and num(f_row, j) is not None and _FEE_HEADER_RE.search(header(j, f_row)) \
+                and not _NOT_FEE_HEADER_RE.search(header(j, f_row)):
+            gaps.append(j)
+            j -= 1
+        elsewhere = set().union(*(cs for own, cs in used.get(f_row, {}).items() if own != ci(col)))
+        missing = {gl(j): num(f_row, j) for j in sorted(gaps) if num(f_row, j) and j not in elsewhere}
+        if not missing:
+            continue
+        key = (col, tuple(missing))
+        g = grouped.setdefault(key, {"kind": "row_gap", "sheet": sheet, "col": col,
+                                     "formula": formula, "rows": [], "missing": {}})
+        g["rows"].append(f_row)
+        for c, v in missing.items():
+            g["missing"][c] = g["missing"].get(c, 0.0) + v
+    return list(grouped.values())
+
+
 def format_formula_issue(issue: Dict) -> str:
     """公式問題 -> 說明文字 (給驗證異常、轉檔總表、查驗結果用)。"""
+    if issue.get("kind") == "row_gap":
+        rows = issue["rows"]
+        where = f"第 {rows[0]} 列" if len(rows) == 1 else f"{len(rows)} 列 (例第 {rows[0]} 列)"
+        amounts = "、".join(f"{c} 欄 {v:,.2f}" for c, v in issue["missing"].items())
+        return (f"原帳單問題 (Excel 公式有誤)：[{issue['sheet'].strip()}] {issue['col']} 欄每列合計 "
+                f"(例 {issue['formula']}) 漏加 {'/'.join(issue['missing'])} 欄，{where}的合計少算；"
+                f"漏算 {amounts}")
     if issue.get("kind") == "uncached":
         cells = issue["cells"]
         return (f"原帳單問題 (Excel 公式沒有存計算結果)：[{issue['sheet'].strip()}] {len(cells)} 個公式"
