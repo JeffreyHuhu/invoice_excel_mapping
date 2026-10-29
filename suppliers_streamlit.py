@@ -6661,8 +6661,12 @@ def detect_opl(text: str) -> bool:
     """同一家也會附提單 (B/L) 文件，上面也有 NCL 名稱但不是請款單，所以
     要同時有 "INV NO." 才算。台灣曜捷 (OPL) 的美金 Debit Note 見 _is_opl_dn()。"""
     upper = text.upper()
+    # 掃描的空運 INVOICE ("OLCCGK251026")：預設 OCR 漏讀 FILE NO，會被誤認成 ORIENTAL_MULTIMODAL。
+    # 有公司名稱 + INVOICE/DEBIT NOTE 標題 + HB/L 就算；擷取時 _opl_pages 會重新 OCR
+    scanned_dn = re.search(r"ORIENTAL\s*POWER\s*LOGISTICS", upper) and re.search(r"[HAUB]B/L", upper) \
+        and re.search(r"(?m)^\W*(?:OUTBOUND\s+)?(?:INVOICE|DEBIT\s+NOTE)\W*$", upper)
     return ("NCL INTER LOGISTIK" in upper and re.search(r"\bINV\s*NO\.", upper) is not None) \
-        or _is_opl_dn(text)
+        or _is_opl_dn(text) or bool(scanned_dn)
 
 
 # --- OPL 美金 Debit Note (使用者 2026-10-28：OPL 就是曜捷運通，"OUTBOUND DN" 就是
@@ -6684,18 +6688,22 @@ def _is_opl_dn(text: str) -> bool:
     upper = text.upper()
     # 掃描檔 OCR 偶爾把 FILE NO 讀成 PILE NO。空運帳單 (AT- 開頭的 FILE NO，2026-10-29 OPL
     # 資料夾 "AASZX2509417 (PT.NIKOMAS SZX 2ND).pdf") 抬頭只寫 "INVOICE"，要有公司名稱才算
-    # 標題讀成亂碼時 ("JKTHCSE2601010H")，有 S/O# 欄也算；HB/L 會讀成 AB/L ("SPOE2509124…")
+    # 標題讀成亂碼時 ("JKTHCSE2601010H")，有 S/O# 欄也算；HB/L 會讀成 AB/L ("SPOE2509124…")、
+    # UB/L ("HKGJKT25090024")、BB/L ("HKGJKT25110676")
     title = re.search(r"OUTBOUND\s+(?:INVOICE|DEBIT\s+NOTE)", upper) or "S/O#" in upper or (
         re.search(r"(?m)^\s*INVOICE\s*$", upper) and "ORIENTAL POWER" in upper)
     return bool(title) and re.search(r"[FP]ILE NO", upper) is not None \
-        and re.search(r"[HA]B/L", upper) is not None
+        and re.search(r"[HAUB]B/L", upper) is not None
 
 
 def _opl_dn_total(text: str) -> Optional[float]:
     # 掃描檔 OCR 會多讀出 "=" / ":" ("US$ =: 1,320.00")，或在前面多讀出雜訊 ("- 7 US$ 639.20")。
     # 掃描檔有時把右邊的 PREPAID AMT 欄拆成一行一個 "US$ 435.00"，總額在最後 ("KHHJKT2511640")
-    found = re.findall(r"(?m)^[^A-Za-z\n]{0,8}?(?:TOTAL\s*:\s*)?US\$\s*[=:]*\s*([\d,.]+)\s*$", text)
-    return _opl_amount(found[-1]) if found else None
+    # 總額前面也會多一個 "."、"—-" 或雜字 ("a US$  . 357.75"、"HKGJKT25080662"；"US$ —- 176.00")
+    found = re.findall(r"(?m)^[^A-Za-z\n]{0,8}?(?:[a-z]{1,2}\s+){0,2}(?:TOTAL\s*:\s*)?US\$\s*[=:.\s\-—~]*?\s*(\d[\d,.]*(?:\s\.\d{2})?)\s*$",
+                       text)
+    # 小數點前多一個空白 ("US$ 479 .36")
+    return _opl_amount(found[-1].replace(" ", "")) if found else None
 
 
 # --- OPL 美金 Debit Note 掃描檔 (2026-10-29 OPL 資料夾 "HKGJKT25110203(NIKOMAS HKG 62ND).pdf"
@@ -6709,11 +6717,15 @@ _OPL_SCAN_ITEM_RE = re.compile(
     # 費用名稱 + 數量 ("1X40'HQ"、"1x20'GP"、"3.570 CBM"、"1 SET"、"2 SHPT"、"MINI"；OCR 會把
     # "1 SET" 讀成 "| SET"/"1 SEI"、"2 SHPT" 讀成 "2. SHPT")，後面接 US$ 單價、AMT、PAYER、
     # PREPAID/COLLECT AMT
-    r"^[|.\s]*(?P<desc>[A-Z0-9]\S*(?:\s+\S+)*?)[\s.,]+"
-    # 也會把 "2X40'HQ" 讀成 "2440 'HQ"、"5BLS" 讀成 "SBLS"
-    r"(?P<qty>\d+\s*[Xx]\s*\d{2}\S*|\d+\s*4\s*\d{2}\s?'\S*|\d[\d.,]*\s*[A-Z]{2,5}|[|iIl]\s+[A-Z]{2,5}"
-    r"|[SO](?:BLS?|SETS?|SHPTS?|CBM)|MINI\d*)"
-    r"\s+(?P<rest>.*U[S$]{1,2}.*)$")
+    # 名稱和數量之間會多讀出 "—-"、"~=—"、"_" ("O/F —-1X20'GP"、"SE25091000010")
+    # 行首也會多讀出 "— "、"~ "、"“" ("OLJKT2511021" 的 "— DOC-POD")
+    r"^[|.\s\-—–~“\"'_«‘;:\\]*(?P<desc>[A-Z0-9]\S*(?:\s+\S+)*?)[\s.,\-—–~=_'‘]+"
+    # 也會把 "2X40'HQ" 讀成 "2440 'HQ"、"5BLS"/"4BLS"/"10BLS" 讀成 "SBLS"/"S5BLS"/"ABLS"/"LOBLS"、
+    # "1 SET" 讀成 "{ SET"/"1s SET"、MINI 讀成 "MINT"/"MINTI"/"MINI]"、"KGS USD" 黏成 "KGSUSD"
+    r"(?P<qty>\d+\s*[Xx]\s*\d{2}\S*|\d+\s*4\s*\d{2}\s?'\S*|[\d.,]+\s*KGS(?=USD)"
+    r"|S?\d[\d.,]*[a-z]?\s*[A-Z]{2,5}|[|iIlt]\s+[A-Z]{2,5}"
+    r"|\d?[{(\[\])]\s*[A-Z]{2,5}|[LI1]?[SOA0](?:BLS?|SETS?|SHPTS?|CBM)|MIN[ITl1]{1,2}[\]|]?\d*)"
+    r"(?:\s+|(?<=KGS)(?=USD))(?P<rest>.*U[S$]{1,2}.*)$")
 _OPL_SCAN_MONEY_RE = re.compile(r"(?<![\d.])(\d{1,3}(?:,\s?\d{3})*\.\d{2})(?![\d])")
 
 
@@ -6723,9 +6735,20 @@ def _opl_scan_item(line: str) -> Optional[Dict]:
     m = _OPL_SCAN_ITEM_RE.match(line)
     if not m:
         return None
-    nums = [float(n.replace(",", "").replace(" ", "")) for n in _OPL_SCAN_MONEY_RE.findall(m.group("rest"))]
+    # OCR 會把小數點讀成兩個 ("339..23"、"140..00")
+    # 千分位逗號讀成分號 ("US$1;500.00")
+    rest = re.sub(r"(\d)\s?\.\.\s?(\d)", r"\1.\2", m.group("rest"))
+    rest = re.sub(r"(\d);(\d{3}\.)", r"\1,\2", rest)
+    # 小數點漏讀成空白 ("USD 39 23 39 23 … US$ 339..23"、"326 00")
+    rest = re.sub(r"(?<![\d.,])(\d{1,3}(?:,\d{3})*) (\d{2})(?![\d.,])", r"\1.\2", rest)
+    nums = [float(n.replace(",", "").replace(" ", "")) for n in _OPL_SCAN_MONEY_RE.findall(rest)]
     if not nums:
         return None
+    # 港幣等外幣費用 ("GATE CHARGE 2 SET HKD 570.00 1,140.00 PT.… US$ 147.49"，"HKGJKT25090022A")：
+    # 單價、AMT 是外幣，只有行尾 PREPAID AMT 是美金，一定用它
+    if re.match(r"\W*(?:HK[D)]|RMB|CNY|TWD|NTD?|JPY|EUR|SGD)\b", rest):
+        return {"description": m.group("desc").strip(" .,"), "amount": nums[-1], "vat": None,
+                "_alt": nums[-1]}
     amount = nums[-1] if len(nums) < 3 or nums[-1] == nums[-2] else nums[-2]
     # 另一欄讀到的不同金額 (_parse_opl_dn 用它讓明細對平總額)
     other = nums[-1] if amount != nums[-1] else (nums[-2] if len(nums) >= 2 else amount)
@@ -6772,13 +6795,21 @@ def _opl_scan_ocr(pdf_path: str, page_index: int, dpi: int = _OPL_SCAN_DPI, bw: 
 
 
 def _opl_scan_score(text: str) -> int:
-    """OCR 結果好不好：2 = 明細對平總額且有 CONSIGNEE、發票日期；1 = 只對平總額；0 = 對不平。"""
+    """OCR 結果好不好：2 = 明細對平總額且有 CONSIGNEE、發票日期、發票號碼；1 = 只對平總額；0 = 對不平。"""
     parsed = _parse_opl_dn(text)
     total = _opl_dn_total(text)
     if total is None or abs(sum(i["amount"] or 0 for i in parsed["items"]) - total) > 0.01:
         return 0
     header = parsed["header"]
-    return 2 if header.get("consignee") and header.get("invoice_date") else 1
+    return 2 if header.get("consignee") and header.get("invoice_date") and header.get("invoice_no") else 1
+
+
+def _opl_dn_scan_page(fast_text: str) -> bool:
+    """快速 OCR 看起來是 DN 頁：有公司名稱或標題，加上 DN 的任一欄位。快速 OCR 常漏讀
+    FILE NO ("OLCXML2508090C05"、"SE25092500012")，所以 S/O#、HB/L、ITEM NAME、US$ 也算。"""
+    fast = fast_text.upper()
+    return re.search(r"ORIENTAL\s*POWER|OUTBOUND|DEBIT\s*NOTE", fast) is not None \
+        and re.search(r"[FP]ILE\s*NO|S/O#|HB/L|ITEM\s*NAME|US\$", fast) is not None
 
 
 def _opl_pages(pdf_path: str) -> List[str]:
@@ -6789,14 +6820,21 @@ def _opl_pages(pdf_path: str) -> List[str]:
     with pdfplumber.open(pdf_path) as pdf:
         for page_index, pg in enumerate(limited_pages(pdf)):
             if any(c["text"].strip() for c in pg.chars):
+                # 文字版 DN 跨頁 ("SHKJKT25090149A" 第 2 頁只有明細尾段和總額)：前一頁是沒有總額
+                # 的文字版 DN、這頁是沒有 FILE NO 的續頁時，接到前一頁；其他文字頁維持預設擷取
+                text = pg.extract_text() or ""
+                prev = (pdf.pages[page_index - 1].extract_text() or "") \
+                    if page_index and not pages[-1] and "OUTBOUND" in text else ""
+                if prev and _is_opl_dn(prev) and _opl_dn_total(prev) is None and not _is_opl_dn(text):
+                    pages[-1] = prev + "\n" + text
                 pages.append("")
                 continue
-            fast = _ocr_page_fast(pdf_path, page_index, pg)[0].upper()
-            if not (re.search(r"ORIENTAL\s*POWER|OUTBOUND", fast) and re.search(r"[FP]ILE\s*NO", fast)):
+            if not _opl_dn_scan_page(_ocr_page_fast(pdf_path, page_index, pg)[0]):
                 pages.append("")
                 continue
             text = _opl_scan_ocr(pdf_path, page_index)
             score = _opl_scan_score(text)
+            others = []
             # 明細對不上總額、或缺 CONSIGNEE/發票日期時，依序改用 500 dpi 黑白、600 dpi psm 6
             # 重讀，分數較高才採用
             for retry in ({"dpi": 500, "bw": True}, {"psm": 6}):
@@ -6805,8 +6843,37 @@ def _opl_pages(pdf_path: str) -> List[str]:
                 alt = _opl_scan_ocr(pdf_path, page_index, **retry)
                 alt_score = _opl_scan_score(alt)
                 if alt_score > score:
-                    text, score = alt, alt_score
-            pages.append(text)
+                    text, score, alt = alt, alt_score, text
+                others.append(alt)
+            pages.append(_opl_fill_header(text, others, pdf_path, page_index))
+    # 明細太多印到第 2 頁 ("SHKJKT25110571A")：續頁只有標題和明細，沒有 FILE NO，總額在續頁。
+    # 前一頁沒有總額時，把續頁接在後面，續頁本身改當附件
+    for i in range(len(pages) - 1):
+        if pages[i] and pages[i + 1] and _opl_dn_total(pages[i]) is None \
+                and not _is_opl_dn(pages[i + 1]):
+            pages[i] = pages[i] + "\n" + pages[i + 1]
+            pages[i + 1] = ""
+    return pages
+
+
+def _opl_fill_header(text: str, others: List[str], pdf_path: str, page_index: int) -> str:
+    """採用的 OCR 版本缺 CONSIGNEE/發票號碼/發票日期時，從其他版本 (同一頁) 補那一行；
+    CONSIGNEE 還是沒有，再單獨讀 MESSR 那一行 (_opl_messr_band)。補的行加在最後。"""
+    header = _parse_opl_dn(text)["header"]
+    extra = []
+    for key in ("consignee", "invoice_no", "invoice_date"):
+        if header.get(key):
+            continue
+        for alt in others:
+            line = _opl_header_lines(alt)[key]
+            if line and _parse_opl_dn(line)["header"].get(key):
+                extra.append(line)
+                break
+    if not header.get("consignee") and not any(_parse_opl_dn(ln)["header"].get("consignee") for ln in extra):
+        messr = _opl_messr_band(pdf_path, page_index)
+        if messr:
+            extra.append(f"MESSR : {messr}")
+    return "\n".join([text] + extra)
     return pages
 
 
@@ -6817,6 +6884,78 @@ def _opl_dn_date(value: Optional[str]) -> Optional[str]:
         return datetime.date(int(m.group(3)), int(m.group(1)), int(m.group(2))).strftime("%d %b %Y")
     m = re.match(r"([A-Za-z]{3})\.?\s*(\d{1,2})\s*,\s*(\d{4})", value or "")
     return _format_date_en_from_month_name(m.group(2), m.group(1), m.group(3)) if m else value
+
+
+def _opl_cnee(text: str) -> Optional[str]:
+    """CNEE 欄。文字版 PDF 有時 CNEE 跟收件人 email 疊印，抽出來變成一個字一個字交錯
+    ("E P m T a . i l N : I K p O …"，"SHKJKT25090149A")：這種值不用，改用 MESSR。"""
+    value = _search(r"CNEE\s*:\s*(.+?)(?:\s+CLOSING\s*:|$)", text)
+    words = (value or "").split()
+    if not words or "@" in value or sum(len(w) == 1 for w in words) > len(words) / 2:
+        return None
+    return value
+
+
+def _opl_messr(text: str) -> Optional[str]:
+    """MESSR (請款對象)。掃描檔同一行右邊的 ON BOARD / POL 會讀進來，後面也常接小寫雜字
+    ("MESSR :PT. NIKOMAS GEMILANG ee neat aan")：公司名稱是大寫，遇到含小寫的字就停。"""
+    value = _search(r"(?m)MESS[RK]\s*:\s*(.+?)(?:\s+(?:POL|ON\s*BOARD)\s*:|$)", text)
+    if not value:
+        return None
+    words = []
+    for word in value.split():
+        if re.search(r"[a-z]", word) or not re.search(r"[A-Z]{2}", word) and words[-1:] != ["PT."]:
+            break
+        words.append(word)
+    return " ".join(words).strip(" |,") or None
+
+
+def _opl_header_lines(text: str) -> Dict[str, Optional[str]]:
+    """表頭欄位的整行原文 (給 _opl_pages 從其他 OCR 版本補缺的行)。"""
+    keys = {"consignee": r"(?:CNEE|MESS[RK])\s*:", "invoice_no": r"[FP]ILE NO\s*:",
+            "invoice_date": r"^\s*DATE\s*:\s*\d|印表日期"}
+    return {k: _search(rf"(?m)^(.*(?:{pat}).*)$", text) for k, pat in keys.items()}
+
+
+def _opl_messr_band(pdf_path: str, page_index: int) -> Optional[str]:
+    """MESSR 那行跟下一行地址貼得很近，psm 4 整行漏掉 ("HKGJKT25080687")：找到 ON BOARD 的
+    位置，只切它下面那一條 (左邊 60%，避開右邊的 POL)，用 psm 7 單行 OCR。"""
+    import pdfplumber
+    import pytesseract
+    from PIL import ImageOps
+    with pdfplumber.open(pdf_path) as pdf:
+        image = pdf.pages[page_index].to_image(resolution=_OPL_SCAN_DPI).original
+    gray = _opl_deskew(ImageOps.autocontrast(image.convert("L")))
+    top = gray.crop((0, 0, gray.width, gray.height // 2))
+    data = pytesseract.image_to_data(top, config="--psm 4", output_type=pytesseract.Output.DICT)
+    for i, word in enumerate(data["text"]):
+        if word.upper().startswith("BOARD") and i and data["text"][i - 1].upper() == "ON":
+            y, h = data["top"][i], data["height"][i]
+            # 行距每份略有不同：依序試三種上下範圍，讀到 MESSR 就停
+            for start, end in ((0.7, 2.5), (0.5, 2.2), (1.0, 2.9)):
+                band = gray.crop((0, int(y + h * start), int(gray.width * 0.6), int(y + h * end)))
+                messr = _opl_messr(pytesseract.image_to_string(band, config="--psm 7"))
+                if messr:
+                    # OCR 常把 INDONESIA 讀成 INDONESTA
+                    return re.sub(r"\bINDONES[TI1l]A\b", "INDONESIA", messr).rstrip(".")
+            return None
+    return None
+
+
+def _opl_swap_alt(items: List[Dict], total: float) -> None:
+    import itertools
+    gap = round(total - sum(it["amount"] for it in items), 2)
+    diff = [it for it in items if round(it["_alt"] - it["amount"], 2)]
+    if not gap or len(diff) > 12:
+        return
+    for size in range(1, len(diff) + 1):
+        hits = [combo for combo in itertools.combinations(diff, size)
+                if round(sum(it["_alt"] - it["amount"] for it in combo) - gap, 2) == 0]
+        if hits:
+            if len(hits) == 1:
+                for it in hits[0]:
+                    it["amount"] = it["_alt"]
+            return
 
 
 def _parse_opl_dn(text: str) -> Dict:
@@ -6835,12 +6974,11 @@ def _parse_opl_dn(text: str) -> Dict:
         "invoice_date": _opl_dn_date(_search(r"印表日期\s*:\s*(\d{1,2}/\d{1,2}/\d{4})", text))
         or _opl_dn_date(_search(r"(?m)^\s*DATE\s*:\s*(\d{1,2}/\d{1,2}/\d{4})", text)) or onboard,
         # 有些 DN 沒有 CNEE 欄 ("HKGJKT25080662")：改用 MESSR (請款對象)
-        "consignee": _search(r"CNEE\s*:\s*(.+?)(?:\s+CLOSING\s*:|$)", text)
-        or _search(r"(?m)MESSR\s*:\s*(.+?)(?:\s+POL\s*:|$)", text),
+        "consignee": _opl_cnee(text) or _opl_messr(text),
         # 掃描檔 OCR 會在冒號前後多讀 "=" / ";" ("S/O# =: 25110203"、"HB/L =: HKGJKT…")
         "order_no": _search(r"S/O#\s*[=:;]*\s*:\s*(\S+)", text) or _search(r"S/O#\s*[=;]+\s*(\d+)", text),
         "onboard_date": onboard,
-        "bl_no": _search(r"[HA]B/L\s*[=s]*\s*:\s*(\S+)", text),
+        "bl_no": _search(r"[HAUB]B/L\s*[=s|]*\s*:\s*(\S+)", text),
         "port_of_loading": _search(r"POL\s*:\s*(.+?)\s*$", text),
         "port_of_discharge": _search(r"Dest\s*:\s*(.+?)\s*$", text),
         "vessel": _search(r"VSL/VOY/LINE\s*:\s*(.+?)(?:\s+\(Normal\))?(?:\s+Sales\s*:|$)", text),
@@ -6859,12 +6997,10 @@ def _parse_opl_dn(text: str) -> Dict:
     scanned = [it for it in (_opl_scan_item(ln.strip()) for ln in block.splitlines()) if it]
     total = _opl_dn_total(text)
     if scanned and total is not None:
-        # AMT 欄和 PREPAID AMT 欄讀到不同金額 (例如 49.00 / 69.00) 時，只有換成另一欄就剛好
-        # 對平總額的那一列才換 (兩個值都是帳單上讀到的，不是推算)
-        gap = round(total - sum(it["amount"] for it in scanned), 2)
-        fix = [it for it in scanned if gap and round(it["_alt"] - it["amount"], 2) == gap]
-        if len(fix) == 1:
-            fix[0]["amount"] = fix[0]["_alt"]
+        # AMT 欄和 PREPAID AMT 欄讀到不同金額 (例如 49.00 / 69.00) 時，找「換成另一欄就剛好
+        # 對平總額」的列 (兩個值都是帳單上讀到的，不是推算)。可能好幾列都讀錯
+        # ("HKGJKT25100107A")：試所有組合，最少列數的組合只有一個才換
+        _opl_swap_alt(scanned, total)
     for it in scanned:
         it.pop("_alt")
     if len(scanned) > len(items):
@@ -6924,7 +7060,10 @@ def parse_opl(text: str) -> Dict:
         "supplier": lines[0] if lines else None,
         "invoice_no": _opl_field(r"INV\s*NO\.", text),
         "invoice_date": _opl_date(_opl_field(r"INV\s*DATE", text)),
-        "consignee": _opl_field(r"CONSIGNEE", text),
+        # "SALES REIMBURSEMENT" 版：標籤和值分兩行 ("CONSIGNEE :\n: PT. POU CHEN INDONESIA POL …"，
+        # "NCLR26080891")
+        "consignee": _opl_field(r"CONSIGNEE", text)
+        or _search(r"(?m)CONSIGNEE\s*:[ \t]*\n\s*:\s*(.+?)(?:\s+POL\b.*)?$", text),
         "order_no": _opl_field(r"YOUR\s*REF", text),
         "arrive_date": _opl_field(r"ETA", text),
         "onboard_date": _opl_field(r"ATD", text),
@@ -6938,8 +7077,12 @@ def parse_opl(text: str) -> Dict:
         "shipper": _opl_field(r"SHIPPER", text),
     }
     items = []
-    for ln in lines:
+    for idx, ln in enumerate(lines):
         m = _OPL_ITEM_RE.match(ln)
+        if not m and 0 < idx < len(lines) - 1 and not re.search(r"\d", lines[idx - 1] + lines[idx + 1]):
+            # 費用名稱太長，數字自成一行，名稱分在上下兩行 ("FUEL\n1.0000 SHPT 88.200 USD … 1,532,475.88
+            # \nSURCHARGE_CRECIMIENTO"，"COAU7269061950 SR-JKTHCSE2605025A")
+            m = _OPL_ITEM_RE.match(f"{lines[idx - 1]} {lines[idx + 1]} {ln}")
         if m:
             amount = _opl_amount(m.group("amount"))
             rate = float(m.group("vat"))
