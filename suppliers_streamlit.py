@@ -7699,10 +7699,11 @@ def detect_yusen(text: str) -> bool:
 def parse_yusen(text: str) -> Dict:
     supplier = _search(r"(YUSEN LOGISTICS \(VIETNAM\) CO\., LTD\.[^\n]*?BRANCH)", text)
     if not supplier:
-        # 2025 上半年舊版：名稱分兩行 "YUSEN LOGISTICS (VIETNAM) CO.LTD" / (Bank) / "HO CHI MINH BRANCH,…"
-        m = re.search(r"(YUSEN LOGISTICS \(VIETNAM\) CO\.\s*,?\s*LTD\.?)\s*\n(?:Bank\s*\n)?\s*"
-                      r"(HO CHI MINH BRANCH)", text)
-        supplier = f"{m.group(1)} - {m.group(2)}" if m else None
+        # 2025 上半年舊版：名稱分兩行 "YUSEN LOGISTICS (VIETNAM) CO.LTD" / (Bank) / "HO CHI MINH BRANCH,…"。
+        # 統一成新版寫法 (使用者 2026-10-29)
+        m = re.search(r"YUSEN LOGISTICS \(VIETNAM\) CO\.\s*,?\s*LTD\.?\s*\n(?:Bank\s*\n)?\s*"
+                      r"HO CHI MINH BRANCH", text)
+        supplier = "YUSEN LOGISTICS (VIETNAM) CO., LTD. - HO CHI MINH BRANCH" if m else None
     return _cw_parse(text, supplier)
 
 
