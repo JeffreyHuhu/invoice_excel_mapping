@@ -3474,6 +3474,8 @@ def _pancaran_extract_order_no(text: str) -> Optional[str]:
 
 
 def _pancaran_extract_container_no(text: str) -> Optional[str]:
+    # 陸運帳單 (INV.2510.0007~0012) 的 Container No. 欄印車牌 ("B 9197 PCC,")：照抄，不要改擷取規則。
+    # 使用者 2026-10-30 確認是原帳單問題，登記在 validation_streamlit.KNOWN_SOURCE_ISSUES["PANCARAN"]
     lines = text.split("\n")
     for i, line in enumerate(lines):
         m = re.search(r"JOB\s+NO\.\s*:\s*\S+\s+(.+)$", line)

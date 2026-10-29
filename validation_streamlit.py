@@ -30,7 +30,7 @@ fallback_streamlit.py 的備援擷取，並列入異常清單 (Exceptions)。
 import datetime
 import io
 import re
-from typing import Dict, List, Optional, Tuple
+from typing import Dict, List, Optional, Pattern, Tuple, Union
 
 from openpyxl import load_workbook
 from openpyxl.styles import Alignment, Font, PatternFill
@@ -83,7 +83,8 @@ _PLACEHOLDERS = {"-", "--", "/"}
 # 規定原帳單的問題不標示為 WARN、不反紅：改成 INFO (只當附註、不扣信心分數、
 # 不影響信心等級)，說明後面註記屬原帳單問題。
 #   供應商 key -> {(欄位代碼, 規則代碼): (說明, 只在這些原始值時才算；None=不限)}
-KNOWN_SOURCE_ISSUES: Dict[str, Dict[Tuple[str, str], Tuple[str, Optional[set]]]] = {
+#   原始值也可以是 re.Pattern (整個值符合才算)，給「每張不同、但格式固定」的值用
+KNOWN_SOURCE_ISSUES: Dict[str, Dict[Tuple[str, str], Tuple[str, Optional[Union[set, Pattern]]]]] = {
     "MAERSK": {
         ("arrive_date", "DATE_FORMAT"): ("MAERSK 原帳單的 ETA 本身就是「--」", {"--"}),
         ("arrive_date", "DATE_ORDER"): ("MAERSK 原帳單的 ETA 本身就早於 ETD", None),
@@ -122,6 +123,12 @@ KNOWN_SOURCE_ISSUES: Dict[str, Dict[Tuple[str, str], Tuple[str, Optional[set]]]]
         # 帳單印 "2026-JUN-31" (6 月沒有 31 日)
         ("arrive_date", "DATE_FORMAT"): ("INDOPROSTIME 原帳單的日期本身就不存在", {"2026-JUN-31"}),
         ("onboard_date", "DATE_FORMAT"): ("INDOPROSTIME 原帳單的日期本身就不存在", {"2026-JUN-31"}),
+    },
+    # 陸運帳單 (TRUCKING CHARGE TRAGA，INV.2510.0007~0012) 的 Container No. 欄印車牌
+    # ("B 9197 PCC,")；使用者 2026-10-30：保留車牌，屬原帳單問題。只限印尼車牌格式
+    "PANCARAN": {
+        ("container_no", "CONTAINER_FORMAT"): ("PANCARAN 陸運帳單的 Container No. 欄原文就是車牌",
+                                               re.compile(r"[A-Z]{1,2} \d{1,4} [A-Z]{1,3},?")),
     },
 }
 # INDO PROSTIME EXPRESS 與 TRANSPORT 是同一套帳單格式
@@ -309,7 +316,9 @@ def _mark_known_source_issues(issues: List[Dict], supplier_key: Optional[str],
         entry = known.get((issue["field"], issue["rule"]))
         if entry:
             note, only_values = entry
-            if only_values is None or str(row.get(issue["field"], "")).strip() in only_values:
+            value = str(row.get(issue["field"], "")).strip()
+            if only_values is None or (only_values.fullmatch(value) if isinstance(only_values, re.Pattern)
+                                       else value in only_values):
                 issue = dict(issue, severity=INFO, known_source_issue=True,
                              message=f"{issue['message']}（{note}，屬原帳單問題，非擷取錯誤）")
         marked.append(issue)
