@@ -137,7 +137,8 @@ def compute_totals(rows: List[dict], fx_folder: Path):
     sums = OrderedDict()
     for row in rows:
         cur = detect_currency(row.get("amount"), row.get("supplier"),
-                              folder_currency(row.get("_path"))) or "(未知)"
+                              folder_currency(row.get("_path")),
+                              description=row.get("description")) or "(未知)"
         s = sums.setdefault(cur, [set(), 0.0, 0.0])
         key = _ticket_key(row)
         if key:

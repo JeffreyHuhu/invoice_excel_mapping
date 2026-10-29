@@ -475,6 +475,9 @@ def supplier_country(supplier) -> Optional[str]:
 
 # 帳單上的幣別代碼/符號 (依序比對；USD 要在 SGD/BND 前面，US$ 才不會被當成 S$；
 # TWD 要在 CNY 前面，「新台幣…元」才不會被當成人民幣)
+# 費用名稱的幣別標記 "AMS FEE (USD)" (YUSEN 2025-04 SSGN0285833)
+_DESC_CURRENCY_RE = re.compile(r"\((USD|EUR|SGD|HKD|CNY|JPY|IDR|VND|THB|MYR|TWD)\)")
+
 _CURRENCY_RES = (
     ("USD", re.compile(r"\bUSD\b|US\$|^\s*\$")),
     ("IDR", re.compile(r"\bIDR\b|\bRP\.?", re.IGNORECASE)),
@@ -495,14 +498,19 @@ _CURRENCY_RES = (
 
 
 def detect_currency(amount_raw, supplier,
-                    default: Optional[str] = DEFAULT_CURRENCY) -> Optional[str]:
+                    default: Optional[str] = DEFAULT_CURRENCY,
+                    description=None) -> Optional[str]:
     """金額幣別：帳單上的幣別 (金額文字，例如 'USD 1,234'、'Rp 50.000') 優先，
-    其次供應商 (SUPPLIER_CURRENCY -> 名稱國別 COUNTRY_CURRENCY)，最後 default
+    其次費用名稱的幣別標記 (外幣費用的名稱加註 "(USD)"，例如 CargoWise/MOL 帳單)，
+    再來供應商 (SUPPLIER_CURRENCY -> 名稱國別 COUNTRY_CURRENCY)，最後 default
     (呼叫端傳國家資料夾的幣別，見 folder_currency())；都沒有回傳 None。"""
     if isinstance(amount_raw, str):
         for code, pattern in _CURRENCY_RES:
             if pattern.search(amount_raw):
                 return code
+    m = _DESC_CURRENCY_RE.search(str(description or ""))
+    if m:
+        return m.group(1)
     sup = clean_text(supplier)
     if sup:
         # 轉檔結果會在非英文名稱後面加英文括號備註，比對時去掉
