@@ -6976,7 +6976,8 @@ def _parse_opl_dn(text: str) -> Dict:
         # 有些 DN 沒有 CNEE 欄 ("HKGJKT25080662")：改用 MESSR (請款對象)
         "consignee": _opl_cnee(text) or _opl_messr(text),
         # 掃描檔 OCR 會在冒號前後多讀 "=" / ";" ("S/O# =: 25110203"、"HB/L =: HKGJKT…")
-        "order_no": _search(r"S/O#\s*[=:;]*\s*:\s*(\S+)", text) or _search(r"S/O#\s*[=;]+\s*(\d+)", text),
+        # "S/O# :; 25110369" ("OESIN25100084")
+        "order_no": _search(r"S/O#\s*[=:;]*\s*:[\s;]*(\S+)", text) or _search(r"S/O#\s*[=;]+\s*(\d+)", text),
         "onboard_date": onboard,
         "bl_no": _search(r"[HAUB]B/L\s*[=s|]*\s*:\s*(\S+)", text),
         "port_of_loading": _search(r"POL\s*:\s*(.+?)\s*$", text),
