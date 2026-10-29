@@ -6721,7 +6721,8 @@ def _is_opl_dn(text: str) -> bool:
     # 資料夾 "AASZX2509417 (PT.NIKOMAS SZX 2ND).pdf") 抬頭只寫 "INVOICE"，要有公司名稱才算
     # 標題讀成亂碼時 ("JKTHCSE2601010H")，有 S/O# 欄也算；HB/L 會讀成 AB/L ("SPOE2509124…")、
     # UB/L ("HKGJKT25090024")、BB/L ("HKGJKT25110676")
-    title = re.search(r"OUTBOUND\s+(?:INVOICE|DEBIT\s+NOTE)", upper) or "S/O#" in upper or (
+    # OCR 也會把 DEBIT 讀成 "DEB iT"、S/O# 讀成 "5/O#" ("OLJKT2509010")
+    title = re.search(r"OUTBOUND\s+(?:INVOICE|DEB\s?IT\s+NOTE)", upper) or re.search(r"[S5]/O#", upper) or (
         re.search(r"(?m)^\s*INVOICE\s*$", upper) and "ORIENTAL POWER" in upper)
     return bool(title) and re.search(r"[FP]ILE NO", upper) is not None \
         and re.search(r"[HAUB]B/L", upper) is not None
@@ -6752,9 +6753,10 @@ _OPL_SCAN_ITEM_RE = re.compile(
     # 行首也會多讀出 "— "、"~ "、"“" ("OLJKT2511021" 的 "— DOC-POD")
     r"^[|.\s\-—–~“\"'_«‘;:\\]*(?P<desc>[A-Z0-9]\S*(?:\s+\S+)*?)[\s.,\-—–~=_'‘]+"
     # 也會把 "2X40'HQ" 讀成 "2440 'HQ"、"5BLS"/"4BLS"/"10BLS" 讀成 "SBLS"/"S5BLS"/"ABLS"/"LOBLS"、
-    # "1 SET" 讀成 "{ SET"/"1s SET"、MINI 讀成 "MINT"/"MINTI"/"MINI]"、"KGS USD" 黏成 "KGSUSD"
-    r"(?P<qty>\d+\s*[Xx]\s*\d{2}\S*|\d+\s*4\s*\d{2}\s?'\S*|[\d.,]+\s*KGS(?=USD)"
-    r"|S?\d[\d.,]*[a-z]?\s*[A-Z]{2,5}|[|iIlt]\s+[A-Z]{2,5}"
+    # "1 SET" 讀成 "{ SET"/"1s SET"/"lL SET"、MINI 讀成 "MINT"/"MINTI"/"MINI]"、"KGS USD" 黏成 "KGSUSD"
+    # "7X40'HQ" 讀成 "TX40'HQ"/"7K40'HQ" ("XM25100326")
+    r"(?P<qty>\d+\s*[Xx]\s*\d{2}\S*|\d+\s*4\s*\d{2}\s?'\S*|[\dTIl]?[XxK]\d{2}'\S*|[\d.,]+\s*KGS(?=USD)"
+    r"|S?\d[\d.,]*[a-z]?\s*[A-Z]{2,5}|[|iIlt][lLI]?\s+[A-Z]{2,5}"
     # "1CNTR" 讀成 "ICNTR" ("VN25E1609"、"VN25E1682")；"1 SET" 讀成一串雜字 "=—S—s1sSSET"
     # ("JKTHCSE2509073J")：有數字、結尾是單位就算數量
     r"|\d?[{(\[\])]\s*[A-Z]{2,5}|[LI1]?[SOA0](?:BLS?|SETS?|SHPTS?|CBM)|MIN[ITl1]{1,2}[\]|]?\d*"
@@ -6849,11 +6851,12 @@ def _opl_dn_scan_page(fast_text: str) -> bool:
 def _opl_pages(pdf_path: str) -> List[str]:
     """逐頁文字：只有「掃描的 DN 頁」自己 OCR (見上)，其他頁回傳空字串，退回預設擷取。"""
     import pdfplumber
-    from extract_utils_streamlit import _ocr_page_fast
+    from extract_utils_streamlit import _ocr_page_fast, _stamp_only_scan
     pages = []
     with pdfplumber.open(pdf_path) as pdf:
         for page_index, pg in enumerate(limited_pages(pdf)):
-            if any(c["text"].strip() for c in pg.chars):
+            # 整頁掃描圖上只疊了少量文字層 ("JKTHCSE2510070J" 的蓋章)：當掃描頁 (見 _stamp_only_scan)
+            if any(c["text"].strip() for c in pg.chars) and not _stamp_only_scan(pg, pg.extract_text() or ""):
                 # 文字版 DN 跨頁 ("SHKJKT25090149A" 第 2 頁只有明細尾段和總額)：前一頁是沒有總額
                 # 的文字版 DN、這頁是沒有 FILE NO 的續頁時，接到前一頁；其他文字頁維持預設擷取
                 text = pg.extract_text() or ""
@@ -7040,10 +7043,13 @@ def _parse_opl_dn(text: str) -> Dict:
         # 有些 DN 沒有 CNEE 欄 ("HKGJKT25080662")：改用 MESSR (請款對象)
         "consignee": _opl_std_consignee(_opl_cnee(text) or _opl_messr(text)),
         # 掃描檔 OCR 會在冒號前後多讀 "=" / ";" ("S/O# =: 25110203"、"HB/L =: HKGJKT…")
-        # "S/O# :; 25110369" ("OESIN25100084")
-        "order_no": _search(r"S/O#\s*[=:;]*\s*:[\s;]*(\S+)", text) or _search(r"S/O#\s*[=;]+\s*(\d+)", text),
+        # "S/O# :; 25110369" ("OESIN25100084")、"S/O# + 25100365" ("XM25100326")
+        "order_no": _search(r"[S5]/O#\s*[=:;]*\s*:[\s;]*(\S+)", text) or _search(r"[S5]/O#\s*[=;+]+\s*(\d+)", text),
         "onboard_date": onboard,
-        "bl_no": _search(r"[HAUB]B/L\s*[=s|]*\s*:\s*(\S+)", text),
+        # 胡志明 → 雅加達的 HB/L 開頭是 JKTHCSE，OCR 會讀成 "JETHCSE"/"SKTHCSE" ("HARDASES跨月份更新帳單"、
+        # "JKTHCSE2510070V")
+        "bl_no": re.sub(r"^(?:J[A-Z]|[S5]K)THCSE(?=\d)", "JKTHCSE",
+                        _search(r"[HAUB]B/L\s*[=s|]*\s*:\s*(\S+)", text) or "") or None,
         "port_of_loading": _search(r"POL\s*:\s*(.+?)\s*$", text),
         "port_of_discharge": _search(r"Dest\s*:\s*(.+?)\s*$", text),
         "vessel": _search(r"VSL/VOY/LINE\s*:\s*(.+?)(?:\s+\(Normal\))?(?:\s+Sales\s*:|$)", text),

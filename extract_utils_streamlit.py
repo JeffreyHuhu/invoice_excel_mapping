@@ -407,6 +407,18 @@ def _pages_cache_key(pdf_path: str, pdfplumber_kwargs: Dict) -> tuple:
     return os.path.abspath(pdf_path), identity, kwargs
 
 
+def _stamp_only_scan(page, text: str) -> bool:
+    """整頁掃描圖上只疊了少量文字層，當成掃描頁 OCR。例：OPL "JKTHCSE2510070J" 只有蓋章
+    "CFS-CFS HCM-12"；"HARDASES跨月份更新帳單" 只有打字的 MESSR (273 字)。
+    文字少於 300 字，而且有一張圖片蓋住 90% 以上的頁面。2026-10-30 抽樣 350 份 PDF
+    (印尼 Top15 + 越南，每家 20 份)，其他供應商沒有一頁符合，不會多做 OCR。"""
+    if len(text.strip()) >= 300:
+        return False
+    area = float(page.width * page.height) or 1.0
+    return any((img["x1"] - img["x0"]) * (img["bottom"] - img["top"]) / area >= 0.9
+               for img in page.images)
+
+
 def extract_pages_from_pdf(pdf_path: str, **pdfplumber_kwargs) -> List[str]:
     """跟 extract_text_from_pdf() 一樣，但個別回傳『每一頁』的文字 (不合併成
     一個字串)。給 multi_page 供應商 (一份 PDF 裡有好幾張各自獨立的發票，
@@ -428,8 +440,9 @@ def extract_pages_from_pdf(pdf_path: str, **pdfplumber_kwargs) -> List[str]:
         scanned = []
         for i, page in enumerate(limited_pages(pdf)):
             text = page.extract_text(**pdfplumber_kwargs) or ""
-            if not text.strip():
+            if not text.strip() or _stamp_only_scan(page, text):
                 scanned.append(i)
+                text = ""
             pages_text.append(text)
         text_key = detect_supplier("\n".join(pages_text)) if scanned and len(scanned) < len(pages_text) else None
         if text_key and SUPPLIER_REGISTRY.get(text_key, {}).get("page_text"):
