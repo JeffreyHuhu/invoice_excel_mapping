@@ -58,6 +58,19 @@ _SEVERITY_PENALTY = {ERROR: 0.35, WARN: 0.1, INFO: 0.05}
 # 異常，有值時才做基本格式檢查 (_check_optional_formats())。
 REQUIRED_HEADER_FIELDS = ("invoice_date", "invoice_no", "supplier", "consignee")
 
+# 個別供應商另外的必要欄位 (使用者在答案 Excel 提示列標「(必要)」的欄位)：
+# {供應商: {欄位: 缺值時的等級}}。"container_no" 只在整櫃 (材積是「數量X櫃型」) 時才必要。
+# - KUEHNE_NAGEL (使用者 2026-10-31，樣本 JKT1521476)：Volume 缺值先列 WARN；散貨櫃號非必要；
+#   沒有 VAT 的帳單只要通過金額稽核就可以，所以 VAT 不列入。
+SUPPLIER_REQUIRED_FIELDS = {
+    "KUEHNE_NAGEL": {
+        "arrive_date": "ERROR", "onboard_date": "ERROR", "bl_no": "ERROR",
+        "port_of_loading": "ERROR", "port_of_discharge": "ERROR", "vessel": "ERROR",
+        "volume": "WARN", "container_no": "ERROR",
+    },
+}
+_FCL_VOLUME_RE = re.compile(r"\d+\s*X\s*\d{2}", re.IGNORECASE)
+
 # 選填欄位的基本格式規則 (WARN)：(欄位, 規則代碼, 檢查函式, 說明)
 _CONTAINER_NO_RE = re.compile(r"[A-Z]{4}\d{6,7}")
 _OPTIONAL_FORMAT_RULES = (
@@ -234,12 +247,18 @@ def _to_number(value) -> Optional[float]:
         return float("nan")
 
 
-def _check_header(row: Dict) -> List[Dict]:
+def _check_header(row: Dict, supplier_key: Optional[str] = None) -> List[Dict]:
     issues = []
     for code in REQUIRED_HEADER_FIELDS:
         if _is_blank(row.get(code)):
             issues.append(_issue(ERROR, code, "MISSING_REQUIRED",
                                  f"必填欄位「{FIELD_LABELS[code]}」抓不到值"))
+    for code, level in SUPPLIER_REQUIRED_FIELDS.get(supplier_key or "", {}).items():
+        if code == "container_no" and not _FCL_VOLUME_RE.search(str(row.get("volume") or "")):
+            continue    # 散貨 (LCL)、空運沒有櫃號
+        if _is_blank(row.get(code)):
+            issues.append(_issue(ERROR if level == "ERROR" else WARN, code, "MISSING_REQUIRED",
+                                 f"必要欄位「{FIELD_LABELS[code]}」抓不到值"))
     # 不計入的客戶 (使用者 2026-10-28：給 Pou Phong 的發票不計入，列 ERROR)
     flat = re.sub(r"[^A-Z]", "", str(row.get("consignee") or "").upper())
     for key, name in EXCLUDED_CONSIGNEES.items():
@@ -486,7 +505,7 @@ def validate_extraction(
     groups = _group_rows_by_invoice(rows) if rows else {"": [{}]}
     for inv_key, group_rows in groups.items():
         issues = list(base_issues)
-        issues.extend(_check_header(group_rows[0]))
+        issues.extend(_check_header(group_rows[0], supplier_key))
         issues.extend(_check_items(group_rows))
         audit_issues = _check_audit(audit_by_invoice.get(inv_key), supplier_key)
         if supplier_key in EXTRA_CHARGE_ID_SUPPLIERS:
