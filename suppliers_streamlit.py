@@ -3179,8 +3179,13 @@ def _dhl_extract_total(text: str) -> Optional[int]:
 
 
 def _dsv_extract_total(text: str) -> Optional[int]:
-    """注意：DSV 是 multi_page 供應商，text 是『一頁』的文字。"""
-    return _dsv_clean_amount(_search(r"SUBTOTAL\s+([\d.]+)", text))
+    """注意：DSV 是 multi_page 供應商，text 是『一頁』的文字。
+    頁首有 "INVOICE ID610295705 ORIGINAL/COPY" 時回傳 {發票號碼: 總額}，直接歸給這張。
+    費用說明可能提到另一張發票 ("THE ALREADY BILL UNDER ID610295704")，核心用「頁面上
+    出現的發票號碼」歸屬時會配錯張 (2026-10-30 GLOSTAR_12DECEMBER：705 的小計配給 704)。"""
+    total = _dsv_clean_amount(_search(r"SUBTOTAL\s+([\d.]+)", text))
+    inv = _search(r"^INVOICE\s+(ID\d+)\b", text) if total is not None else None
+    return {inv: total} if inv else total
 
 
 def _evergreen_extract_grand_total(text: str) -> Optional[int]:
@@ -8403,7 +8408,9 @@ def _vt_parse_sheet(name: str, rows: List[list], cfg: Dict, supplier: str,
         # 的費用欄都不一樣：D/O、TCS、PSS、A/F、O/F…)；fees_skip 排除合計欄
         for c, label in enumerate(labels):
             m_fee = re.match(cfg["fees_re"], label)
-            if m_fee and not (cfg.get("fees_skip") and re.search(cfg["fees_skip"], label)) \
+            # fees_pair：左邊欄符合時，這欄一定是費用 (不套 fees_skip)
+            paired = cfg.get("fees_pair") and c > 0 and re.search(cfg["fees_pair"], labels[c - 1])
+            if m_fee and not (cfg.get("fees_skip") and re.search(cfg["fees_skip"], label) and not paired) \
                     and c not in {x for x, _ in fees}:
                 fees.append((c, m_fee.group(1).strip()))
     # 外幣費用名稱加註幣別 (同 VN09 MOL 的使用者答案 "… (USD)")
@@ -8635,6 +8642,26 @@ def _vt_requires_ok(rows: List[list], cfg: Dict) -> bool:
 
 
 def _vt_sheets(book, cfgs: List[Tuple[str, Dict]]):
+    """套好設定的工作表 (_vt_sheets_raw)，再去掉工作副本：一張表的費用 (發票號碼、費用名稱、
+    金額、VAT) 全部包含在另一張表裡時只算一次 (2026-10-30 VN01：格式不同但內容一樣的
+    "TONG"/"Sheet1"、"POU CHEN"/"POU CHEN (2)"，少幾欄的草稿 "9"，只有部分費用的 "TONG"
+    vs "Bang ke"；以前兩張都算，金額重複)。"""
+    got = list(_vt_sheets_raw(book, cfgs))
+    if len(got) < 2:
+        yield from got
+        return
+    sigs = [collections.Counter((it["invoice_no"], it["description"], it["amount"], it["vat"])
+                                for it in _vt_parse_sheet(name, rows, cfg, "")[0])
+            for name, rows, cfg in got]
+    for i, item in enumerate(got):
+        # 被另一張表完全包含 (內容一樣時保留前面那張)
+        if sigs[i] and any(j != i and sigs[j] and not (sigs[i] - sigs[j])
+                           and (sigs[j] != sigs[i] or j < i) for j in range(len(got))):
+            continue
+        yield item
+
+
+def _vt_sheets_raw(book, cfgs: List[Tuple[str, Dict]]):
     """依工作表名稱 (正規表示式，比對去聲調大寫的名稱) 套設定；第一個符合的為準。
     整本都沒有名稱符合的工作表時 (2026-10-28 抽樣：工作表叫 "POU HUNG"、"TỔNG"、
     "XUAT"…)，改用表頭判斷：表頭列找得到、而且至少有一個費用欄的第一個設定。"""
@@ -8715,11 +8742,17 @@ def _vn_full_consignee(name: Optional[str]) -> Optional[str]:
 
 
 def _vt_name_month(book) -> Optional[Tuple[int, int]]:
-    """檔名裡的 (年, 月)："08.2026"、"T01-2026"、"T1.2026"。"""
-    m = re.search(r"(?<!\d)(\d{1,2})[.\-/](20\d{2})(?!\d)", os.path.basename(getattr(book, "path", "") or ""))
-    if not m or not 1 <= int(m.group(1)) <= 12:
-        return None
-    return int(m.group(2)), int(m.group(1))
+    """檔名裡的 (年, 月)："08.2026"、"T01-2026"、"T1.2026"、"AUGUST 2026" (2026-10-30 VN01
+    "AUGUST 2026 IMPORT-YUEDE")。"""
+    base = os.path.basename(getattr(book, "path", "") or "")
+    m = re.search(r"(?<!\d)(\d{1,2})[.\-/](20\d{2})(?!\d)", base)
+    if m and 1 <= int(m.group(1)) <= 12:
+        return int(m.group(2)), int(m.group(1))
+    months = ("JAN", "FEB", "MAR", "APR", "MAY", "JUN", "JUL", "AUG", "SEP", "OCT", "NOV", "DEC")
+    m = re.search(r"\b(JAN|FEB|MAR|APR|MAY|JUN|JUL|AUG|SEP|OCT|NOV|DEC)[A-Z]*[\s.,\-]*(20\d{2})(?!\d)", base.upper())
+    if m:
+        return int(m.group(2)), months.index(m.group(1)) + 1
+    return None
 
 
 def _vt_name_month_end(book) -> Optional[str]:
@@ -8795,7 +8828,9 @@ _VT_TRANS_WAGON = [
     (r"^S1-LCC", {"header": "HAWB.NO", "key": ["HAWB.NO"],
                   "fees": [("PHI CHUNG TU", None), ("PHI DAI LY", None), ("PHI PHU TROI", None),
                            ("PHI BOC XEP", None), ("PHI XEP DO", None), ("PHI VE SINH", None),
-                           ("PHI QUAN LY", None), ("DRAYAGE", None), ("LOADING", None)],
+                           ("PHI QUAN LY", None), ("DRAYAGE", None), ("LOADING", None),
+                           # "PHÍ KHÁC" 其他費用 (2026-10-30 "CONG NO T07-2026 (WAGON) POU CHEN" 11SEA2607097)
+                           ("PHI KHAC", None)],
                   "vat": "VAT", "vat_desc": "VAT", "total": "TONG CONG (TOTAL) VND",
                   "grand": "=TONG CONG (TOTAL) TOTAL", "port": "CANG DI",
                   "boxes": {"20": "CONT 20", "40": "CONT 40"}, "cbm": "CBM",
@@ -8818,9 +8853,13 @@ _VT_TRANS_WAGON = [
                "fields": {"bl_no": "BOOKING NO"}}),
     # (b) TỔNG：每票一列，每項費用 USD / VND 兩欄 (取 VND)，GRAND TOTAL = 當地費用含稅 + O/F + EXWORK
     (r"(?!)", {"header": "BILL NO", "key": ["BILL NO"], "fees": [],
-               "fees_re": r"TOTAL\(VND\)\s*(?:NOT VAT\s+)?(.+?)(?:\s+DUONG B(?:AY|IEN))?$",
+               # "NOT VATLOCAL CHARGE" (少空格，2026-10-30 "CONG NO T02-2026 PYV IMP (AIR-BK)")
+               "fees_re": r"TOTAL\(VND\)\s*(?:NOT\s*VAT\s*)?(.+?)(?:\s+DUONG B(?:AY|IEN))?$",
                # 小計欄：表頭有 "O/F+EXW" 也有 "VAT OF+EXW 0%" (2026-10-29 抽樣 POU LI T07/T08-2026)
                "fees_skip": r"LOCAL CHARGE|F\+EXW",
+               # 左邊是 "LOCAL CHARGE (USD)" 的那欄是 Local Charge 費用 (USD 換算 VND)，不是小計
+               # (2026-10-30 "Cong no T11-25 PYV IMP (SEA-BK)"：費用欄與小計欄標題一樣)
+               "fees_pair": r"^LOCAL CHARGE \(USD\)",
                "vat": ("VAT (8%)", "=VAT"), "vat_desc": "VAT 8%", "grand": "GRAND TOTAL",
                "boxes": {"20": "MEASUREMENT 20", "40": "MEASUREMENT 40"}, "cbm": "MEASUREMENT CMB",
                "kg": "MEASUREMENT KGS",
