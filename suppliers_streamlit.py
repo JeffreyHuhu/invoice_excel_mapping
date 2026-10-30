@@ -8966,7 +8966,8 @@ _VT_VINH_HUNG_LONG = [
     # BK (IMP-EXP) 對帳表 (2026-10-28 抽樣，工作表 XUAT/NHẬP/NEO)：運費、吊櫃費、磅櫃費同一列，
     # TỔNG CỘNG = 整列合計；有 "TỔNG CỘNG HĐ NÂNG HẠ" 欄才是這個版面
     (r"(?!)", {**_VT_VHL_COMMON, "date": "=NGAY", "require": "TONG CONG HD NANG HA",
-               "fees": [(x, None) for x in ("=CUOC VAN CHUYEN", "=CUOC VC", "CUOC VC TRONG", "CUOC VC NGOAI",
+               # "CƯỚC" 單獨一欄 (2026-10-30 "JANUARY 2026- YUEDE" DU DUC -XUAT 表)
+               "fees": [(x, None) for x in ("=CUOC VAN CHUYEN", "=CUOC VC", "=CUOC", "CUOC VC TRONG", "CUOC VC NGOAI",
                                             "HO TRO PHI CO SO HA TANG", "BD NANG", "=BDNH",
                                             "=PHI NANG", "=PHI HA", "PHI HA BAI SOM", "PHI HA CONT SOM",
                                             # "Phí hạ sớm" (2026-10-28 抽樣 "BK 012025 (IMP-EXP)")
@@ -8974,7 +8975,10 @@ _VT_VINH_HUNG_LONG = [
                                             "PHI D/O VSC", "=CAN XE", "PHI NEO XE",
                                             # "PHÍ CÂN" 算在 TỔNG CỘNG HĐ NÂNG HẠ 裡 (2026-10-28 抽樣
                                             # "POU HUNG 05-2025 Vinh Hung Long" XUAT NB 表)
-                                            "=PHI CAN")],
+                                            "=PHI CAN",
+                                            # "PHÍ CÂN CONT" 在吊櫃費組裡、算進 TỔNG CỘNG HĐ NÂNG HẠ
+                                            # (2026-10-30 "công nợ VHL T5-25" XUAT 表；f008 的 "CÂN CONT" 不取)
+                                            "=PHI CAN CONT")],
                # "CÂN" 欄 (過磅費) 不算進 TỔNG CỘNG，另在磅櫃表請款，這裡不取 (f007 BK 072025)；
                # "CÂN CONT" 欄同樣不在 TỔNG 裡，使用者 2026-10-28 確認不擷取 (f008 công nợ VHL T6-25)
                "grand": ("=TONG CONG", "TONG CONG CUOC & PHI", "=TONG")}),
@@ -8996,8 +9000,11 @@ _VT_VINH_HUNG_LONG = [
                            ("PHU THU HA RONG", None),
                            ("BOI DUONG", None),
                            ("=PHI BOT", None), ("PHI NEO CONT (CO VAT)", None), ("=TIEN CHI HO", None),
+                           # 散貨表的 "PHÍ NEO CONT" 算進 TỔNG TIỀN CƯỚC VC (2026-10-30 "JUNE 2026-YUEDE")
+                           ("=PHI NEO CONT", None),
                            ("PHI NANG (GOM VAT)", None), ("PHI HA (GOM VAT)", None), ("CHI HO VSC", None)],
-                  "vat": ("THUE VAT", "=VAT 8%"), "vat_desc": "Thuế VAT 8%",
+                  # VAT 欄也寫成 "VAT (8%)" (2026-10-30 "THÁNG 3- CƯỚC VC POU YUEN")
+                  "vat": ("THUE VAT", "=VAT 8%", "=VAT (8%)"), "vat_desc": "Thuế VAT 8%",
                   # 沒有 VAT 欄的運費表，含稅合計就是 TỔNG TIỀN CƯỚC VẬN CHUYỂN
                   "grand": ("TONG CONG SO TIEN", "TONG TIEN CUOC VAN CHUYEN")}),
     (r"NEO CONT", {**_VT_VHL_COMMON, "date": None,
