@@ -1,4 +1,4 @@
-# -*- coding: utf-8 -*-
+﻿# -*- coding: utf-8 -*-
 """
 suppliers.py
 ============
@@ -6726,15 +6726,21 @@ register_supplier(
 # (0%)，每筆稅額 = 金額 × 稅率；合計區 SUB TOTAL / VAT / TOTAL : IDR 做勾稽。
 
 def detect_opl(text: str) -> bool:
-    """同一家也會附提單 (B/L) 文件，上面也有 NCL 名稱但不是請款單，所以
-    要同時有 "INV NO." 才算。台灣曜捷 (OPL) 的美金 Debit Note 見 _is_opl_dn()。"""
+    """印尼當地帳單 (PT. NCL INTER LOGISTIK INDONESIA 開立，OPL 在印尼的代理)。
+    同一家也會附提單 (B/L) 文件，上面也有 NCL 名稱但不是請款單，所以
+    要同時有 "INV NO." 才算。OPL 美金 Debit Note 不在這裡，見 detect_opl_usd()。"""
+    upper = text.upper()
+    return "NCL INTER LOGISTIK" in upper and re.search(r"\bINV\s*NO\.", upper) is not None
+
+
+def detect_opl_usd(text: str) -> bool:
+    """OPL 美金 Debit Note (台灣曜捷運通開立，不是印尼當地帳單)，供應商 OPL_USD。"""
     upper = text.upper()
     # 掃描的空運 INVOICE ("OLCCGK251026")：預設 OCR 漏讀 FILE NO，會被誤認成 ORIENTAL_MULTIMODAL。
     # 有公司名稱 + INVOICE/DEBIT NOTE 標題 + HB/L 就算；擷取時 _opl_pages 會重新 OCR
     scanned_dn = re.search(r"ORIENTAL\s*POWER\s*LOGISTICS", upper) and re.search(r"[HAUB]B/L", upper) \
         and re.search(r"(?m)^\W*(?:OUTBOUND\s+)?(?:INVOICE|DEBIT\s+NOTE)\W*$", upper)
-    return ("NCL INTER LOGISTIK" in upper and re.search(r"\bINV\s*NO\.", upper) is not None) \
-        or _is_opl_dn(text) or bool(scanned_dn)
+    return _is_opl_dn(text) or bool(scanned_dn)
 
 
 # --- OPL 美金 Debit Note (使用者 2026-10-28：OPL 就是曜捷運通，"OUTBOUND DN" 就是
@@ -6745,7 +6751,7 @@ def detect_opl(text: str) -> bool:
 # 明細：ITEM NAME QUANTITY UNIT PRICE AMT COLLECT AMT ("SEA FREIGHT 2.877 CBM USD 36.00
 # 103.57 US$ 103.57"、數量可能寫 "MINI")，合計 "TOTAL: US$ 487.58" 或只有 "US$ 259.95"。
 # 供應商名稱固定 _OPL_DN_SUPPLIER：資料庫用它判斷幣別是 USD (SUPPLIER_CURRENCY)。
-_OPL_DN_SUPPLIER = "ORIENTAL POWER LOGISTICS CO., LTD."
+_OPL_DN_SUPPLIER = "ORIENTAL POWER LOGISTICS CO., LTD"
 _OPL_DN_ITEM_RE = re.compile(
     # 數量："2.877 CBM"、"1 SET"、"MINI"、整櫃 "1X20'GP"
     r"^(?P<desc>[A-Z][A-Z0-9/&().\- ]*?)\s+(?:[\d.,]+\s+[A-Z]+|MINI|\d+X\d{2}'?[A-Z]{0,2})\s+USD\s+[\d,.]+\s+"
@@ -7281,6 +7287,15 @@ register_supplier(
     extract_vat_total=_opl_vat_total,
     extract_grand_total=_opl_extract_grand_total,
     # 美金 DN 掃描檔：DN 頁自己 OCR，後面的提單頁當附件 (NCL 帳單沒有 DN 頁，維持全部頁面)
+    page_text=_opl_pages, invoice_page=_is_opl_dn,
+)
+# 美金 DN 拆出成獨立供應商 OPL_USD (2026-10-31，使用者要求)：解析邏輯共用上面的 parse_opl
+# (它會走 _is_opl_dn 分支)，只有偵測與供應商 key 不同。OPL (NCL 印尼當地帳單) 不再吃 DN。
+register_supplier(
+    "OPL_USD", "OPL曜捷", detect_opl_usd, parse_opl,
+    extract_total=_opl_extract_total,
+    extract_vat_total=_opl_vat_total,
+    extract_grand_total=_opl_extract_grand_total,
     page_text=_opl_pages, invoice_page=_is_opl_dn,
 )
 
@@ -10128,7 +10143,10 @@ def _dhl_express_vn_grand(text: str):
 # "18/03 SGN 5990639594 CAN" (日/月 起運 HAWB 目的)，下面是費用行 "IMPORT EXPORT DUTIES 389591 389591"
 # (最後一個數字是淨額)；整張 VAT 單獨一列；"Sub-total" 勾稽未稅、"TOTAL VND" 勾稽含稅。
 def _is_dhl_ib_tariff(text: str) -> bool:
-    return "IB TARIFF OF DHL SERVICES" in text.upper()
+    # 一般月結帳單 (有 "DATE ORG HAWB" 表頭) 的頁尾也會印 "IB TARIFF OF DHL SERVICES"
+    # (2026-10-31 越南資料1030：POU HUNG 09-2026 PHÍ CPN DHL-VNPT IMPORT.pdf 等 182 份被誤判、擷取不到)
+    up = text.upper()
+    return "IB TARIFF OF DHL SERVICES" in up and "DATE ORG HAWB" not in up
 
 
 def _parse_dhl_ib_tariff(text: str) -> Dict:
@@ -10272,6 +10290,7 @@ SUPPLIER_NUMBERS = {
     "DSV": ("ID06", "100023151", "PT. DSV TRANSPORT INDONESIA"),
     "INDOPROSTIME_TRANSPORT": ("ID07", "100019300", "PT. INDOPROSTIME TRANSPORT"),
     "OPL": ("ID08", "100004377", "ORIENTAL POWER LOGISTICS"),
+    "OPL_USD": ("ID08-OPL(USD)", "ID08-OPL(USD)", "OPL曜捷"),
     "DWIHARTA": ("ID09", "100019242", "PT. DWIHARTA LOGISTINDO"),
     "TRANS_DAYA_PRIMA": ("ID10", "100019488", "PT. TRANS DAYA PRIMA"),
     "GALUH": ("ID11", "100019600", "PT.GALUH INTI BAHARI"),
