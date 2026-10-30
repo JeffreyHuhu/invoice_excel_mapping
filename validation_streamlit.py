@@ -113,7 +113,9 @@ KNOWN_SOURCE_ISSUES: Dict[str, Dict[Tuple[str, str], Tuple[str, Optional[Union[s
     "DWIHARTA": {
         # 沒有船名時 Vessel 欄印佔位符號 ". / ." (使用者確認)、"- / -"、"0 / 0"
         ("vessel", "TEXT_NO_LETTER"): ("DWIHARTA 沒有船名時 Vessel 欄原文就是佔位符號",
-                                       {". / .", "- / -", "0 / 0"}),
+                                       {". / .", ".. / .", "- / -", "0 / 0"}),
+        # 原帳單 Shipper 欄空白 (擷取結果只剩 ";")，使用者 2026-10-31 確認不計入
+        ("shipper", "TEXT_NO_LETTER"): ("DWIHARTA 原帳單 Shipper 欄是空白", {";"}),
     },
     "RONG_A_CHAU": {
         ("invoice_date", "MISSING_REQUIRED"): ("RỒNG Á CHÂU 的 Excel 對帳表本身沒有發票日期", None),
@@ -317,7 +319,7 @@ def _explain_by_formula_issue(issues: List[Dict]) -> List[Dict]:
 # CONG THANH 代墊款清單「每票通過就 PASS」，例如 CHI HO 清單 E360 =D360*8% 把 8%
 # 套在不課稅的費用上)。有整份合計勾稽的版面 (運費對帳單、POU CHEN 對帳表)，
 # 公式錯誤仍是 ERROR (使用者 2026-10-28 確認)。
-PER_TICKET_FORMULA_INFO_SUPPLIERS = {"CONG_THANH"}
+PER_TICKET_FORMULA_INFO_SUPPLIERS = {"CONG_THANH", "DWIHARTA"}
 
 
 def _formula_issue_as_info(issues: List[Dict], supplier_key: Optional[str],

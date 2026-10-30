@@ -259,6 +259,8 @@ def parse_dwiharta(text: str) -> Dict:
             supplier_line = supplier_line[:stop_m.start()]
         header["supplier"] = supplier_line.strip()
 
+    # 注意：原帳單 Shipper 空白 (擷取只剩 ";") 與 Vessel 佔位符號 (". / ." 等) 是原帳單問題，
+    # 已登記在 validation_streamlit.py KNOWN_SOURCE_ISSUES，不要為了這個改擷取規則。
     # Shipper 欄位的值常常換行 (例如 "Shipper : SHANGHAI LIGHT INDUSTRY AND\n
     # TEXTILE GROUP IMP. & EXP. CO.,LTD.; Container No. : ...")，不能用一般
     # 欄位的 _DWIHARTA_STOP (遇到換行就停) 處理，這裡改用允許跨行的寫法，
@@ -3229,6 +3231,23 @@ def _evergreen_extract_total(text: str) -> Optional[int]:
 # 一張工作表好幾個發票區塊 (2026-10-28 抽樣 "rekap 202602")：發票號碼 INJK-2602-0896
 # 在表頭上方，每列一趟車，TRUCKING 到 JUMLAH 之前都是費用，"TOTAL" 列勾稽，
 # 下方簽名日期 "Jakarta, 13 Feb 2026" 當發票日期。沒有稅額 (稅在 PDF 發票上)。
+# rekap 表的簽名日期月份：2025 年的檔案寫 "Okt"、"Agst" 縮寫 (不影響 PDF 用的 INDO_MONTHS)
+_DWIHARTA_SHEET_MONTHS = {**INDO_MONTHS, "okt": 10, "agst": 8, "agt": 8, "des": 12}
+
+
+def _dwiharta_sign_date(text: str) -> Optional[str]:
+    """簽名行 "Jakarta, 08 Juni 2026" -> "08 Jun 2026"；抓不到回傳 None。"""
+    m = re.search(r"Jakarta\s*,\s*(\d{1,2})\s+([A-Za-z]+)\s+(\d{4})", text, re.I)
+    if not m:
+        return None
+    month = _DWIHARTA_SHEET_MONTHS.get(m.group(2).lower()) or next(
+        (i for i in range(1, 13) if datetime.date(2000, i, 1).strftime("%b").lower()
+         == m.group(2)[:3].lower()), None)
+    if not month:
+        return None
+    return datetime.date(int(m.group(3)), int(month), int(m.group(1))).strftime("%d %b %Y")
+
+
 def _dwiharta_sheets(book) -> Tuple[List[Dict], List[Dict]]:
     docs, totals = [], []
     for _, rows in book.sheets:
@@ -3251,10 +3270,16 @@ def _dwiharta_sheets(book) -> Tuple[List[Dict], List[Dict]]:
                 sub = _vn_text(_vn_cell(rows[head + 1], k)).strip()
                 return re.sub(r"\s+", " ", f"{_vn_text(rows[head][k]).strip()} {sub}").strip()
 
-            items, total, date = [], None, None
+            # 簽名日期：取 "PT.DWIHARTA LOGISTICS" 正上方那一格 (M 欄)；抓不到才掃整段文字
+            above = [_vn_text(_vn_cell(rows[i - 1], k)) for i in range(head + 1, stop)
+                     for k, c in enumerate(rows[i]) if "DWIHARTA LOGISTICS" in _vn_text(c).upper()]
+            date = next((d for d in map(_dwiharta_sign_date, above) if d), None)
+            items, total = [], None
             for r in rows[head + 1:stop]:
                 text = " ".join(_vn_text(c) for c in r if c not in (None, ""))
-                if _vn_num(_vn_cell(r, 0)) is not None and total is None:
+                is_total = re.search(r"\bTOTAL\b", text.upper()) is not None
+                # 明細列以 JUMLAH 欄有金額為準：有的明細列 NO. 欄空白，原本會漏掉
+                if not is_total and total is None and _vn_num(_vn_cell(r, end)) is not None:
                     box = _vn_text(_vn_cell(r, cont_col)).strip() if cont_col is not None else ""
                     feet = _vn_text(_vn_cell(r, feet_col)).strip()
                     extra = {"container_no": box if re.search(r"\d", box) else None,
@@ -3263,15 +3288,10 @@ def _dwiharta_sheets(book) -> Tuple[List[Dict], List[Dict]]:
                         amount = _vn_amount(_vn_cell(r, k))
                         if amount:
                             items.append({"description": label(k), "amount": amount, "vat": None, **extra})
-                elif total is None and re.search(r"\bTOTAL\b", text.upper()):
+                elif total is None and is_total:
                     total = _vn_num(_vn_cell(r, end))
-                m = re.search(r"Jakarta\s*,\s*(\d{1,2})\s+([A-Za-z]+)\s+(\d{4})", text, re.I)
-                if m and date is None:
-                    month = INDO_MONTHS.get(m.group(2).lower()) or next(
-                        (i for i in range(1, 13) if datetime.date(2000, i, 1).strftime("%b").lower()
-                         == m.group(2)[:3].lower()), None)
-                    if month:
-                        date = datetime.date(int(m.group(3)), int(month), int(m.group(1))).strftime("%d %b %Y")
+                if date is None:
+                    date = _dwiharta_sign_date(text)
             if not items:
                 continue
             docs.append({"header": {"invoice_no": inv[-1], "supplier": "PT. DWIHARTA LOGISTINDO",
