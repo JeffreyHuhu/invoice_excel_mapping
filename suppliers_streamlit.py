@@ -6782,7 +6782,8 @@ _OPL_SCAN_ITEM_RE = re.compile(
     r"|S?\d[\d.,]*[a-z]?\s*[A-Z]{2,5}|[|iIlt][lLI]?\s+[A-Z]{2,5}"
     # "1CNTR" 讀成 "ICNTR" ("VN25E1609"、"VN25E1682")；"1 SET" 讀成一串雜字 "=—S—s1sSSET"
     # ("JKTHCSE2509073J")：有數字、結尾是單位就算數量
-    r"|\d?[{(\[\])]\s*[A-Z]{2,5}|[LI1]?[SOA0](?:BLS?|SETS?|SHPTS?|CBM)|MIN[ITl1]{1,2}[\]|]?\d*"
+    # "8 CBM" 讀成 "& CBM" ("SHKJKT25110571A")；品名本身也有 "&"，所以後面一定要接單位
+    r"|\d?[{(\[\])]\s*[A-Z]{2,5}|&\s*(?:CBM|SETS?|SHPTS?|CNTRS?)(?=\s)|[LI1]?[SOA0](?:BLS?|SETS?|SHPTS?|CBM)|MIN[ITl1]{1,2}[\]|]?\d*"
     r"|[|iIl]CNTRS?|\S*\d\S*(?:SETS?|SHPTS?|CNTRS?)"
     # 數量沒有單位 ("CUSTOM CLEARANCE-WAN 1 US$ 130.00"、"PORT SECURITY-C 4.63 US$ 1.30"，
     # 文字版 "JKTHCSE2508031A"、"JKTHCSE2508057A-G")
@@ -7062,7 +7063,8 @@ def _parse_opl_dn(text: str) -> Dict:
         # 使用者 2026-10-28：發票號碼 = FILE NO (例 CT-2609538)，發票日期 = 印表日期 (09/24/2026)。
         # 同一個 FILE NO 可能有好幾張 HB/L 各自請款 (抽樣 CT-2609648)：資料庫對這個供應商
         # 改用逐列判斷重複 (expense_normalize.SUPPLIER_NO_OWN_INVOICE)，不會少算
-        "invoice_no": _search(r"[FP]ILE NO\s*:\s*(\S+)", text),
+        # 掃描檔 OCR 會把 "IP-" 讀成 "[P-" ("TXGJKT2509567")
+        "invoice_no": re.sub(r"^[\[|lI1]P-", "IP-", _search(r"[FP]ILE NO\s*:\s*(\S+)", text) or "") or None,
         # 沒有印表日期時用 DATE，再沒有用開船日
         "invoice_date": _opl_dn_date(_search(r"印表日期\s*:\s*(\d{1,2}/\d{1,2}/\d{4})", text))
         or _opl_dn_date(_search(r"(?m)^\s*DATE\s*:\s*(\d{1,2}/\d{1,2}/\d{4})", text)) or onboard,
@@ -7074,8 +7076,11 @@ def _parse_opl_dn(text: str) -> Dict:
         "onboard_date": onboard,
         # 胡志明 → 雅加達的 HB/L 開頭是 JKTHCSE，OCR 會讀成 "JETHCSE"/"SKTHCSE" ("HARDASES跨月份更新帳單"、
         # "JKTHCSE2510070V")
-        "bl_no": re.sub(r"^(?:J[A-Z]|[S5]K)THCSE(?=\d)", "JKTHCSE",
-                        _search(r"[HAUB]B/L\s*[=s|]*\s*:\s*(\S+)", text) or "") or None,
+        # 台中 → 雅加達的 TXGJKT 會讀成 "TAGJKT" ("TXGJKT2509567")
+        # JKT 的 J 讀成 I ("SHKIKT26010049")
+        "bl_no": re.sub(r"^([A-Z]{3})[I1l]KT(?=\d)", r"\1JKT", re.sub(r"^TAGJKT(?=\d)", "TXGJKT", re.sub(
+            r"^(?:J[A-Z]|[S5]K)THCSE(?=\d)", "JKTHCSE",
+            _search(r"[HAUB]B/L\s*[=s|]*\s*:\s*(\S+)", text) or ""))) or None,
         "port_of_loading": _search(r"POL\s*:\s*(.+?)\s*$", text),
         "port_of_discharge": _search(r"Dest\s*:\s*(.+?)\s*$", text),
         "vessel": _search(r"VSL/VOY/LINE\s*:\s*(.+?)(?:\s+\(Normal\))?(?:\s+Sales\s*:|$)", text),
@@ -7098,6 +7103,15 @@ def _parse_opl_dn(text: str) -> Dict:
         # 對平總額」的列 (兩個值都是帳單上讀到的，不是推算)。可能好幾列都讀錯
         # ("HKGJKT25100107A")：試所有組合，最少列數的組合只有一個才換
         _opl_swap_alt(scanned, total)
+        # OCR 把 PREPAID AMT 欄整欄拆開讀 ("PT.NIKOMAS GEMIL US$ 120.00" 一列一行)，明細行只剩單價
+        # ("CFS CHARGE 3 CBM US$ 40.00"，2026-10-30 "TXGJKT2509567")：這欄的筆數跟明細一樣、
+        # 加總剛好等於總額時，改用這欄金額
+        if round(sum(it["amount"] for it in scanned) - total, 2):
+            payer = [_opl_amount(a.replace(" ", "")) for a in re.findall(
+                r"(?m)^\W*P[TY]\s*\.?\s*[A-Z][^\n]*?US\$\s*[=:.\s\-—~_]*(\d[\d,]*\.\d{2})\.?\s*$", text)]
+            if len(payer) == len(scanned) and None not in payer and round(sum(payer) - total, 2) == 0:
+                for it, amt in zip(scanned, payer):
+                    it["amount"] = amt
     for it in scanned:
         it.pop("_alt")
     if len(scanned) > len(items):
@@ -7149,9 +7163,48 @@ def _opl_date(value: Optional[str]) -> Optional[str]:
     return _format_date_en_from_month_name(*m.groups()) if m else value
 
 
+def _opl_split_dns(text: str) -> List[str]:
+    """一份 PDF 有好幾張 DN (使用者 2026-10-30 改成逐張擷取："SHKJKT25080429-432,461,506"
+    6 張共用一個 FILE NO、"SHKJKT25110300A"、"NIKOMAS 跨月份更新帳單")：在每個
+    OUTBOUND INVOICE / DEBIT NOTE 標題切開。每段都要剛好一個 FILE NO，否則不切 (回傳 [text])。"""
+    starts = [m.start() for m in re.finditer(r"(?mi)^[^\n]{0,6}OUTBOUND\s+(?:INVOICE|DEB\s?IT\s+NOTE)", text)]
+    if len(starts) < 2:
+        return [text]
+    chunks = [text[a:b] for a, b in zip(starts, starts[1:] + [len(text)])]
+    chunks[0] = text[:starts[1]]
+    if any(len(re.findall(r"[FP]ILE NO", c)) != 1 for c in chunks):
+        return [text]
+    # 同一張 DN 掃描兩次 (FILE NO、HB/L、總額都相同) 只留一張 (比照 DHL，使用者 2026-10-28)
+    seen, kept = set(), []
+    for c in chunks:
+        key = (_search(r"[FP]ILE NO\s*:\s*(\S+)", c), _search(r"[HAUB]B/L\s*[=s|]*\s*:\s*(\S+)", c),
+               _opl_dn_total(c))
+        if key not in seen:
+            seen.add(key)
+            kept.append(c)
+    return kept
+
+
+# 逐張 DN 擷取時，每列帶自己 DN 的欄位
+_OPL_DN_ROW_FIELDS = ("invoice_no", "invoice_date", "consignee", "order_no", "onboard_date", "bl_no",
+                      "port_of_loading", "port_of_discharge", "vessel", "container_no", "volume")
+
+
 def parse_opl(text: str) -> Dict:
     if _is_opl_dn(text):
-        return _parse_opl_dn(text)
+        chunks = _opl_split_dns(text)
+        if len(chunks) == 1:
+            return _parse_opl_dn(text)
+        parsed = [_parse_opl_dn(c) for c in chunks]
+        # 掃描頁沒讀到日期時，用同一個 FILE NO 其他張的日期 (同一次印表)
+        dates = {p["header"]["invoice_no"]: p["header"]["invoice_date"]
+                 for p in reversed(parsed) if p["header"]["invoice_date"]}
+        items = []
+        for p in parsed:
+            h = p["header"]
+            h["invoice_date"] = h["invoice_date"] or dates.get(h["invoice_no"])
+            items += [dict(it, **{k: h.get(k) for k in _OPL_DN_ROW_FIELDS}) for it in p["items"]]
+        return {"header": parsed[0]["header"], "items": items}
     lines = [ln.strip() for ln in text.splitlines() if ln.strip()]
     header = {
         "supplier": lines[0] if lines else None,
@@ -7194,7 +7247,9 @@ def parse_opl(text: str) -> Dict:
 
 def _opl_extract_total(text: str) -> Optional[float]:
     if _is_opl_dn(text):
-        return _opl_dn_total(text)
+        # 好幾張 DN：各張總額加總 (有一張讀不到總額就不稽核)
+        totals = [_opl_dn_total(c) for c in _opl_split_dns(text)]
+        return round(sum(totals), 2) if None not in totals else None
     return _opl_amount(_search(r"SUB\s*TOTAL\s*:\s*([\d,.]+)", text))
 
 
