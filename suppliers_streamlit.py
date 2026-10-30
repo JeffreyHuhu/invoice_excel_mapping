@@ -1108,6 +1108,10 @@ def detect_maersk(text: str) -> bool:
     # 越南 MAERSK (VN07，越南文電子發票) 另有規則
     if "MAERSK LOGISTICS & SERVICES VI" in upper or "HÓA ĐƠN GIÁ TRỊ GIA TĂNG" in upper:
         return False
+    # DSV 帳單 (頁首 "INVOICE ID610184985 ORIGINAL"、費用表 "CHARGES IN IDR") 內文可能提到
+    # MAERSK LOGISTICS，不是 MAERSK 的帳單 (2026-10-30 DSV "INVOICE - ID610184985 …")
+    if "CHARGES IN IDR" in upper and re.search(r"^INVOICE\s+ID\d+\s+(?:ORIGINAL|COPY)\b", upper, re.MULTILINE):
+        return False
     return "MAERSK LOGISTICS" in upper
 
 
@@ -4193,7 +4197,8 @@ def detect_dsv(text: str) -> bool:
 
 
 _DSV_ITEM_PATTERN = re.compile(
-    r"^(?P<desc>.+?)\s+-\s+.*?\s+(?P<ppn>[\d.]+)\s+(?P<amount>[\d.]+)$",
+    # 舊版 PPN 欄前面有稅率 "11%=333.313" (2026-10-30 DSV 2024-12 "Multiple Invoices … Total 2_6")
+    r"^(?P<desc>.+?)\s+-\s+.*?\s+(?:\d+%=)?(?P<ppn>[\d.]+)\s+(?P<amount>[\d.]+)$",
     re.MULTILINE,
 )
 _DSV_VESSEL_BL_PATTERN = re.compile(
@@ -4231,7 +4236,7 @@ def _dsv_clean_amount(text: Optional[str]) -> Optional[int]:
 # 樣本 ID610196477)；只在 CHARGES 表格裡用，避免抓到其他兩個數字結尾的行
 _DSV_ITEM_PLAIN_PATTERN = re.compile(
     # 免稅費用的 PPN 欄寫 "Exempt" ("Reimbursement Storage JAS Exempt 265.243")
-    r"^(?P<desc>[A-Za-z].*?)\s+(?P<ppn>\d{1,3}(?:\.\d{3})*|Exempt)\s+(?P<amount>\d{1,3}(?:\.\d{3})*)$",
+    r"^(?P<desc>[A-Za-z].*?)\s+(?:\d+%=)?(?P<ppn>\d{1,3}(?:\.\d{3})*|Exempt)\s+(?P<amount>\d{1,3}(?:\.\d{3})*)$",
     re.MULTILINE,
 )
 
@@ -4290,7 +4295,9 @@ def parse_dsv(text: str) -> Dict:
     # consignee 值，不用再另外處理那兩欄黏在一起的文字。
     header["shipper"] = header["consignee"]
 
-    header["order_no"] = _search(r"OWNER'S REFERENCE\s*\n\s*(\S+)", text)
+    # 欄位空白時下一行就是 "GOODS DESCRIPTION" 標題，不是單號 (2026-10-30 ID610184985)；
+    # 撇號也可能是 "OWNER’'S"
+    header["order_no"] = _search(r"OWNER\S{0,3}S REFERENCE\s*\n\s*(?!GOODS DESCRIPTION)(\S+)", text)
 
     # 港口照抄整段 "IDJKT = Jakarta, Java, Indonesia" (使用者 2026-10-25 規定)。
     # ETA 可能沒有印 ("… 28-Feb-25 ZAJNB = Johannesburg, South Africa"，樣本 ID610160512)
