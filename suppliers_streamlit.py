@@ -2536,11 +2536,19 @@ def _trans_extract_items(text: str) -> List[Dict]:
 # 一起列出來，不會把代號拆開，所以 desc 的字元集合除了英文字母、空白，也
 # 要能吃進數字/字母混合的代號本身，靠非貪婪比對讓代號優先被併入 desc，
 # 金額欄位 (有千分位小數點、不含空白) 永遠留到最後一段才匹配。
-_TRANS_COST_ITEM_PATTERN = re.compile(r"^(?P<desc>[A-Za-z][A-Za-z0-9 ]*?)\s+(?P<amount>[\d.]+)\s*$")
+# 費用名稱也會有 "&"、"/" (例如 "Biaya Dokumen & Other charges"、
+# "Biaya Bongkar / Muat")，所以 desc 不限字元，只要求英文字母開頭。
+_TRANS_COST_ITEM_PATTERN = re.compile(r"^(?P<desc>[A-Za-z].*?)\s+(?P<amount>[\d.]+)\s*$")
 
 
 def _trans_extract_cost_items(text: str) -> List[Dict]:
-    m = re.search(r"Cost\s*Description\s*Total\s*\n((?:.+\n)*?)(?=Sub\s*Total\b)", text)
+    # 兩頁的帳單：Cost Description 在第 1 頁底部，Sub Total 在第 2 頁，
+    # 所以也要在頁尾 "Halaman 1 dari 2" 或文字結尾停下 (2026-10-31
+    # GSI-1 AGUSTUS 2025 等 74 張雜費全部漏抓，金額勾稽不符)。
+    m = re.search(
+        r"Cost\s*Description\s*Total\s*\n((?:.*\n)*?)(?=Sub\s*Total\b|Halaman\s+\d+\s+dari\b|\Z)",
+        text + "\n",
+    )
     if not m:
         return []
     items: List[Dict] = []
