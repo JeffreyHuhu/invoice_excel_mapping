@@ -4818,7 +4818,8 @@ def _galuh_extract_items(text: str) -> List[Dict]:
             line = re.sub(r"^(?:\d+\s*)?\|+\s*", "", line)
             # 序號後面沒有表格線 ("1 TRUCKING PER TGL …"，2026-10-28 抽樣 0500085)
             line = re.sub(r"^\d{1,2}\s+(?=[A-Za-z])", "", line)
-            line = re.sub(r"\s*\|+\s*$", "", line)
+            # 行尾表格線 OCR 也會讀成 "}" / "]" ("… 14.130.000 }"，2026-10-30 0500003)
+            line = re.sub(r"\s*[|}\]]+\s*$", "", line)
         tax_m = _GALUH_TAX_LINE_PATTERN.match(line)
         if tax_m:
             items.append({
@@ -4879,7 +4880,11 @@ def parse_galuh(text: str) -> Dict:
     if _galuh_rekap_m:
         header["consignee"] = _galuh_rekap_m.group(1).strip()
     else:
-        header["consignee"] = _search(r"\bTO\s+(.+?)\s+No[.,]\s*Invoice", text)
+        header["consignee"] = (
+            # 掃描檔 OCR 會讀成 "TO :" 自己一行、公司名稱在下一行 (2026-10-30 0500086)
+            _search(r"\bTO\s*:?\s+(.+?)\s+No[.,]\s*Invoice", text)
+            # 掃描檔 OCR 把 "No. Invoice" 排到 "TO …" 上一行，"TO …" 自己一行
+            or _search(r"(?m)^\s*TO\s+(PT\b.+?)\s*$", text))
 
     # 這張帳單沒有訂單編號/到貨日/開船日/提單號/主提單號/啟運港/目的港/
     # 材積/船名/貨櫃號/出貨方資訊，留空給 expand_to_rows() 補 N/A。
