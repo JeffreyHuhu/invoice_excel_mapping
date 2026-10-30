@@ -4297,7 +4297,8 @@ def parse_dsv(text: str) -> Dict:
 
     # 欄位空白時下一行就是 "GOODS DESCRIPTION" 標題，不是單號 (2026-10-30 ID610184985)；
     # 撇號也可能是 "OWNER’'S"
-    header["order_no"] = _search(r"OWNER\S{0,3}S REFERENCE\s*\n\s*(?!GOODS DESCRIPTION)(\S+)", text)
+    # 整行照抄 (使用者 2026-10-30 決定，例如 "FIAT, OCTOBER, PWJ")
+    header["order_no"] = _search(r"OWNER\S{0,3}S REFERENCE\s*\n\s*(?!GOODS DESCRIPTION)(.+)", text)
 
     # 港口照抄整段 "IDJKT = Jakarta, Java, Indonesia" (使用者 2026-10-25 規定)。
     # ETA 可能沒有印 ("… 28-Feb-25 ZAJNB = Johannesburg, South Africa"，樣本 ID610160512)
@@ -4335,9 +4336,10 @@ def parse_dsv(text: str) -> Dict:
 
     # 貨櫃號碼只在 "CONTAINERS" 區塊找；沒有這個區塊 (併櫃) 時填 N/A，
     # 不要抓到費用名稱 "THC (Terminal Handling Charge)"
+    # 只收標準貨櫃號碼 (4 個字母 + 7 個數字)；空運的貨盤 "176-22905820 (LD-1…)" 不是貨櫃，填 N/A
     sec = re.search(r"^CONTAINERS\s*\n(.*?)(?:\n\s*(?:Total CO|CO₂|CHARGES)\b|\Z)",
                     text, re.DOTALL | re.MULTILINE)
-    m = re.search(r"^(\S+)\s*\(", sec.group(1), re.MULTILINE) if sec else None
+    m = re.search(r"^([A-Z]{4}\d{7})\s*\(", sec.group(1), re.MULTILINE) if sec else None
     header["container_no"] = m.group(1) if m else None
 
     m = re.search(r"[\d.]+\s*KG\s+([\d.]+)\s*M3", text)
