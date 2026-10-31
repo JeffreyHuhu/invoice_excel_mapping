@@ -104,6 +104,8 @@ KNOWN_SOURCE_ISSUES: Dict[str, Dict[Tuple[str, str], Tuple[str, Optional[Union[s
         # ETA 晚於今天 60 天以上 (例如 5617816192 ETD 14-Jul-2026 ETA 26-Feb-2027)：
         # 照抄 PDF 的「ETA:」，使用者 2026-10-28：在 Excel 備註就好，不計入
         ("arrive_date", "DATE_OUT_OF_RANGE"): ("MAERSK 原帳單的 ETA 本身就寫這個日期", None),
+        # Order No. 原帳單就是 FCRMENU (沒有數字)，使用者 2026-10-31 確認不計入
+        ("order_no", "ID_NO_DIGIT"): ("MAERSK 原帳單的 Order No. 本身就是 FCRMENU", {"FCRMENU"}),
     },
     # DSV 越南 CargoWise 帳單的 ETA 照抄「ORIGIN ETD DESTINATION ETA」那一行 (例如
     # SSGN0458587 ETD 13-Jul-26 ETA 04-Jun-27)；使用者 2026-10-28：比照 MAERSK 列附註

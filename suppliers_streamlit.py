@@ -1181,7 +1181,8 @@ def _maersk_clean_amount(text: Optional[str]) -> Optional[int]:
 # 用逐行掃描處理這些不固定的情況。
 # 掃描檔 OCR 常把項次讀成 "3." (多一個句點)，所以句點設為選填
 _MAERSK_ITEM_START_PATTERN = re.compile(
-    r"^(?P<num>\d+)\.?\s+(?P<desc>.+?)\s+(?P<qty>\d+(?:\.\d+)?)\s+"
+    # qty 可能有千分位逗號 (例如 "2,416.000 KG")，沒有允許的話整行不會被當成項次
+    r"^(?P<num>\d+)\.?\s+(?P<desc>.+?)\s+(?P<qty>[\d,]+(?:\.\d+)?)\s+"
     r"(?P<uom>[A-Za-z][A-Za-z0-9]*)(?:\s+(?P<amount>[\d,]+))?\s*$"
 )
 _MAERSK_VAT_LINE_PATTERN = re.compile(r"^VAT\s+([\d,]+)\s*$")
