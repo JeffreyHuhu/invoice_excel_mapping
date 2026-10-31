@@ -3815,7 +3815,8 @@ _DHL_EXTRA_CHARGE_NAME_LINE = re.compile(r"^([A-Z][A-Z /&]+[A-Z])\s+[\d,]+\s*$",
 # 中間只隔一個空白 (跟 INDOPROSTIME/MAERSK 同款並排欄位排版問題)，靠
 # 「目的地代碼一定是大寫字母」這個特徵切開，不用連續空白判斷。
 _DHL_MAIN_LINE_PATTERN = re.compile(
-    r"^(?P<awb>\d{6,12})(?:\s+\S.*?)?\s+(?P<date>\d{1,2}-\d{1,2}-\d{4})\s+"
+    # AWB 和日期中間是 Shippers Reference (可能沒有)
+    r"^(?P<awb>\d{6,12})(?:\s+(?P<ref>\S.*?))?\s+(?P<date>\d{1,2}-\d{1,2}-\d{4})\s+"
     # 地名可能有括號、句點、撇號、連字號 ("MAA, CHENNAI (MADRAS)"，2026-10-27 抽樣)
     r"(?P<ocode>[A-Z]{2,4}),\s*(?P<oregion>[A-Za-z][A-Za-z ().'\-]*?)\s+"
     r"(?P<dcode>[A-Z]{2,4}),\s*(?P<dregion>[A-Za-z][A-Za-z ().'\-]*?)\s+EXPRESS\s+"
@@ -3875,6 +3876,9 @@ def _parse_dhl_regular(text: str) -> Optional[Dict]:
         port_of_discharge = f"{m.group('dcode')}, {m.group('dregion')}".strip()
         overrides = {
             "bl_no": bl_no,
+            # Order No. = Shippers Reference 的第一段 (使用者 2026-10-31 KEY 值：
+            # "1738854338 TL 1DN" 只取 "1738854338")
+            "order_no": m.group("ref").split()[0] if m.group("ref") else None,
             "onboard_date": onboard_date,
             "port_of_loading": port_of_loading,
             "port_of_discharge": port_of_discharge,
