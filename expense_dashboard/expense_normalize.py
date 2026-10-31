@@ -395,6 +395,8 @@ SUPPLIER_CURRENCY: dict = {
     "CÔNG TY TNHH DỊCH VỤ GIAO NHẬN VẬN TẢI VÀ THƯƠNG MẠI CÔNG THÀNH": "VND",
     # 台灣曜捷 (OPL) 的美金 Debit Note，放在印尼資料夾但金額是美金 (使用者 2026-10-28)
     "ORIENTAL POWER LOGISTICS CO., LTD.": "USD",
+    # 曜捷轉檔結果的名稱沒有結尾的句點 (2026-11-01 OPL_USD 查出：幣別落到未知)
+    "ORIENTAL POWER LOGISTICS CO., LTD": "USD",
 }
 
 # INVOICE NO 不是供應商自己的帳單號碼 (例如寶成的發票號)、帳單也沒有發票日期的
@@ -406,7 +408,8 @@ SUPPLIER_NO_OWN_INVOICE = {
     "CÔNG TY TNHH GIAO NHẬN THƯƠNG MẠI RỒNG Á CHÂU",
     # 台灣曜捷 (OPL) 美金 Debit Note：發票號碼是 FILE NO (使用者 2026-10-28)，同一個 FILE NO
     # 會有好幾張 HB/L 各自請款，要逐列判斷重複 (提單號碼不同就不是重複)
-    "ORIENTAL POWER LOGISTICS CO., LTD.",
+    # 開頭比對，不寫句點：轉檔結果的名稱是 "...CO., LTD" (2026-11-01 查出，原本少算成不重複)
+    "ORIENTAL POWER LOGISTICS CO., LTD",
 }
 
 
