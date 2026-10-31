@@ -6010,8 +6010,12 @@ def _pss_rekap_sheet(rows: List[list]) -> Optional[Tuple[Dict, Dict]]:
     labels = [_vn_text(c).strip().upper() for c in rows[head]]
     # JUMLAH 欄是每列的小計 (= 各費用欄加總)，不是費用項目：不當成品項，只當合計欄
     jumlah_col = labels.index("JUMLAH") if "JUMLAH" in labels else None
-    fee_cols = [k for k, v in code.items() if v != "H" and k != jumlah_col]
     sum_col = next((k for k, v in code.items() if v == "H"), jumlah_col)
+    # 費用欄 = 第一個字母欄到合計欄之間的所有欄 (有的欄沒印字母，例如 SEPT 1386 的 BONGKAR GLORIUS，
+    # 但它的金額有計入 JUMLAH)
+    first_fee = min(code) if code else 0
+    last_fee = sum_col if sum_col is not None else max(code, default=0) + 1
+    fee_cols = [k for k in range(first_fee, last_fee) if k != jumlah_col]
 
     def label(k):
         parts = [_vn_text(_vn_cell(rows[i], k)).strip() for i in range(head, letters)]
@@ -6026,11 +6030,16 @@ def _pss_rekap_sheet(rows: List[list]) -> Optional[Tuple[Dict, Dict]]:
     header = {"invoice_no": inv[-1] if inv else None, "supplier": _PSS_SUPPLIER, "consignee": consignee,
               "invoice_date": None}
     items: List[Dict] = []
-    totals = {"invoice_no": header["invoice_no"], "total": None, "grand_total": None, "final_total": None}
+    # net_tolerance：未稅合計的容許誤差 (±5 IDR)，帳單合計因進位差幾元不算錯誤 (使用者 2026-10-31 確認)
+    totals = {"invoice_no": header["invoice_no"], "total": None, "grand_total": None, "final_total": None,
+              "net_tolerance": 5}
     for r in rows[letters + 1:]:
         first = _vn_text(_vn_cell(r, 0)).strip()
         nums = [x for x in (_vn_num(c) for c in r) if x is not None]
-        if _vn_num(_vn_cell(r, 0)) is not None:          # 明細列 (NO 欄是序號)
+        # 明細列：NO 欄是序號，或 TANGGAL 欄是日期 (有的列 NO 欄空白，例如 SEPT 1386)
+        is_detail = _vn_num(_vn_cell(r, 0)) is not None or \
+            re.match(r"\d{4}-\d{2}-\d{2}", _vn_text(_vn_cell(r, 1)).strip()) is not None
+        if is_detail:
             box = _vn_text(_vn_cell(r, container_col)).strip() if container_col is not None else ""
             feet = _vn_text(_vn_cell(r, feet_col)).strip() if feet_col is not None else ""
             extra = {"container_no": box if box and box.upper() != "BOX" else None,
@@ -6048,7 +6057,8 @@ def _pss_rekap_sheet(rows: List[list]) -> Optional[Tuple[Dict, Dict]]:
                 items.append({"description": f"PPN {m.group(1)} %", "amount": None, "vat": round(value, 2)})
             m = re.search(r"PPH\s*(?:\d+\s*,\s*)?(\d[\d,]*)\s*%", text)
             if m:
-                items.append({"description": f"PPH {m.group(1)}%", "amount": None, "vat": round(value, 2)})
+                # Excel 帳單的 PPH 23 是代扣稅，要從含稅總額扣掉：存成負數 (使用者 2026-10-31 確認)
+                items.append({"description": f"PPH {m.group(1)}%", "amount": None, "vat": -round(value, 2)})
             if "GRAND TOTAL" in text:
                 totals["grand_total"] = value
             elif "TOTAL YANG DITAGIH" in text or "TOTAL YANG DIBAYAR" in text:
@@ -6058,6 +6068,21 @@ def _pss_rekap_sheet(rows: List[list]) -> Optional[Tuple[Dict, Dict]]:
         if sign and INDO_MONTHS.get(sign.group(2).lower()):
             header["invoice_date"] = _pss_format_date(sign.group(1), INDO_MONTHS[sign.group(2).lower()],
                                                       sign.group(3))
+        # 簽名行是 "JAKARTA, 24/11/2025" (DD/MM/YYYY)
+        slash = re.search(r"JAKARTA\s*,\s*(\d{1,2})/(\d{1,2})/(\d{4})",
+                          " ".join(_vn_text(c) for c in r if c not in (None, "")), re.I)
+        if slash and header["invoice_date"] is None:
+            header["invoice_date"] = _pss_format_date(slash.group(1), slash.group(2), slash.group(3))
+    # 簽名行只寫 "JAKARTA,"，日期印在下面幾列的 P 欄日期格 (例如 SAP 0053、0102)
+    if header["invoice_date"] is None:
+        for i, r in enumerate(rows):
+            if not any(k >= 13 and "JAKARTA" in _vn_text(c).upper() for k, c in enumerate(r)):
+                continue
+            cell = next((c for j in range(i, min(i + 3, len(rows))) for c in rows[j]
+                         if isinstance(c, (datetime.date, datetime.datetime))), None)
+            if cell is not None:
+                header["invoice_date"] = _pss_format_date(cell.day, cell.month, cell.year)
+                break
     return {"header": header, "items": items or [{"description": None, "amount": None, "vat": None}]}, totals
 
 

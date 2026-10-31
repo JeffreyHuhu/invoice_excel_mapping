@@ -1876,14 +1876,15 @@ def audit_invoice_totals(
                 continue
             desc_norm = normalize_value(r.get("description") or "").upper()
             if deduction_prefixes and any(desc_norm.startswith(p) for p in deduction_prefixes):
-                deduct_total += vat
+                # 代扣稅不論正負 (Excel 版存成負數) 都是扣掉的金額，取絕對值
+                deduct_total += abs(vat)
             else:
                 add_total += vat
         return add_total, deduct_total
 
     def _build_result(group_rows: List[Dict], invoice_total, grand_total, final_total,
                       grand_tolerance: float = 1, final_tolerance: float = 1,
-                      vat_total=None) -> Dict:
+                      vat_total=None, net_tolerance: float = 1) -> Dict:
         """grand_tolerance / final_tolerance：含稅總額 / 實付金額允許的誤差
         (預設 ±1)。帳單合計的稅額若是「未稅合計 × 稅率」、明細稅額卻是逐列四捨
         五入 (例如 CONG THANH 代墊款)，Excel 供應商可透過 sheet_totals 放寬到
@@ -1906,7 +1907,7 @@ def audit_invoice_totals(
             "extracted_sum": extracted_sum,
             "invoice_total": invoice_total,
             "diff": extracted_sum - invoice_total if invoice_total is not None else None,
-            "match": abs(extracted_sum - invoice_total) <= 1 if invoice_total is not None else None,
+            "match": abs(extracted_sum - invoice_total) <= net_tolerance if invoice_total is not None else None,
             "vat_sum": vat_sum,
             "vat_total": vat_total,
             "vat_diff": (vat_sum - vat_total
@@ -1947,7 +1948,7 @@ def audit_invoice_totals(
         for t in sheet_totals_fn(read_spreadsheet(pdf_path)):
             args = (t.get("total"), t.get("grand_total"), t.get("final_total"),
                     t.get("grand_tolerance", 1), t.get("final_tolerance", 1),
-                    t.get("vat_total"))
+                    t.get("vat_total"), t.get("net_tolerance", 1))
             if t.get("invoice_no") is None:
                 # 整份檔案的合計 (例如表格最後的合計列)：用全部明細勾稽
                 whole = _build_result(rows, *args)
