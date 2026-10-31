@@ -1069,6 +1069,18 @@ def parse_indoprostime_transport(text: str) -> Dict:
     header["volume"] = _indo_format_volume(
         _search(rf"GROSS\s*/\s*KG\s*:\s*(.+?){_INDO_STOP}", text)
     )
+    # 海運版面 (沒有 HAWB/MAWB/FLIGHT/GROSS，改用 H B/L、M B/L、F/M VESSEL、QTY/CBM)：
+    # 空運欄位抓不到時才改用海運欄位 (使用者 2026-11-01 手改的正確答案)
+    if header["bl_no"] is None:
+        header["bl_no"] = _search(r"\bH B/L\s*:\s*(?!QTY)([A-Z0-9][A-Z0-9\-]*)\b", text)
+    if header["mbl_no"] is None:
+        header["mbl_no"] = _search(r"\bM B/L\s*:\s*([A-Z0-9][A-Z0-9\-]*)\b", text)
+    if header["vessel"] is None:
+        header["vessel"] = _search(r"F/M VESSEL\s*:\s*(.+?)\s*$", text)
+    if header["volume"] is None:
+        # LCL 寫 CBM 加 M3 (材積規則，2026-10-27)：QTY/CBM : 105 ROLS / 7.000 -> 7.000 M3
+        _cbm = _search(r"QTY/CBM\s*:[^/\n]*/\s*([\d.]+)", text)
+        header["volume"] = f"{_cbm} M3" if _cbm else None
     header["onboard_date"] = _indo_parse_flight_date(_raw_flight)
     header["arrive_date"] = header["onboard_date"]
     header["port_of_discharge"] = "Jakarta"
