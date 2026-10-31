@@ -6003,14 +6003,16 @@ def _pss_rekap_sheet(rows: List[list]) -> Optional[Tuple[Dict, Dict]]:
         return None
     code = {k: _vn_text(c).strip().rstrip(".") for k, c in enumerate(rows[letters])
             if re.fullmatch(r"[A-H]\.?", _vn_text(c).strip())}
-    fee_cols = [k for k, v in code.items() if v != "H"]
-    sum_col = next((k for k, v in code.items() if v == "H"), None)
+    labels = [_vn_text(c).strip().upper() for c in rows[head]]
+    # JUMLAH 欄是每列的小計 (= 各費用欄加總)，不是費用項目：不當成品項，只當合計欄
+    jumlah_col = labels.index("JUMLAH") if "JUMLAH" in labels else None
+    fee_cols = [k for k, v in code.items() if v != "H" and k != jumlah_col]
+    sum_col = next((k for k, v in code.items() if v == "H"), jumlah_col)
 
     def label(k):
         parts = [_vn_text(_vn_cell(rows[i], k)).strip() for i in range(head, letters)]
         return re.sub(r"\s+", " ", " ".join(p for p in parts if p))
 
-    labels = [_vn_text(c).strip().upper() for c in rows[head]]
     container_col = labels.index("CONTAINER") if "CONTAINER" in labels else None
     feet_col = labels.index("FEET") if "FEET" in labels else None
     top = " ".join(_vn_text(c) for r in rows[:head] for c in r if c not in (None, ""))
