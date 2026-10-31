@@ -4726,6 +4726,13 @@ def parse_apl(text: str) -> Dict:
         )
         if _apl_inv_m else None
     )
+    # 簽名處的 "Jakarta, October 28, 2025" 有時只在影像裡，文字層抓不到：
+    # 發票號碼 "2025-1028-0019" 的前半段就是 年-月日 (使用者 2026-11-01 規定)
+    if header["invoice_date"] is None and header["invoice_no"]:
+        _apl_no_m = re.match(r"(\d{4})-(\d{2})(\d{2})-", header["invoice_no"])
+        if _apl_no_m:
+            header["invoice_date"] = _format_date_en(
+                _apl_no_m.group(3), _apl_no_m.group(2), _apl_no_m.group(1))
 
     # 開船日：先試費用明細備註裡的 "ETD 30 AUG 2026"，沒有才退回最上方
     # "We debit your account for: ... - ETD : 10/03/2026" (美式 MM/DD/YYYY)。
