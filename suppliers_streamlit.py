@@ -1039,13 +1039,13 @@ _INDO_CREDIT_LINE = re.compile(
 
 
 def _indo_credit_note_items(text: str) -> List[Dict]:
-    """退款單的費用列 (正數) + 一列 VAT (沒有稅額)。"""
+    """退款單的費用列 (正數)。退款單沒有稅額，不加 VAT 列
+    (空的 VAT 列會被驗證層判 ERROR "VAT 沒有 AMOUNT"，2026-11-01)。"""
     items = []
     for m in _INDO_CREDIT_LINE.finditer(text):
         amount = _apl_clean_amount(m.group(2).lstrip("-"))
         if amount is not None:
             items.append({"description": m.group(1).strip(), "amount": amount})
-    items.append({"description": "VAT", "amount": None, "vat": None})
     return items
 
 
@@ -4156,7 +4156,9 @@ def _parse_dhl_scanned_customs(text: str) -> Dict:
     items = _dhl_customs_extract_items(text)
     _dhl_allocate_vat(text, items)
     if not items:
-        items = [{"description": None, "amount": None}]
+        # 掃描檔一筆費用都擷取不到：判無法判讀 (使用者 2026-10-31 確認，掃描檔 JKTZR00561616、
+        # JKTZR00623780)，驗證層會判 ERROR，原因寫「無法判讀」
+        items = [{"description": "UNREADABLE", "amount": None, "vat": None}]
 
     return {"header": header, "items": items}
 
@@ -4212,7 +4214,8 @@ def _parse_dhl_duty(text: str) -> Dict:
         items.append({"description": im.group("desc").strip(), "amount": amount, "vat": vat})
     for code in ("order_no", "arrive_date", "mbl_no", "volume", "vessel", "container_no"):
         header.setdefault(code, None)
-    return {"header": header, "items": items or [{"description": None, "amount": None}]}
+    # 一筆費用都擷取不到：判無法判讀 (同掃描版型，使用者 2026-10-31 確認)
+    return {"header": header, "items": items or [{"description": "UNREADABLE", "amount": None, "vat": None}]}
 
 
 def _dhl_is_unreadable(text: str) -> bool:
