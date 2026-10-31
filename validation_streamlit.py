@@ -81,6 +81,11 @@ SUPPLIER_REQUIRED_FIELDS = {
             "container_no": _W, "shipper": _W},
 }
 _FCL_VOLUME_RE = re.compile(r"\d+\s*X\s*\d{2}", re.IGNORECASE)
+# 必要欄位只檢查 KEY 值範例那種版型 (使用者 2026-10-31)：
+# OPL 只檢查 NCLR 開頭的進口帳單；CT-/IP-/AT- 等其他版型本來就沒有主提單、出貨方。
+SUPPLIER_REQUIRED_WHEN = {
+    "OPL": lambda row: str(row.get("invoice_no") or "").upper().startswith("NCLR"),
+}
 
 # 選填欄位的基本格式規則 (WARN)：(欄位, 規則代碼, 檢查函式, 說明)
 _CONTAINER_NO_RE = re.compile(r"[A-Z]{4}\d{6,7}")
@@ -268,7 +273,8 @@ def _check_header(row: Dict, supplier_key: Optional[str] = None) -> List[Dict]:
         if _is_blank(row.get(code)):
             issues.append(_issue(ERROR, code, "MISSING_REQUIRED",
                                  f"必填欄位「{FIELD_LABELS[code]}」抓不到值"))
-    for code, level in SUPPLIER_REQUIRED_FIELDS.get(supplier_key or "", {}).items():
+    applies = SUPPLIER_REQUIRED_WHEN.get(supplier_key or "", lambda _row: True)(row)
+    for code, level in (SUPPLIER_REQUIRED_FIELDS.get(supplier_key or "", {}) if applies else {}).items():
         if code == "container_no" and not _FCL_VOLUME_RE.search(str(row.get("volume") or "")):
             continue    # 散貨 (LCL)、空運沒有櫃號
         if _is_blank(row.get(code)):
