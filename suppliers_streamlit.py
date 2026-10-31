@@ -470,6 +470,9 @@ _KN_CHARGE_LINE_PATTERN = re.compile(
 )
 # 不含稅的帳單 VAT 合計是 "0"，合計行剛好也像費用行，要排除
 _KN_TOTAL_LINE_DESC = re.compile(r"^(?:SUBTOTAL|INVOICE\s+(?:VAT\s+)?TOTAL)\b")
+# 重量行也像費用行 (例如 "GW 259.58 O"，行尾 "O" 被當成 VAT 代碼)，不是費用，要排除。
+# 2026-11 樣本 JKT1519910、JKT1522151 因此多出一筆假費用，導致金額稽核 ERROR。
+_KN_WEIGHT_LINE_DESC = re.compile(r"^(?:TTL\s+)?(?:GW|NW|GROSS|NET)\b")
 
 
 def _kn_clean_amount_comma_thousands(text: Optional[str]):
@@ -573,7 +576,7 @@ def _kn_extract_charge_items(text: str) -> List[Dict]:
     """
     items = []
     for m in _KN_CHARGE_LINE_PATTERN.finditer(text):
-        if _KN_TOTAL_LINE_DESC.match(m.group("desc")):
+        if _KN_TOTAL_LINE_DESC.match(m.group("desc")) or _KN_WEIGHT_LINE_DESC.match(m.group("desc")):
             continue
         amount = _kn_clean_amount_comma_thousands(m.group("amount"))
         items.append({"description": m.group("desc").strip(), "amount": amount})
