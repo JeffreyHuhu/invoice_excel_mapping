@@ -173,8 +173,9 @@ KNOWN_SOURCE_ISSUES: Dict[str, Dict[Tuple[str, str], Tuple[str, Optional[Union[s
                                                re.compile(r"[A-Z]{1,2} \d{1,4} [A-Z]{1,3},?")),
     },
 }
-# INDO PROSTIME EXPRESS 與 TRANSPORT 是同一套帳單格式
-KNOWN_SOURCE_ISSUES["INDOPROSTIME"] = KNOWN_SOURCE_ISSUES["INDOPROSTIME_TRANSPORT"]
+# INDO PROSTIME EXPRESS (ID16) 與 TRANSPORT (ID07) 是兩個供應商 (使用者 2026-11-01 要求分開)。
+# EXPRESS 先沿用 TRANSPORT 的原帳單問題清單當起點，之後依 EXPRESS 樣本各自調整，不再共用同一份。
+KNOWN_SOURCE_ISSUES["INDOPROSTIME"] = dict(KNOWN_SOURCE_ISSUES["INDOPROSTIME_TRANSPORT"])
 
 # 供應商例外：這些 (欄位, 規則) 對該供應商不是問題，連附註都不列 (使用者規定)
 SUPPLIER_EXEMPTIONS: Dict[str, set] = {
