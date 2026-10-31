@@ -4,3 +4,5 @@ expense_dashboard/data/
 印尼MAERSK 2025-2026/
 expense_dashboard/dashboard_config.json
 供應商轉檔結果/
+expense_dashboard/build/
+expense_dashboard/dist/
