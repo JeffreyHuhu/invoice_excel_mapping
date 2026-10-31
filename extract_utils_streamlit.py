@@ -1955,6 +1955,8 @@ def audit_invoice_totals(
             key = normalize_value(t.get("invoice_no"))
             if groups.get(key):
                 per_invoice[key] = _build_result(groups[key], *args)
+                if t.get("note"):   # 原帳單問題備註 (例如發票區塊重複)，給稽核訊息附上原因
+                    per_invoice[key]["source_note"] = t["note"]
         # 每張發票的結果：有整份檔案的勾稽就套用到每張發票；這張發票自己的
         # 含稅總額勾稽 (grand_*) 優先 (例如 RỒNG Á CHÂU：每張發票的費用 +
         # VAT PASS THROUGH = 該發票的 TOTAL)

@@ -3297,6 +3297,14 @@ def _dwiharta_sheets(book) -> Tuple[List[Dict], List[Dict]]:
             docs.append({"header": {"invoice_no": inv[-1], "supplier": "PT. DWIHARTA LOGISTINDO",
                                     "consignee": consignee, "invoice_date": date}, "items": items})
             totals.append({"invoice_no": inv[-1], "total": total, "grand_total": None, "final_total": None})
+    # 同一發票號碼出現在兩個區塊 (2026-10 rekap 202603：整段 copy 貼上)：費用重複兩次，
+    # 備註成原帳單問題；金額稽核照常列 ERROR (使用者 2026-10-31 確認)
+    counts: Dict[str, int] = {}
+    for t in totals:
+        counts[t["invoice_no"]] = counts.get(t["invoice_no"], 0) + 1
+    for t in totals:
+        if counts[t["invoice_no"]] > 1:
+            t["note"] = "原帳單問題：同一張表重複列出此發票，費用重複兩次"
     return docs or [{"header": {}, "items": [{"description": None, "amount": None}]}], totals
 
 
@@ -3845,13 +3853,13 @@ def _parse_dhl_regular(text: str) -> Optional[Dict]:
     whitelist = _dhl_extract_charge_name_whitelist(text)
     extra_pattern = None
     if whitelist:
-        alt = "|".join(re.escape(n) for n in whitelist)
-        extra_pattern = re.compile(
-            rf"(?:{alt})\s+(?P<amount>[\d,]+)\s+(?P<vat>[\d,]+)\s+[A-Z]\s+(?P<total>[\d,]+)"
-        )
-        # 費用名稱本身也要抓出來 (上面的 pattern 沒有把名稱包進 group，
-        # 因為 re.escape() 過的多個名稱長度不一，用另一個對照 pattern
-        # 重新加上具名 group 更清楚)。
+        # 費用名稱可能被換行切開：跟地址擠在同一行的只有前半 ("…SHIPMENT VALUE
+        # 170,000 1,870 A 171,870")，後半 ("PROTECTION") 落到下一行 (2026-10-31
+        # BDOIR00044998)。所以除了完整名稱，也接受至少兩個字的前綴，再對回白名單
+        # 裡的完整名稱，白名單的防誤判效果不變。
+        prefixes = {" ".join(n.split()[:k]) for n in whitelist
+                    for k in range(2, len(n.split()) + 1)}
+        alt = "|".join(re.escape(p) for p in sorted(prefixes, key=len, reverse=True))
         extra_pattern = re.compile(
             rf"(?P<desc>{alt})\s+(?P<amount>[\d,]+)\s+(?P<vat>[\d,]+)\s+[A-Z]\s+(?P<total>[\d,]+)"
         )
@@ -3882,8 +3890,11 @@ def _parse_dhl_regular(text: str) -> Optional[Dict]:
         })
         if extra_pattern:
             for em in extra_pattern.finditer(block):
+                desc = em.group("desc").strip()
+                # 前綴對回白名單裡的完整名稱 (白名單已依長度排序，先找到的是最長的)
+                desc = next((n for n in whitelist if n == desc or n.startswith(desc + " ")), desc)
                 items.append({
-                    "description": em.group("desc").strip(),
+                    "description": desc,
                     "amount": _dhl_clean_amount(em.group("amount")),
                     "vat": _dhl_clean_amount(em.group("vat")),
                     **overrides,

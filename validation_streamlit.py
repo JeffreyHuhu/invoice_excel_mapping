@@ -454,7 +454,9 @@ def _check_audit(audit: Optional[Dict], supplier_key: Optional[str]) -> List[Dic
         if audit.get(match_key) is False:
             diff = audit.get(diff_key)
             diff_text = f"{diff:,.2f}" if isinstance(diff, (int, float)) else diff
-            issues.append(_issue(ERROR, "total", rule, f"{message} (差額 {diff_text})"))
+            # 原帳單問題備註 (例如發票重複列出)：仍是 ERROR，只附上原因
+            note = f"（{audit['source_note']}）" if audit.get("source_note") else ""
+            issues.append(_issue(ERROR, "total", rule, f"{message} (差額 {diff_text}){note}"))
     return issues
 
 
