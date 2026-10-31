@@ -6015,7 +6015,9 @@ def _pss_rekap_sheet(rows: List[list]) -> Optional[Tuple[Dict, Dict]]:
     # 但它的金額有計入 JUMLAH)
     first_fee = min(code) if code else 0
     last_fee = sum_col if sum_col is not None else max(code, default=0) + 1
-    fee_cols = [k for k in range(first_fee, last_fee) if k != jumlah_col]
+    # FEET (貨櫃尺寸 20' / 40') 與 CONTAINER 是貨櫃資訊，不是費用項目
+    non_fee = {labels.index(h) for h in ("JUMLAH", "FEET", "CONTAINER") if h in labels}
+    fee_cols = [k for k in range(first_fee, last_fee) if k not in non_fee]
 
     def label(k):
         parts = [_vn_text(_vn_cell(rows[i], k)).strip() for i in range(head, letters)]

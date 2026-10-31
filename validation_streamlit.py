@@ -181,6 +181,8 @@ SUPPLIER_EXEMPTIONS: Dict[str, set] = {
     # 層級的扣款 (例如貨損)，使用者確認正確
     # PANCARAN：沒有船名時 VESSEL NAME 印 ". / ." "- / -" (使用者確認，不列入)
     "PANCARAN": {("vessel", "TEXT_NO_LETTER")},
+    # PSS Excel 帳單的 AMOUNT 為負數 = 折讓/扣款 (使用者 2026-10-31 確認：中 folder 的 -500,000)
+    "PUTRA_SEJAHTERA_SENTOSA": {("amount", "AMOUNT_NEGATIVE")},
     # DWIHARTA：到達日早於開船日是原帳單本身寫錯 (使用者確認，例如 INJK-2503-1051)
     "DWIHARTA": {("arrive_date", "DATE_ORDER")},
     "CONG_THANH": {("container_no", "CONTAINER_FORMAT"), ("vessel", "TEXT_NO_LETTER"),
