@@ -199,6 +199,9 @@ SUPPLIER_VALUE_EXEMPTIONS: Dict[str, Dict[Tuple[str, str], set]] = {
     # 帳單本身拼錯 DIRCET (抽樣 POU CHEN JUNI 2025)、DIRET TO CONS (使用者 2026-10-28 確認不標警告)
     "INDOPROSTIME": {("bl_no", "ID_NO_DIGIT"): {"DIRECT TO CON", "DIRCET TO CON", "DIRET TO CONS"}},
     "INDOPROSTIME_TRANSPORT": {("bl_no", "ID_NO_DIGIT"): {"DIRECT TO CON", "DIRCET TO CON", "DIRET TO CONS"}},
+    # PSS 拖車 (TUNGYA)：貨櫃號碼欄是拖車行名稱，不是貨櫃號碼，不適用貨櫃格式規則，不計入
+    # (使用者 2026-10-31 確認；其他貨櫃號碼仍照規則檢查)
+    "PUTRA_SEJAHTERA_SENTOSA": {("container_no", "CONTAINER_FORMAT"): {"TUNGYA"}},
 }
 
 # 不計入的客戶：CONSIGNEE 去掉空白與符號後包含這個字就列 ERROR (使用者 2026-10-28)
