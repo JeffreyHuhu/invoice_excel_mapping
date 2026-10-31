@@ -399,9 +399,10 @@ SUPPLIER_CURRENCY: dict = {
     "ORIENTAL POWER LOGISTICS CO., LTD": "USD",
 }
 
-# INVOICE NO 不是供應商自己的帳單號碼 (例如寶成的發票號)、帳單也沒有發票日期的
+# INVOICE NO 不是供應商自己的帳單號碼 (例如寶成的發票號、OPL 的 FILE NO) 的
 # 供應商 (key：SUPPLIER 欄位轉大寫；使用者 2026-10-28 指定)：
-#   - 分析日期：發票日期空白時改用 on board date (轉檔結果仍是 N/A)。
+#   - 分析日期：帳單的 INVOICE DATE 空白時才改用 on board date (轉檔結果仍是 N/A)。
+#     OPL 的帳單都有 INVOICE DATE，所以實際用的是 INVOICE DATE (2026-11-01 確認)。
 #   - 重複判斷：同一個發票號碼會出現在不同週的帳單、費用項目不同，所以不能
 #     用 (供應商, 發票號碼) 判斷；改成整列 (發票號碼+費用名稱+金額+提單號碼) 相同才算。
 SUPPLIER_NO_OWN_INVOICE = {
