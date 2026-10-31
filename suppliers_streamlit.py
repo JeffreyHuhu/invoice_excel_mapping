@@ -4633,17 +4633,53 @@ def _apl_clean_amount(text: Optional[str]):
     return int(value) if value.is_integer() else value
 
 
-def _apl_extract_items(text: str) -> List[Dict]:
-    # 表頭可能是粗體疊印 "DDeessccrriippttiioonn" (2026-10-28 抽樣 INV. 2025-0307-0099)
-    m = re.search(r"(?:Description|DDeessccrriippttiioonn)\s+Amount.*?\n(.*?)\nSubtotal", text, re.DOTALL)
-    if not m:
+# 表頭後面 / Subtotal 前面的描述行：全大寫、沒有小寫字母，排除銀行資料與附註
+_APL_DESC_LINE = re.compile(r"^[A-Z][A-Z0-9 ,/\-\.%'&()]*$")
+_APL_NOT_DESC = re.compile(r"BANKERS|^PT\. APL|CITIBANK|QUARTER|^JL\.|^NO\.|RUPIAHS|NOTICE|^DESCRIPTION|^AMOUNT")
+_APL_HEADER_LINE = re.compile(r"^\s*(?:Amount \(IDR\)|Description|DDeess\w*)")
+_APL_AMOUNT_LINE = re.compile(r"^\s*([\d,]+\.\d{2})\s*$")
+
+
+def _apl_body_items(text: str) -> List[Dict]:
+    """費用明細 (不含 VAT)。同一家供應商有三種版面 (2026-10 抽樣 APL 低等級)：
+      (a) "Description Amount (IDR)" 同一行、金額同一行 (原本的規則)
+      (b) 表頭兩行 ("Amount (IDR)" 在前、"Description" 在後)、金額同一行
+      (c) 描述與金額分開印 (金額行印在 Subtotal 前的別處)，依序一一對應
+    """
+    lines = text.split("\n")
+    sub_i = next((i for i, l in enumerate(lines) if l.strip().startswith("Subtotal")), None)
+    heads = [i for i in range(sub_i or 0) if _APL_HEADER_LINE.match(lines[i])] if sub_i else []
+    if not heads:
         return []
+    # (a)
     items = []
-    for im in _APL_ITEM_PATTERN.finditer(m.group(1)):
-        items.append({
-            "description": im.group("desc").strip(),
-            "amount": _apl_clean_amount(im.group("amount")),
-        })
+    m = re.search(r"(?:Description|DDeessccrriippttiioonn)\s+Amount.*?\n(.*?)\nSubtotal", text, re.DOTALL)
+    if m:
+        for im in _APL_ITEM_PATTERN.finditer(m.group(1)):
+            items.append({"description": im.group("desc").strip(),
+                          "amount": _apl_clean_amount(im.group("amount"))})
+    if items:
+        return items
+    # (b) 表頭之後、Subtotal 之前，一行一筆
+    for im in _APL_ITEM_PATTERN.finditer("\n".join(lines[heads[0]:sub_i])):
+        items.append({"description": im.group("desc").strip(),
+                      "amount": _apl_clean_amount(im.group("amount"))})
+    if items:
+        return items
+    # (c) 描述行數 = 金額行數 才對應；對不上就不猜，留空讓查驗報錯
+    descs = [l.strip() for l in lines[heads[0]:sub_i]
+             if _APL_DESC_LINE.match(l.strip()) and not _APL_NOT_DESC.search(l.strip())]
+    amounts = [_apl_clean_amount(am.group(1)) for am in
+               (_APL_AMOUNT_LINE.match(l) for l in lines[:sub_i]) if am]
+    if descs and len(descs) == len(amounts):
+        return [{"description": d, "amount": a} for d, a in zip(descs, amounts)]
+    return []
+
+
+def _apl_extract_items(text: str) -> List[Dict]:
+    # 千分位逗號前多打空白 ("7,061 ,230.00"，原帳單文字層的錯字)，先併回去
+    text = re.sub(r"(\d)\s+,(\d)", r"\1,\2", text)
+    items = _apl_body_items(text)
     vat = _apl_clean_amount(_search(r"VAT\s*:\s*([\d,]+\.\d{2})", text))
     if vat is not None:
         # ⚠️ 2026-10 修正 (使用者提供新版正確答案明確要求)：VAT 那一列的
@@ -4673,6 +4709,15 @@ def parse_apl(text: str) -> Dict:
     m = re.search(r"BILLED TO\s*:[^\n]*\n\s*(.+?)\s+NO\.\s*(\S+)", text)
     header["consignee"] = m.group(1).strip() if m else None
     header["invoice_no"] = m.group(2).strip() if m else None
+    # 版面變形：公司名稱後面沒有 "NO."，或號碼與 "NO." 分開、號碼中間夾空白 ("2026-091 6-0231")
+    if header["consignee"] is None:
+        m2 = re.search(r"BILLED TO\s*:[^\n]*\n\s*([^\n]+)", text)
+        if m2:
+            header["consignee"] = re.split(r"\s+NO\.", m2.group(1))[0].strip()
+    if header["invoice_no"] is None:
+        m3 = re.search(r"\bNO\.\s*(\d[\d\- ]*\d)", text)
+        if m3:
+            header["invoice_no"] = re.sub(r"\s", "", m3.group(1))
 
     _apl_inv_m = re.search(r"Jakarta,\s*([A-Za-z]+)\s+(\d{1,2}),\s*(\d{4})", text)
     header["invoice_date"] = (
