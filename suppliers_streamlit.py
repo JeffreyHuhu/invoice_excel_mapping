@@ -1031,6 +1031,24 @@ def detect_indoprostime_transport(text: str) -> bool:
     return "INDO PROSTIME TRANSPORT" in text.upper()
 
 
+# 退款單標題 (單獨一行 "CREDIT NOTE")；費用列 "DESCRIPTION (…) 金額"，金額可能已是負數
+_INDO_CREDIT_TITLE = re.compile(r"(?mi)^\s*CREDIT\s+NOTE\s*$")
+_INDO_CREDIT_LINE = re.compile(
+    r"(?m)^\s*([A-Z][A-Z ]*?)\s*(?:\([^)\n]*\))?\s+(-?[\d,]+(?:\.\d+)?)\s*$"
+)
+
+
+def _indo_credit_note_items(text: str) -> List[Dict]:
+    """退款單的費用列 (正數) + 一列 VAT (沒有稅額)。"""
+    items = []
+    for m in _INDO_CREDIT_LINE.finditer(text):
+        amount = _apl_clean_amount(m.group(2).lstrip("-"))
+        if amount is not None:
+            items.append({"description": m.group(1).strip(), "amount": amount})
+    items.append({"description": "VAT", "amount": None, "vat": None})
+    return items
+
+
 def parse_indoprostime_transport(text: str) -> Dict:
     header: Dict[str, Optional[str]] = {}
 
@@ -1056,7 +1074,12 @@ def parse_indoprostime_transport(text: str) -> Dict:
     header["port_of_discharge"] = "Jakarta"
     header["container_no"] = None
 
-    items = _indo_extract_charge_items(text)
+    if _INDO_CREDIT_TITLE.search(text):
+        # 退款單頁 (CREDIT NOTE)：費用列是 "DEDUCTION STORAGE (INV NO : …) -14,749,333"。
+        # 金額寫正數，負數由 local_quality._mark_credit_note() 處理 (2026-11-01)
+        items = _indo_credit_note_items(text)
+    else:
+        items = _indo_extract_charge_items(text)
 
     return {"header": header, "items": items}
 
