@@ -151,6 +151,8 @@ KNOWN_SOURCE_ISSUES: Dict[str, Dict[Tuple[str, str], Tuple[str, Optional[Union[s
                                                {"BSI8184133"}),
         # HB/L No 欄只印 "BSWCG" 沒有號碼 (使用者 2026-10-28 確認是原帳單問題，不計入)
         ("bl_no", "ID_NO_DIGIT"): ("ECOMET 原帳單的 HB/L No 本身就只有 BSWCG", {"BSWCG", "BSWCG:"}),
+        # 第 62 頁 D26-02-0212 的 Container 欄原文就只有 "."，使用者確認是原帳單問題，不計入
+        ("container_no", "CONTAINER_FORMAT"): ("ECOMET 原帳單的 Container 欄本身就只有 .", {"."}),
     },
     "INDOPROSTIME_TRANSPORT": {
         # 帳單印 "2026-JUN-31" (6 月沒有 31 日)；[POUCHEN]_IPE JUNI 的 FLIGHT 印
@@ -185,6 +187,8 @@ SUPPLIER_EXEMPTIONS: Dict[str, set] = {
     "PUTRA_SEJAHTERA_SENTOSA": {("amount", "AMOUNT_NEGATIVE")},
     # DWIHARTA：到達日早於開船日是原帳單本身寫錯 (使用者確認，例如 INJK-2503-1051)
     "DWIHARTA": {("arrive_date", "DATE_ORDER")},
+    # ECOMET 費用 DISCOUNT TERLAMBAT 為負數 = 折讓 (使用者確認，D26-03-0263 -500,000)
+    "ECOMET": {("amount", "AMOUNT_NEGATIVE")},
     "CONG_THANH": {("container_no", "CONTAINER_FORMAT"), ("vessel", "TEXT_NO_LETTER"),
                    ("amount", "AMOUNT_ZERO"), ("amount", "AMOUNT_NEGATIVE")},
     # 越南拖車行 (VN06 BÌNH TÂN、VN16 SONG TRIỀU)：貨櫃號碼欄填車牌，比照 CONG THANH

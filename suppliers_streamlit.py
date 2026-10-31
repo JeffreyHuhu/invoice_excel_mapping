@@ -5215,6 +5215,11 @@ def parse_ecomet(text: str) -> Dict:
     if m_split:
         header["bl_no"] = m_split.group(1) + m_split.group(2)
     header["mbl_no"] = _search(r"MB/L\s*No\s+(\S+)", flat)
+    # 同 HB/L：冒號後面有空白時會切成兩段 ("MEDUW: A335548" -> MEDUWA335548，
+    # 2026-10 中 folder 的 D26-02-0154 / D26-02-0197 確認)
+    m_mbl_split = re.search(r"MB/L\s*No\s+([A-Z0-9]+):\s+([A-Z0-9]*\d[A-Z0-9]*)\b", text)
+    if m_mbl_split:
+        header["mbl_no"] = m_mbl_split.group(1) + m_mbl_split.group(2)
     # Negara Asal 跟 Tipe 分別在不同的物理行 (右欄位逐行往下錯開一列)，
     # 不能用 flat (整頁合併成一行) 去抓到 Tipe 當結尾，國家名稱本身都是
     # 單一個字 (THAILAND/CIKANDE/ITALIA/VIETNAM/JAPAN)，直接抓下一個空白
