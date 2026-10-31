@@ -4639,10 +4639,41 @@ def detect_apl(text: str) -> bool:
 
 
 def apl_invoice_page(page: str) -> bool:
-    """APL 帳單頁 = 有 "BILLED TO" 的頁。同一份 PDF 常夾帶 Faktur Pajak、
-    寶成的領料單 (Items release form) 等附件 (使用者 2026-10 樣本 2025-1217-0135)。"""
+    """APL 帳單頁 = 有 "BILLED TO" 的頁，或退款單 (CREDIT NOTE 標題)。同一份 PDF 常夾帶
+    Faktur Pajak、寶成的領料單 (Items release form) 等附件 (使用者 2026-10 樣本 2025-1217-0135)。"""
     upper = page.upper()
-    return "BILLED TO" in upper and not upper.lstrip().startswith("FAKTUR PAJAK")
+    if upper.lstrip().startswith("FAKTUR PAJAK"):
+        return False
+    return "BILLED TO" in upper or bool(_APL_CREDIT_NOTE_TITLE.search(page))
+
+
+# 退款單 (CREDIT NOTE)：標題單獨一行；沒有 "BILLED TO"、沒有費用明細表格 (使用者 2026-11-01 APL CREDIT NOTE 樣本)
+_APL_CREDIT_NOTE_TITLE = re.compile(r"(?mi)^\s*CREDIT\s+NOTE\s*$")
+
+
+def parse_apl_credit_note(text: str) -> Dict:
+    """APL 退款單：一張退款單 = 一列，金額為 "TOTAL" 那一行 (正數)。
+    負數由 local_quality._mark_credit_note() 在寫 Excel 前統一處理。
+    Description 照抄 "Revise inv# <原發票號碼>"；Order No. 填退款單號碼 CN.xxx。"""
+    header: Dict[str, Optional[str]] = {}
+    header["supplier"] = "PT. APL LOGISTICS"
+    # "April 24th, 2025" -> 2025-04-24 (寫入時轉成日期)
+    dm = re.search(r"\b([A-Za-z]{3})[A-Za-z]*\s+(\d{1,2})(?:st|nd|rd|th)?,\s*(\d{4})", text)
+    header["invoice_date"] = (_format_date_en_from_month_name(dm.group(2), dm.group(1), dm.group(3))
+                              if dm else None)
+    # 原發票號碼：Reference 的 "DI No. 2025-0305-0018"
+    header["invoice_no"] = _search(r"DI No\.\s*(\d{4}-\d{4}-\d{4})", text)
+    header["consignee"] = _search(r"(PT\.\s*GLOSTAR INDONESIA)", text)
+    header["order_no"] = _search(r"(CN\.[\w/.\-]+)", text)
+    header["port_of_loading"] = "Jakarta"
+    for key in ("arrive_date", "onboard_date", "bl_no", "mbl_no", "port_of_discharge",
+                "volume", "vessel", "container_no", "shipper"):
+        header[key] = None
+    items = [{
+        "description": _search(r"(Revise inv#\s*\S+)", text),
+        "amount": _apl_clean_amount(_search(r"\bTOTAL\s+([\d,]+\.\d{2})", text)),
+    }]
+    return {"header": header, "items": items}
 
 
 # 名稱可能有 "%" (例如 "OVERNIGHT 100%")
@@ -4734,6 +4765,8 @@ def _apl_extract_grand_total(text: str) -> Optional[int]:
 
 
 def parse_apl(text: str) -> Dict:
+    if _APL_CREDIT_NOTE_TITLE.search(text) and "BILLED TO" not in text.upper():
+        return parse_apl_credit_note(text)
     header: Dict[str, Optional[str]] = {}
 
     # 掃描檔 OCR 會把 logo 讀成同一行 ("APL PT. APL LOGISTICS")，不限行首
