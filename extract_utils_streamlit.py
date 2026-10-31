@@ -654,7 +654,8 @@ _ROW_SUM_RE = re.compile(r"^=\+?SUM\(\$?([A-Z]{1,3})\$?(\d+):\$?([A-Z]{1,3})\$?(
                          re.I)
 # 費用欄表頭 (漏在合計左邊的欄要是費用欄才算)；數量/重量/費率類的欄不算
 _FEE_HEADER_RE = re.compile(r"FEE|CHARGE|PH[IÍ]|FREIGHT|CUSTOM|SURCHARGE|TRUCKING|SERVICE", re.I)
-_NOT_FEE_HEADER_RE = re.compile(r"KG|CBM|WEIGHT|QTY|QUANTITY|RATE|%|DATE|NGÀY|\bNO\b|SỐ|CONT|20'|40'", re.I)
+# FEET (貨櫃呎數，例如 40) 含有 "FEE"，不是費用，要排除 (PSS 2026-10-31：F 欄 40 被當成漏算費用)
+_NOT_FEE_HEADER_RE = re.compile(r"KG|CBM|WEIGHT|QTY|QUANTITY|RATE|%|DATE|NGÀY|\bNO\b|SỐ|CONT|20'|40'|FEET", re.I)
 
 
 def _row_gap_issues(sheet: str, formulas: Dict[Tuple[int, str], str], grid: List[list]) -> List[Dict]:
