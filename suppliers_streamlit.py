@@ -771,7 +771,15 @@ def detect_indoprostime(text: str) -> bool:
     PT. Indo Prostime Transport (另一家公司，另外註冊成
     detect_indoprostime_transport()/parse_indoprostime_transport()) 也會
     一樣含有 'PROSTIME' 字樣，太寬鬆的判斷式會把兩家公司的帳單搞混。"""
-    return "INDO PROSTIME EXPRESS" in text.upper()
+    upper = text.upper()
+    if "INDO PROSTIME EXPRESS" in upper:
+        return True
+    # 掃描檔 OCR 常把字認錯 (例如 "PT. lndo Prostim€ Express" 的 I 變 l、M 變 €)，
+    # 用容錯寫法補抓，仍要同時有 "INDO" 與 "EXPRESS"，不會把 TRANSPORT 誤判進來
+    return bool(_INDO_EXPRESS_OCR_RE.search(upper))
+
+
+_INDO_EXPRESS_OCR_RE = re.compile(r"[IL1]NDO\s+PR\w*M\S*\s+EXPRESS")
 
 
 _INDO_LABEL_WORDS = [
@@ -3965,6 +3973,9 @@ _DHL_CUSTOMS_SUMMARY_LINE_PATTERN = re.compile(
     r"^([A-Z][A-Z /&]+[A-Z])\s+((?:[\d.,]+|=)(?:\s+(?:[\d.,]+|=))*)\s*$"
 )
 
+# 稅號/收件資訊的行：NPWP、NITKU (OCR 會讀成 NiTKU/NITKV/NIVKU…)、Identitas、BARANG
+_DHL_TAX_ID_LINE_RE = re.compile(r"NPWP|N[I1][TV][KY]|IDENTIT|BARANG", re.I)
+
 
 def _dhl_customs_extract_items(text: str) -> List[Dict]:
     """擷取每一筆費用項目：
@@ -3998,6 +4009,10 @@ def _dhl_customs_extract_items(text: str) -> List[Dict]:
             break
         m = _DHL_CUSTOMS_SUMMARY_LINE_PATTERN.match(stripped_line)
         if not m:
+            continue
+        # 稅號行 ("NPWP 0013 1077 4306 2000"、OCR 讀成 "NiTKU …") 不是服務列，
+        # 會被誤當成費用 (2026-10-31 JKTZR00561616 等 17 份)
+        if _DHL_TAX_ID_LINE_RE.search(m.group(1)):
             continue
         # 前 4 個 token 固定是 Number of Shipments / Total Weight /
         # Number of Items / Standard Shipping Charge，第 4 個 (index 3)
@@ -4161,10 +4176,14 @@ def _parse_dhl_duty(text: str) -> Dict:
                       "", line, flags=re.I)
         line = re.sub(r"^\s*0?\s?ISBURSEMENT\b", "DISBURSEMENT", line)   # OCR 掉了 D
         im = _DHL_DUTY_ITEM_RE.search(line)
-        if not im:
+        if not im or _DHL_TAX_ID_LINE_RE.search(line):
             continue
         amount = _dhl_clean_amount(im.group("amount"))
         total = _dhl_clean_amount(im.group("total"))
+        # 收件人名稱後面黏著稅號數字 ("BERTECH…BRANC 4549749626746")，金額不合理 (2026-10-31
+        # JKTZR00623780)：單筆超過 1,000 億 IDR 視為讀錯，不列入
+        if amount is None or amount > 100_000_000_000:
+            continue
         vat = _dhl_clean_amount(im.group("vat")) if im.group("vat") else (
             total - amount if amount is not None and total is not None else None)
         items.append({"description": im.group("desc").strip(), "amount": amount, "vat": vat})
@@ -4173,8 +4192,23 @@ def _parse_dhl_duty(text: str) -> Dict:
     return {"header": header, "items": items or [{"description": None, "amount": None}]}
 
 
+def _dhl_is_unreadable(text: str) -> bool:
+    """海關報關文件 (BC 1.1 艙單) 被混進 DHL 帳單，且沒有任何帳單表格標記：
+    無法判讀，不硬拆成費用項目 (使用者 2026-10-31 確認：判 ERROR，原因無法判讀；BDOIR00051508)。
+    注意：PEMBERITAHUAN 也會出現在真正的掃描帳單裡 (JKTZR00561616)，不能當判定條件。"""
+    upper = text.upper()
+    has_invoice_table = any(k in upper for k in (
+        "AIR WAYBILL", "TYPE OF SERVICE", "DUTY INVOICE", "CHARGE DESCRIPTION",
+        "ANALYSIS OF", "SERVICE SUB TOTAL"))
+    return "BC 1.1" in upper and not has_invoice_table
+
+
 def parse_dhl(text: str) -> Dict:
-    if _dhl_is_duty(text):
+    if _dhl_is_unreadable(text):
+        # 標記值要跟 validation_streamlit.UNREADABLE_DESC 一致 (驗證層判 ERROR)
+        result = {"header": _dhl_common_header(text),
+                  "items": [{"description": "UNREADABLE", "amount": None, "vat": None}]}
+    elif _dhl_is_duty(text):
         result = _parse_dhl_duty(text)
     elif _dhl_is_regular(text) and (regular := _parse_dhl_regular(text)) is not None:
         result = regular
