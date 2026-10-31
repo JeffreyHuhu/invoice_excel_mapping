@@ -1080,7 +1080,14 @@ def parse_indoprostime_transport(text: str) -> Dict:
     if header["volume"] is None:
         # LCL 寫 CBM 加 M3 (材積規則，2026-10-27)：QTY/CBM : 105 ROLS / 7.000 -> 7.000 M3
         _cbm = _search(r"QTY/CBM\s*:[^/\n]*/\s*([\d.]+)", text)
-        header["volume"] = f"{_cbm} M3" if _cbm else None
+        # 沒有 CBM 時退而用 "QUANTITY : 9.00 PKGS" 的件數 -> "9 PKGS" (使用者 2026-11-01 指定 KEY 值)
+        _qty_m = re.search(r"QUANTITY\s*:\s*([\d.]+)\s*([A-Z]+)", text)
+        if _cbm:
+            header["volume"] = f"{_cbm} M3"
+        elif _qty_m:
+            header["volume"] = f"{int(float(_qty_m.group(1)))} {_qty_m.group(2)}"
+        else:
+            header["volume"] = None
     header["onboard_date"] = _indo_parse_flight_date(_raw_flight)
     header["arrive_date"] = header["onboard_date"]
     header["port_of_discharge"] = "Jakarta"

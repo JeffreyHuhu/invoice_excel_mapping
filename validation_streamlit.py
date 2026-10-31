@@ -167,6 +167,8 @@ KNOWN_SOURCE_ISSUES: Dict[str, Dict[Tuple[str, str], Tuple[str, Optional[Union[s
         # 使用者 2026-10-30 確認是原帳單問題
         ("bl_no", "ID_NO_DIGIT"): ("INDOPROSTIME 直送收貨人的 HAWB 欄原文就是 DIRECT TO",
                                    {"DIRECT TO COS", "DIRECT TO CON"}),
+        # 原帳單本來就沒有 B/L NO. 值 (使用者 2026-11-01 確認，不計入)
+        ("bl_no", "MISSING_REQUIRED"): ("INDOPROSTIME 原帳單本來就沒有 B/L NO. 值", None),
     },
     # 陸運帳單 (TRUCKING CHARGE TRAGA，INV.2510.0007~0012) 的 Container No. 欄印車牌
     # ("B 9197 PCC,")；使用者 2026-10-30：保留車牌，屬原帳單問題。只限印尼車牌格式
@@ -178,6 +180,8 @@ KNOWN_SOURCE_ISSUES: Dict[str, Dict[Tuple[str, str], Tuple[str, Optional[Union[s
 # INDO PROSTIME EXPRESS (ID16) 與 TRANSPORT (ID07) 是兩個供應商 (使用者 2026-11-01 要求分開)。
 # EXPRESS 先沿用 TRANSPORT 的原帳單問題清單當起點，之後依 EXPRESS 樣本各自調整，不再共用同一份。
 KNOWN_SOURCE_ISSUES["INDOPROSTIME"] = dict(KNOWN_SOURCE_ISSUES["INDOPROSTIME_TRANSPORT"])
+# 上面 B/L NO. 缺值的原帳單規則只限 TRANSPORT，EXPRESS 不沿用 (使用者 2026-11-01)
+KNOWN_SOURCE_ISSUES["INDOPROSTIME"].pop(("bl_no", "MISSING_REQUIRED"), None)
 
 # 供應商例外：這些 (欄位, 規則) 對該供應商不是問題，連附註都不列 (使用者規定)
 SUPPLIER_EXEMPTIONS: Dict[str, set] = {
