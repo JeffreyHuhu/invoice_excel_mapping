@@ -108,6 +108,9 @@ _OPTIONAL_FORMAT_RULES = (
 # 正確答案裡常見的「不適用」佔位字元，視同空值 (不算缺漏，也不做格式檢查)
 _PLACEHOLDERS = {"-", "--", "/"}
 
+# 解析器判定「原帳單無法判讀」時，把 description 設成這個標記，驗證層判 ERROR (原因：無法判讀)
+UNREADABLE_DESC = "UNREADABLE"
+
 # 已知的「原帳單本身的問題」：使用者核對過原帳單，確認不是擷取錯誤。使用者
 # 規定原帳單的問題不標示為 WARN、不反紅：改成 INFO (只當附註、不扣信心分數、
 # 不影響信心等級)，說明後面註記屬原帳單問題。
@@ -144,15 +147,14 @@ KNOWN_SOURCE_ISSUES: Dict[str, Dict[Tuple[str, str], Tuple[str, Optional[Union[s
     },
     # 使用者 2026-10-27 確認「原帳單就這樣寫，就是原帳單問題」；只限這幾個原始值
     "ECOMET": {
-        # [NIKOMAS]_Invoices_5_2025：到達日 21 May 2024 早於開船日 20 Apr 2025、
-        # 貨櫃號碼 BSI8184133 只有 3 個英文字母
-        ("arrive_date", "DATE_ORDER"): ("ECOMET 原帳單的到達日本身就早於開船日", {"21 May 2024"}),
-        ("container_no", "CONTAINER_FORMAT"): ("ECOMET 原帳單的貨櫃號碼本身就少一個英文字母",
-                                               {"BSI8184133"}),
+        # 到達日早於開船日：ECOMET 原帳單的到達日本身就寫錯 (使用者 2026-11-01 確認，全部不計入)
+        ("arrive_date", "DATE_ORDER"): ("ECOMET 原帳單的到達日本身就早於開船日", None),
+        # 貨櫃號碼格式：BSI8184133 只有 3 個英文字母；Container 欄只印 "," 或 "."
+        # (使用者 2026-11-01 確認是原帳單問題，不計入)
+        ("container_no", "CONTAINER_FORMAT"): ("ECOMET 原帳單的貨櫃號碼本身就不是標準格式",
+                                               {"BSI8184133", ",", "."}),
         # HB/L No 欄只印 "BSWCG" 沒有號碼 (使用者 2026-10-28 確認是原帳單問題，不計入)
         ("bl_no", "ID_NO_DIGIT"): ("ECOMET 原帳單的 HB/L No 本身就只有 BSWCG", {"BSWCG", "BSWCG:"}),
-        # 第 62 頁 D26-02-0212 的 Container 欄原文就只有 "."，使用者確認是原帳單問題，不計入
-        ("container_no", "CONTAINER_FORMAT"): ("ECOMET 原帳單的 Container 欄本身就只有 .", {"."}),
     },
     "INDOPROSTIME_TRANSPORT": {
         # 帳單印 "2026-JUN-31" (6 月沒有 31 日)；[POUCHEN]_IPE JUNI 的 FLIGHT 印
@@ -419,6 +421,11 @@ def _check_items(group_rows: List[Dict]) -> List[Dict]:
         has_any_item = True
         label = f"第 {idx} 筆費用「{desc if not _is_na(desc) else NA}」"
         row = idx - 1
+        if desc == UNREADABLE_DESC:
+            # 原帳單無法判讀 (解析器放入標記，例如海關文件誤當帳單)：直接判 ERROR，
+            # 不再逐欄檢查 (使用者 2026-10-31 確認：BDOIR00051508)
+            issues.append(_issue(ERROR, "description", "UNREADABLE", "無法判讀", row))
+            continue
         if _is_blank(desc):
             issues.append(_issue(ERROR, "description", "MISSING_REQUIRED",
                                  f"第 {idx} 筆費用 (金額 {amount_raw}) 沒有「{FIELD_LABELS['description']}」",
