@@ -126,6 +126,12 @@ KNOWN_SOURCE_ISSUES: Dict[str, Dict[Tuple[str, str], Tuple[str, Optional[Union[s
         # Order No. 原帳單就是 FCRMENU (沒有數字)，使用者 2026-10-31 確認不計入
         ("order_no", "ID_NO_DIGIT"): ("MAERSK 原帳單的 Order No. 本身就是 FCRMENU", {"FCRMENU"}),
     },
+    # KUEHNE_NAGEL 原帳單的 ETD/ATD、ETA/ATA 欄本來就是空白 (使用者 2026-11-01 確認，
+    # 例如 JKT1485198、JKT1517926)：只在值為空白時才算，有值但抓不到仍列 ERROR
+    "KUEHNE_NAGEL": {
+        ("onboard_date", "MISSING_REQUIRED"): ("KUEHNE NAGEL 原帳單的 ETD/ATD 欄本來就是空白", {"N/A", "None", ""}),
+        ("arrive_date", "MISSING_REQUIRED"): ("KUEHNE NAGEL 原帳單的 ETA/ATA 欄本來就是空白", {"N/A", "None", ""}),
+    },
     # DSV 越南 CargoWise 帳單的 ETA 照抄「ORIGIN ETD DESTINATION ETA」那一行 (例如
     # SSGN0458587 ETD 13-Jul-26 ETA 04-Jun-27)；使用者 2026-10-28：比照 MAERSK 列附註
     "DSV_VN": {

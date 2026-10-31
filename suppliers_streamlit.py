@@ -672,6 +672,8 @@ def parse_kuehne_nagel(text: str) -> Dict:
         header["vessel"] = _search(rf"VESSEL NAME\s*:\s*(.+?){_KN_STOP}", text)
     header["port_of_loading"] = _kn_clean_port(_search(rf"P\.\s*OF LOADING\s*:\s*(.+?){_KN_STOP}", text))
     header["port_of_discharge"] = _kn_clean_port(_search(rf"P\.\s*OF DISCHARGE\s*:\s*(.+?){_KN_STOP}", text))
+    # ⚠️ 原帳單 ETD/ATD、ETA/ATA 可能本來就是空白 (2026-11 JKT1485198 等 6 份)，
+    # validation_streamlit.py 的 KNOWN_SOURCE_ISSUES 已登記為 INFO。請勿改擷取規則。
     _kn_etd_m = re.search(r"ETD/ATD\s*:\s*(\d{1,2})\.(\d{1,2})\.(\d{4})", text)
     header["onboard_date"] = (
         _format_date_en(*_kn_etd_m.groups()) if _kn_etd_m else None
