@@ -1297,6 +1297,12 @@ def _maersk_order_no(text: str) -> Optional[str]:
     m = re.search(r"Commercial\s*Invoice\s*No\s*:\s*(.*?)\n\s*Total\s*Amount\s*Due",
                   text, re.DOTALL)
     if not m:
+        # 沒有 "Commercial Invoice No:" 標籤的版面 (空運式)：號碼單獨印在
+        # "Total Amount Due" 上一行，例如 "618 56964740, IYH0810089417, PEK"。
+        # 這種寫法保留原文空白 (使用者 2026-11-01 正確答案)。
+        m_line = re.search(r"\n([0-9][0-9A-Z ,]*)[ \t]*\n\s*Total\s*Amount\s*Due", text)
+        if m_line:
+            return m_line.group(1).strip() or None
         return _search(r"Commercial\s*Invoice\s*No\s*:\s*(\S+)", text)
     return re.sub(r"\s+", "", m.group(1)) or None
 
@@ -1330,7 +1336,10 @@ def parse_maersk(text: str) -> Dict:
     for n, block in enumerate(_maersk_split_fcr_blocks(text)):
         block_items, block_volume = _maersk_extract_items(block)
         shipment = {
-            "bl_no": _search(r"^FCR\s+(\S+)", block),
+            # 海運用 FCR 號碼；空運式版面沒有 FCR，改用 HAWB (使用者 2026-11-01 提示)
+            "bl_no": _search(r"^FCR\s+(\S+)", block) or _search(r"^HAWB\s+(\S+)", block),
+            # 空運式版面的航班號 "Flight Details: SQ961" 對應 Vessel 欄位 (使用者提示)
+            "vessel": _search(r"Flight\s*Details\s*:\s*(\S+)", block),
             "port_of_loading": _search(rf"\bPOL\s*:\s*(.+?){_MAERSK_STOP}", block),
             "port_of_discharge": _search(rf"\bPOD\s*:\s*(.+?){_MAERSK_STOP}", block),
             "onboard_date": _maersk_parse_date(
