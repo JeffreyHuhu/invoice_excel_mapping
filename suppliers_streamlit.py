@@ -4374,6 +4374,11 @@ _DSV_ITEM_PATTERN = re.compile(
     r"^(?P<desc>.+?)\s+-\s+.*?\s+(?:\d+%=)?(?P<ppn>[\d.]+)\s+(?P<amount>[\d.]+)$",
     re.MULTILINE,
 )
+# 空運版型的航班/主單/分單行 (2026-11-02 DSV 掃描 EDC1103787)
+_DSV_AIR_FLIGHT_PATTERN = re.compile(
+    r"^(?P<flight>[A-Z0-9]{2}\d{2,4})\s*/\s*\S+\s*/\s*\S+\s+(?P<mawb>\d[\d-]*)\s+(?P<hawb>[A-Z0-9][A-Z0-9-]*)\s*$",
+    re.MULTILINE,
+)
 _DSV_VESSEL_BL_PATTERN = re.compile(
     r"^(?P<vessel>.+?)\s*/\s*(?P<voyage>\S+)\s*/\s*\S+\s*/\s*\S+\s+"
     r"(?P<ocean_bl>\S+)\s+(?P<house_bl>\S+)$",
@@ -4418,7 +4423,8 @@ def _dsv_extract_items(text: str) -> List[Dict]:
     items: List[Dict] = []
     matches = list(_DSV_ITEM_PATTERN.finditer(text))
     # 續頁沒有 "TOTAL CHARGES"，到 "Continued Over" 為止 (抽樣 ID610286388)
-    sec = re.search(r"CHARGES IN IDR\s*\n(.*?)\n\s*(?:TOTAL CHARGES|Continued Over)", text, re.DOTALL)
+    # 掃描檔的表頭行尾可能有 OCR 雜訊 ("CHARGES IN IDR}")，表頭後面到換行都略過 (2026-11-02 DSV 掃描 EDC1103787)
+    sec = re.search(r"CHARGES IN IDR[^\n]*\n(.*?)\n\s*(?:TOTAL CHARGES|Continued Over)", text, re.DOTALL)
     if not matches:
         matches = list(_DSV_ITEM_PLAIN_PATTERN.finditer(sec.group(1))) if sec else []
     elif sec:
@@ -4458,6 +4464,9 @@ def parse_dsv(text: str) -> Dict:
     else:
         header["consignee"] = None
         header["invoice_date"] = None
+        # 掃描檔的 "INVOICE DATE" 行可能整行掉字，改抓帳單寄送對象：「PT.」開頭、下一行是 JL 地址
+        m = re.search(r"^(PT\.?\s[^\n]+?)\s*\n\s*JL\b", text, re.MULTILINE)
+        header["consignee"] = m.group(1).strip() if m else None
 
     # "ULTIMATE SHIPPER" 跟 "ULTIMATE CONSIGNEE" 兩欄的名稱是左右並排、
     # 兩欄中間沒有明顯分隔符號 (pdfplumber 抽取後變成同一行文字直接黏在
@@ -4508,6 +4517,14 @@ def parse_dsv(text: str) -> Dict:
         else:
             m = re.search(r"^\s*/\s*([A-Z0-9]+)\s*$", sec.group(1), re.MULTILINE)
             header["bl_no"] = m.group(1) if m else None
+    # 空運版型沒有 "HOUSE BILL OF LADING" 區塊，改用 "FLIGHT / DATE & REFERENCE MAWB HAWB" 那一行
+    # ("CX776 / 18-Jan / CID1713939 16085812311 EDC1103787")：船名=航班，MBL=MAWB，B/L=HAWB
+    if header["mbl_no"] is None:
+        m = _DSV_AIR_FLIGHT_PATTERN.search(text)
+        if m:
+            header["vessel"] = m.group("flight")
+            header["mbl_no"] = m.group("mawb")
+            header["bl_no"] = m.group("hawb")
 
     # 貨櫃號碼只在 "CONTAINERS" 區塊找；沒有這個區塊 (併櫃) 時填 N/A，
     # 不要抓到費用名稱 "THC (Terminal Handling Charge)"
