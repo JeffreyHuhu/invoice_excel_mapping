@@ -8,3 +8,5 @@ expense_dashboard/build/
 expense_dashboard/dist/
 test_samples/ECOMET/sample4.xls
 test_samples/ECOMET/sample4_ref.xlsx
+test_samples/ECOMET/sample5.xls
+test_samples/ECOMET/sample5_ref.xlsx
