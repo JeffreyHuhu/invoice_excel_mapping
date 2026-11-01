@@ -5574,7 +5574,7 @@ _HANDAL_NON_ITEM_PREFIXES = (
 _HANDAL_CODE_RE = re.compile(r'\b([A-Z]{4,8}\d{6,10})\b')
 _HANDAL_ORDER_NO_RE = re.compile(r'(?<![A-Z])([A-Z])(\d{5,7})(?!\d)')
 # 發票號碼後面可能多一個字母，例如 "HG01240125S"
-_HANDAL_INVOICE_NO_RE = re.compile(r'\bHG\d{8}[A-Z]?\b')
+_HANDAL_INVOICE_NO_RE = re.compile(r'\bHG\d{8}[A-Z]{0,2}\b')  # 2026-11-01：後綴可能是 SS (250112SS)
 _HANDAL_INVOICE_DATE_RE = re.compile(r'\b(\d{1,2}\s+[A-Za-z]+\s+\d{4})\b')
 _HANDAL_ROUTE_RE = re.compile(r'([A-Z][A-Z ]*?) *- *([A-Z][A-Z ]*?) *- *(\d{1,2}/\d{1,2}/\d{4})')
 # 多種櫃型用逗號連起來，例如 "1X20,6X40"
@@ -5582,7 +5582,7 @@ _HANDAL_VOLUME_RE = re.compile(r'\b(\d{1,2}X\d{2,3}(?:,\s*\d{1,2}X\d{2,3})*)\b')
 # 沒有欄位標籤的版型 (使用者 2026-10 樣本 HG02360225)：B/L 是獨立一行
 # "250162C (000177)"，MBL 是 B/L 上面某一行的單一代碼 ("EGLV149411233840"、
 # "002FX00666")，發票日期+號碼的下一行是「船名 航次 Order No.」
-_HANDAL_BL_LINE_RE = re.compile(r'^\s*(\d{6}[A-Z]\s*\(\d{6}\))\s*$', re.MULTILINE)
+_HANDAL_BL_LINE_RE = re.compile(r'^\s*(\d{6}[A-Z]{1,2}\s*\(\d{6}\))\s*$', re.MULTILINE)  # 2026-11-01：可能是 SS
 _HANDAL_CONSIGNEE_RE = re.compile(r'\b([A-Z][A-Z\s]{2,40}\.\s*PT)\b')
 # 總額要自己一行：掃描檔 OCR 常漏掉總額那行，舊規則會把最後一筆費用
 # ("COLLECTION FEE 701,000 701,000") 的金額當成總額 (使用者 2026-10 樣本 NIKO-MEI 2025)
@@ -5786,7 +5786,8 @@ def _handal_extract_header(text: str) -> Dict:
         # 沒有欄位標籤的版型：依位置抓
         h['bl_no'] = re.sub(r'\s+', ' ', bl_m.group(1))
         before = [ln.strip() for ln in text[:bl_m.start()].splitlines() if ln.strip()]
-        codes = [ln for ln in before if re.fullmatch(r'[A-Z0-9]{8,20}', ln) and re.search(r'\d', ln)]
+        # 2026-11-01：MBL 可能帶 "-NB" 後綴 (CMPJKT2501114-NB)
+        codes = [ln for ln in before if re.fullmatch(r'[A-Z0-9-]{8,20}', ln) and re.search(r'\d', ln)]
         h['mbl_no'] = codes[-1] if codes else None
         lines = text.splitlines()
         for i, ln in enumerate(lines):
