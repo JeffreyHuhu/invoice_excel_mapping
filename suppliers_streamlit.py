@@ -4463,6 +4463,7 @@ def parse_dsv(text: str) -> Dict:
     # 欄位空白時下一行就是 "GOODS DESCRIPTION" 標題，不是單號 (2026-10-30 ID610184985)；
     # 撇號也可能是 "OWNER’'S"
     # 整行照抄 (使用者 2026-10-30 決定，例如 "FIAT, OCTOBER, PWJ")
+    # 沒有任何數字的 ORDER 不計入 (validation_streamlit.py SUPPLIER_EXEMPTIONS)，不要在這裡改擷取規則
     header["order_no"] = _search(r"OWNER\S{0,3}S REFERENCE\s*\n\s*(?!GOODS DESCRIPTION)(.+)", text)
 
     # 港口照抄整段 "IDJKT = Jakarta, Java, Indonesia" (使用者 2026-10-25 規定)。
@@ -4495,6 +4496,7 @@ def parse_dsv(text: str) -> Dict:
             header["vessel"] = f"{m.group('vessel').strip()} / {m.group('voyage').strip()}"
             header["bl_no"] = m.group("house_bl").strip()
             header["mbl_no"] = m.group("ocean_bl").strip()
+            # MBL NO. 只有英文、沒有數字是原帳單問題 (validation_streamlit.py KNOWN_SOURCE_ISSUES)，不要在這裡改擷取規則
         else:
             m = re.search(r"^\s*/\s*([A-Z0-9]+)\s*$", sec.group(1), re.MULTILINE)
             header["bl_no"] = m.group(1) if m else None

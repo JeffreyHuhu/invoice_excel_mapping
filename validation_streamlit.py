@@ -133,6 +133,12 @@ KNOWN_SOURCE_ISSUES: Dict[str, Dict[Tuple[str, str], Tuple[str, Optional[Union[s
         ("onboard_date", "MISSING_REQUIRED"): ("KUEHNE NAGEL 原帳單的 ETD/ATD 欄本來就是空白", {"N/A", "None", ""}),
         ("arrive_date", "MISSING_REQUIRED"): ("KUEHNE NAGEL 原帳單的 ETA/ATA 欄本來就是空白", {"N/A", "None", ""}),
     },
+    # DSV 印尼帳單的 MBL NO. 只有英文、沒有任何數字 (使用者 2026-11-02 確認是原帳單問題)；
+    # 只限「沒有數字」的值，有數字但抓不到仍列 ERROR
+    "DSV": {
+        ("mbl_no", "ID_NO_DIGIT"): ("DSV 原帳單的 MBL NO. 本身只有英文、沒有數字",
+                                    re.compile(r"[A-Za-z][A-Za-z .,/\-]*")),
+    },
     # DSV 越南 CargoWise 帳單的 ETA 照抄「ORIGIN ETD DESTINATION ETA」那一行 (例如
     # SSGN0458587 ETD 13-Jul-26 ETA 04-Jun-27)；使用者 2026-10-28：比照 MAERSK 列附註
     "DSV_VN": {
@@ -203,6 +209,8 @@ SUPPLIER_EXEMPTIONS: Dict[str, set] = {
     "DWIHARTA": {("arrive_date", "DATE_ORDER")},
     # ECOMET 費用 DISCOUNT TERLAMBAT 為負數 = 折讓 (使用者確認，D26-03-0263 -500,000)
     "ECOMET": {("amount", "AMOUNT_NEGATIVE")},
+    # DSV ORDER 號碼沒有任何數字 (例如 "FIAT, OCTOBER, PWJ") 不計入 (使用者 2026-11-02 規定)
+    "DSV": {("order_no", "ID_NO_DIGIT")},
     "CONG_THANH": {("container_no", "CONTAINER_FORMAT"), ("vessel", "TEXT_NO_LETTER"),
                    ("amount", "AMOUNT_ZERO"), ("amount", "AMOUNT_NEGATIVE")},
     # 越南拖車行 (VN06 BÌNH TÂN、VN16 SONG TRIỀU)：貨櫃號碼欄填車牌，比照 CONG THANH
