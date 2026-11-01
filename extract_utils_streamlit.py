@@ -2251,20 +2251,43 @@ def _field_code_for_header_text(text) -> Optional[str]:
 _CREDIT_NOTE_TITLE_RE = re.compile(r"(?mi)\bCREDIT\s+NOTE\s*$")
 
 
-def is_credit_note_pdf(pdf_path: str) -> bool:
-    """整份 PDF 每一頁都是退款單標題 (單獨一行 CREDIT NOTE) 才算退款單。Excel 帳單不是 PDF，直接回傳 False。"""
+def credit_note_scope(pdf_path: str, key: Optional[str]) -> Tuple[bool, set]:
+    """回傳 (整份都是退款單, 退款單頁的發票號碼)。沒有退款單頁時回傳 (False, 空 set)。
+    退款單頁的金額要當成負項的發票 (所有供應商適用，與 local_quality._mark_credit_note 相同規則)。
+    Excel 帳單不是 PDF，直接回傳 (False, 空 set)。"""
     if not str(pdf_path).lower().endswith(".pdf"):
-        return False
+        return False, set()
     pages = extract_pages_from_pdf(pdf_path)
-    return bool(pages) and all(_CREDIT_NOTE_TITLE_RE.search(p or "") for p in pages)
+    credit_pages = [pg for pg in pages if _CREDIT_NOTE_TITLE_RE.search(pg or "")]
+    if not credit_pages:
+        return False, set()
+    if len(credit_pages) == len(pages):
+        return True, set()
+    nos = set()
+    entry = SUPPLIER_REGISTRY.get(key) if key else None
+    if entry and entry.get("parse"):
+        for pg in credit_pages:
+            try:
+                no = (entry["parse"](pg) or {}).get("header", {}).get("invoice_no")
+            except Exception:  # noqa: BLE001  解析失敗就不標記這一頁
+                no = None
+            if no:
+                nos.add(str(no))
+    return False, nos
 
 
-def flip_credit_note_reference(ref_df: pd.DataFrame) -> pd.DataFrame:
-    """退款單的正確答案金額/VAT 為負數，只把負數翻成正數 (正數不動)。"""
+def flip_credit_note_reference(ref_df: pd.DataFrame, all_credit: bool, credit_nos: set) -> pd.DataFrame:
+    """把正確答案中屬於退款單的負數翻成正數 (正數不動)，對應擷取規則的正數輸出。
+    all_credit=True：整份都是退款單，全部列翻；否則只翻 invoice_no 在 credit_nos 的列。"""
     out = ref_df.copy()
+    if not all_credit and not credit_nos:
+        return out
+    target = pd.Series(True, index=out.index) if all_credit else out.get(
+        "invoice_no", pd.Series(None, index=out.index)).astype(str).isin(credit_nos)
     for col in ("amount", "vat"):
         if col in out.columns:
-            out[col] = out[col].apply(lambda v: -v if isinstance(v, (int, float)) and v < 0 else v)
+            out.loc[target, col] = out.loc[target, col].apply(
+                lambda v: -v if isinstance(v, (int, float)) and v < 0 else v)
     return out
 
 

@@ -23,9 +23,10 @@ import extract_utils_streamlit as eu
 
 def run_one(pdf_path: str, ref_path: str, expected_key: str):
     ref_rows = eu.read_reference_excel(ref_path)
-    # 退款單的答案是負數，擷取規則是正數，比對前翻成正數 (見 extract_utils 的 is_credit_note_pdf)
-    if eu.is_credit_note_pdf(pdf_path):
-        ref_rows = eu.flip_credit_note_reference(ref_rows)
+    # 退款單 (整份或部分頁) 的答案是負數，擷取規則是正數，比對前翻成正數 (見 extract_utils 的 credit_note_scope)
+    all_credit, credit_nos = eu.credit_note_scope(pdf_path, expected_key)
+    if all_credit or credit_nos:
+        ref_rows = eu.flip_credit_note_reference(ref_rows, all_credit, credit_nos)
     result = eu.find_best_extraction(pdf_path, supplier_key=expected_key, reference_rows=ref_rows)
     detected = eu.detect_supplier(eu.extract_text_from_pdf(pdf_path))
     return {
