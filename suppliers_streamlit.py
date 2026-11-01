@@ -155,6 +155,10 @@ def _format_date_en_from_month_name(day, month_name, year) -> Optional[str]:
 # 避免把右欄內容一起抓進來。
 
 def detect_dwiharta(text: str) -> bool:
+    # DSV 帳單的附件 (Carrier 欄) 會印 DWIHARTA，但 DWIHARTA 先註冊，所以先排除 DSV 帳單
+    # (使用者 2026-11-02 回報 DSV-EDC1294431)
+    if detect_dsv(text):
+        return False
     return "DWIHARTA" in text.upper()
 
 
