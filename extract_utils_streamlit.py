@@ -2245,6 +2245,29 @@ def _field_code_for_header_text(text) -> Optional[str]:
     return None
 
 
+# 退款單 (CREDIT NOTE) 正負號原則 (使用者 2026-11-01)：CREDIT NOTE 金額為負數、INVOICE 金額為正數。
+# 擷取規則一律寫正數 (負數由本機 local_quality 對整份退款單處理)。正確答案存負數，
+# 比對前用 flip_credit_note_reference() 翻成正數，才能跟擷取結果比對。
+_CREDIT_NOTE_TITLE_RE = re.compile(r"(?mi)\bCREDIT\s+NOTE\s*$")
+
+
+def is_credit_note_pdf(pdf_path: str) -> bool:
+    """整份 PDF 每一頁都是退款單標題 (單獨一行 CREDIT NOTE) 才算退款單。Excel 帳單不是 PDF，直接回傳 False。"""
+    if not str(pdf_path).lower().endswith(".pdf"):
+        return False
+    pages = extract_pages_from_pdf(pdf_path)
+    return bool(pages) and all(_CREDIT_NOTE_TITLE_RE.search(p or "") for p in pages)
+
+
+def flip_credit_note_reference(ref_df: pd.DataFrame) -> pd.DataFrame:
+    """退款單的正確答案金額/VAT 為負數，只把負數翻成正數 (正數不動)。"""
+    out = ref_df.copy()
+    for col in ("amount", "vat"):
+        if col in out.columns:
+            out[col] = out[col].apply(lambda v: -v if isinstance(v, (int, float)) and v < 0 else v)
+    return out
+
+
 def read_reference_excel(source) -> pd.DataFrame:
     """讀取『正確答案』Excel。不同供應商範本的表頭可能在第1列或第2列、
     欄位可能從A欄或B欄開始，這裡自動搜尋含有 'INVOICE DATE' 字樣的儲存格
