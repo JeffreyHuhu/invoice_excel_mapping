@@ -695,8 +695,10 @@ def parse_kuehne_nagel(text: str) -> Dict:
     else:
         header["container_no"] = None
         m2 = re.search(r"AS PER ATTACHED\s+([\d,\.]+)\s+([\d,\.]+)", text)
-        # 散貨：CBM (統一寫法見 _fmt_volume)
-        header["volume"] = _fmt_volume(cbm=m2.group(2).replace(",", "")) if m2 else None
+        # 散貨：CBM (統一寫法見 _fmt_volume)。"AS PER ATTACHED" 後面沒有數字時 (2026-01 JKT1458864)，
+        # 改抓費用行 "5.762 CBM X 24.67 USD" 的材積 (VOL 欄，使用者提示：CFS 抓 VOL)
+        cbm_val = m2.group(2).replace(",", "") if m2 else _search(r"([\d.]+)\s+CBM\s+X\b", text)
+        header["volume"] = _fmt_volume(cbm=cbm_val) if cbm_val else None
 
     # 這種帳單沒有主提單，留空給 expand_to_rows() 補 N/A
     header["mbl_no"] = None
