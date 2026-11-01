@@ -543,11 +543,16 @@ def _kn_extract_containers(text: str) -> List[tuple]:
     return list(seen.values())
 
 
+def _kn_container_type(kind: str) -> str:
+    """KN 櫃型代碼轉成跨供應商寫法 (完整代碼)：一般用途櫃 GE 寫成 GP (跟 YUSEN 一致)，
+    其他照寫，例如 HC -> HC。(2026-11-02 使用者決定)"""
+    return "GP" if kind.upper() == "GE" else kind.upper()
+
+
 def _kn_container_volume(containers: List[tuple]) -> Optional[str]:
-    """整櫃 (FCL) 的櫃量：同樣櫃型合併數量，櫃型只取第一個字母，
-    例如 40' GE + 40' HC + 20' GE -> "1X40G+1X40H+1X20G"。"""
+    """整櫃 (FCL) 的櫃量：同樣櫃型合併數量，例如 40' GE + 40' HC + 20' GE -> "1X40GP, 1X40HC, 1X20GP"。"""
     # 材積統一寫法 (見 _fmt_volume)：多種櫃型用 ", " 隔開
-    return _fmt_volume(containers=[(qty, f"{size}{kind[0]}") for _, qty, size, kind in containers])
+    return _fmt_volume(containers=[(qty, f"{size}{_kn_container_type(kind)}") for _, qty, size, kind in containers])
 
 
 def _kn_extract_po_numbers(text: str) -> Optional[str]:
@@ -694,11 +699,11 @@ def parse_kuehne_nagel(text: str) -> Dict:
     #   - 散貨 (LCL)：沒有櫃號，Volume 填 "AS PER ATTACHED 重量 材積" 的材積數字。
     # 2026-11-02 使用者規定 (Volume 來源看 MOVEMENT TYPE)：
     #   - MOVEMENT TYPE 有 CFS 字樣 -> 抓 VOL (散貨，下面 else 分支)
-    #   - 其他 (例如 CY/CY) 且沒有櫃號 -> 抓 QTY TYPE，"1 40' HC" 寫成 "1X40H"
-    #     (櫃型只取第一個字母，跟有櫃號的寫法一致：2026-11-02 使用者規定都用 40H)
+    #   - 其他 (例如 CY/CY) 且沒有櫃號 -> 抓 QTY TYPE，"1 40' HC" 寫成 "1X40HC"
+    #     (完整櫃型，跨供應商一致；GE 寫成 GP：2026-11-02 使用者決定)
     containers = _kn_extract_containers(text)
     movement = (_search(r"MOVEMENT TYPE\s*:\s*(\S+)", text) or "").upper()
-    qty_types = [(int(q), f"{s}{k[0]}") for q, s, k in
+    qty_types = [(int(q), f"{s}{_kn_container_type(k)}") for q, s, k in
                  re.findall(r"(\d+)\s+(\d{2})'\s*([A-Z]{2})\s+CONTAINER", text)]
     if "CFS" not in movement and containers:
         header["container_no"] = ", ".join(c[0] for c in containers)
