@@ -694,10 +694,11 @@ def parse_kuehne_nagel(text: str) -> Dict:
     #   - 散貨 (LCL)：沒有櫃號，Volume 填 "AS PER ATTACHED 重量 材積" 的材積數字。
     # 2026-11-02 使用者規定 (Volume 來源看 MOVEMENT TYPE)：
     #   - MOVEMENT TYPE 有 CFS 字樣 -> 抓 VOL (散貨，下面 else 分支)
-    #   - 其他 (例如 CY/CY) 且沒有櫃號 -> 抓 QTY TYPE，"1 40' HC" 寫成 "1X40HC"
+    #   - 其他 (例如 CY/CY) 且沒有櫃號 -> 抓 QTY TYPE，"1 40' HC" 寫成 "1X40H"
+    #     (櫃型只取第一個字母，跟有櫃號的寫法一致：2026-11-02 使用者規定都用 40H)
     containers = _kn_extract_containers(text)
     movement = (_search(r"MOVEMENT TYPE\s*:\s*(\S+)", text) or "").upper()
-    qty_types = [(int(q), f"{s}{k}") for q, s, k in
+    qty_types = [(int(q), f"{s}{k[0]}") for q, s, k in
                  re.findall(r"(\d+)\s+(\d{2})'\s*([A-Z]{2})\s+CONTAINER", text)]
     if "CFS" not in movement and containers:
         header["container_no"] = ", ".join(c[0] for c in containers)
