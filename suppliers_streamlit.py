@@ -50,7 +50,7 @@ def _search(pattern: str, text: str) -> Optional[str]:
 # 材積 (Volume) 統一寫法 (使用者 2026-10-27 規定，所有供應商適用)：
 #   1. 整櫃 (FCL) 有貨櫃數：「數量X櫃型」，多種櫃型用 ", "，例如 "1X40HC"、
 #      "1X20GP, 1X40HC"。
-#   2. 散貨 (LCL) 沒有貨櫃數：CBM 數字 + " M3"，例如 "7.010 M3"。
+#   2. 散貨 (LCL) 沒有貨櫃數：CBM 數字 + " CBM"，例如 "7.010 CBM"。(2026-11-01 由 M3 統一改成 CBM)
 #   3. 只有重量 (空運/快遞，沒有 CBM)：重量 + " KG"，例如 "2082 KG"。
 # 各供應商只負責抓出貨櫃/CBM/重量，格式一律交給 _fmt_volume()。
 # ---------------------------------------------------------------------------
@@ -69,7 +69,7 @@ def _fmt_volume(containers=None, cbm=None, kg=None) -> Optional[str]:
     parts = [f"{n}X{key}" for key, n in counts.items() if n]
     if parts:
         return ", ".join(parts)
-    for value, unit in ((cbm, "M3"), (kg, "KG")):
+    for value, unit in ((cbm, "CBM"), (kg, "KG")):
         if value is None or str(value).strip() in ("", "N/A"):
             continue
         text = str(value).strip()
@@ -1085,12 +1085,12 @@ def parse_indoprostime_transport(text: str) -> Dict:
     if header["vessel"] is None:
         header["vessel"] = _search(r"F/M VESSEL\s*:\s*(.+?)\s*$", text)
     if header["volume"] is None:
-        # LCL 寫 CBM 加 M3 (材積規則，2026-10-27)：QTY/CBM : 105 ROLS / 7.000 -> 7.000 M3
+        # LCL 寫 CBM 加 CBM (材積規則，2026-10-27，2026-11-01 改成 CBM)：QTY/CBM : 105 ROLS / 7.000 -> 7.000 CBM
         _cbm = _search(r"QTY/CBM\s*:[^/\n]*/\s*([\d.]+)", text)
         # 沒有 CBM 時退而用 "QUANTITY : 9.00 PKGS" 的件數 -> "9 PKGS" (使用者 2026-11-01 指定 KEY 值)
         _qty_m = re.search(r"QUANTITY\s*:\s*([\d.]+)\s*([A-Z]+)", text)
         if _cbm:
-            header["volume"] = f"{_cbm} M3"
+            header["volume"] = f"{_cbm} CBM"
         elif _qty_m:
             header["volume"] = f"{int(float(_qty_m.group(1)))} {_qty_m.group(2)}"
         else:
@@ -1534,7 +1534,7 @@ def parse_hyper_mega(text: str) -> Dict:
     # 後面的內容」穩定地就是 Vessel 值 (參見本區塊開頭的說明)。
     header["vessel"] = _search(r"Shipper\s*:.*:\s*(.+?)\s*$", text)
     m = re.search(r"CBM\s*/\s*Package\s*:\s*(?:LCL|FCL)\s*/\s*([\d,]+)\s*/", text)
-    # 材積統一寫法 (見 _fmt_volume)："0,5100" -> "0.5100 M3"
+    # 材積統一寫法 (見 _fmt_volume)："0,5100" -> "0.5100 CBM"
     header["volume"] = _fmt_volume(cbm=m.group(1).replace(",", ".")) if m else None
 
     # 這種帳單沒有獨立的「開船日」欄位、也沒有貨櫃資訊，缺漏後續會自動
@@ -6533,7 +6533,7 @@ def _ct_statement(rows: List[list]) -> Optional[Dict]:
             "bl_no": so_inv, "mbl_no": so_inv,
             # 越南境內拖車，啟運港 / 目的港一律 VIETNAM (使用者答案)
             "port_of_loading": "VIETNAM", "port_of_discharge": "VIETNAM",
-            # 材積統一寫法 (見 _fmt_volume)：CBM 欄 -> "0.26 M3"
+            # 材積統一寫法 (見 _fmt_volume)：CBM 欄 -> "0.26 CBM"
             "volume": _fmt_volume(cbm=_vn_num(_vn_cell(row, c_cbm))),
             "vessel": plate or None, "container_no": cont or None,
         })
@@ -7658,7 +7658,7 @@ def _parse_dsv_vn_table(text: str) -> Dict:
     items = []
     for r in _dsv_vn_table_rows(text):
         common = {"invoice_no": r["swb"], "invoice_date": r["date"], "order_no": r["po"],
-                  "bl_no": r["fcr"], "mbl_no": r["swb"], "volume": f"{r['cbm']} M3"}
+                  "bl_no": r["fcr"], "mbl_no": r["swb"], "volume": f"{r['cbm']} CBM"}
         for desc, amount in zip(_DSV_VN_FEES, r["fees"]):
             items.append({"description": desc, "amount": amount, "vat": None, **common})
         items.append({"description": vat_desc, "amount": None, "vat": r["vat"], **common})
@@ -7771,7 +7771,7 @@ def _parse_dsv_vn_grid(text: str) -> Dict:
     items = []
     for r in _dsv_vn_grid_rows(text):
         common = {"invoice_no": r["swb"], "invoice_date": r["date"], "order_no": r["po"],
-                  "bl_no": r["fcr"], "mbl_no": r["swb"], "volume": f"{r['cbm']} M3" if r["cbm"] else None}
+                  "bl_no": r["fcr"], "mbl_no": r["swb"], "volume": f"{r['cbm']} CBM" if r["cbm"] else None}
         items += [{"description": desc, "amount": amount, "vat": None, **common}
                   for desc, amount in r["fees"] if amount]
         if r["vat"] is not None:
@@ -8361,7 +8361,7 @@ def _molcs_parse_page(page: str) -> List[Dict]:
         "vessel": (f"{ship.group(1)} / {ship.group(2)}" if ship.group(2) else ship.group(1)) if ship else None,
         "port_of_loading": ship.group(3).strip() if ship else None,
         "port_of_discharge": ship.group(4).strip() if ship else None,
-        "volume": f"{cbm} M3" if cbm else None,
+        "volume": f"{cbm} CBM" if cbm else None,
     }
     rows = [{**common, "description": it["description"], "amount": it["amount"], "vat": None} for it in items]
     vat = _molcs_num(_search(r"VAT amount\):\s*([\d,]+)", page))
@@ -8429,7 +8429,7 @@ def parse_expeditors(text: str) -> Dict:
     h["bl_no"] = _search(r"AWB/BL:\s*(\S+)", text)
     h["port_of_discharge"] = _search(r"DESTINATION:\s*(\S+)", text)
     h["vessel"] = _search(r"CARRIER:\s*(.+?)\s*$", text)
-    # 材積統一寫法 (見 _fmt_volume)：海運 "5.120 CBM" -> "5.120 M3"；空運只有
+    # 材積統一寫法 (見 _fmt_volume)：海運 "5.120 CBM" -> "5.120 CBM"；空運只有
     # 重量 "2082.000 K" -> "2082 KG"
     weight = _search(r"PCS\s+([\d.]+)\s+K\b", text)
     h["volume"] = _fmt_volume(cbm=_search(r"PCS\s+([\d.]+)\s+CBM", text),

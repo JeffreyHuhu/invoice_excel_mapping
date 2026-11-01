@@ -181,7 +181,7 @@ def parse_float(value) -> Optional[float]:
 
 
 # 材積 (Volume) 拆成數字 (使用者 2026-10-27)。轉檔結果的寫法 (所有供應商)：
-#   FCL「數量X櫃型」(1X40HC, 多種用 ", " 隔開) > LCL「CBM M3」(7.010 M3) > 只有重量「KG」(2082 KG)
+#   FCL「數量X櫃型」(1X40HC, 多種用 ", " 隔開) > LCL「CBM」(7.010 CBM) > 只有重量「KG」(2082 KG)
 #   舊格式只有數字沒有單位 (例如 MAERSK 47.545)：當成 CBM。
 # TEU：20 呎 = 1，40/45 呎 = 2。
 CONTAINER_TYPES = ("20GP", "40GP", "40HC", "45HC")
