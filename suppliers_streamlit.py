@@ -29,7 +29,10 @@ import re
 import datetime
 from typing import Dict, List, Optional, Tuple
 
-from extract_utils_streamlit import limited_pages, register_supplier, set_supplier_number
+from extract_utils_streamlit import (
+    _ocr_page_with_psm, _scanned_page_indexes, extract_pages_from_pdf,
+    limited_pages, register_supplier, set_supplier_number,
+)
 
 # 印尼文月份對照表 (DWIHARTA 帳單用印尼文寫月份)
 INDO_MONTHS = {
@@ -4551,10 +4554,22 @@ def parse_dsv(text: str) -> Dict:
     return {"header": header, "items": items}
 
 
+def _dsv_pages(pdf_path: str) -> List[str]:
+    """DSV 掃描帳單頁用 400 dpi、psm 4 重做 OCR：預設 OCR 會整行漏掉 "INVOICE DATE"
+    與日期 (2026-11-02 掃描 EDC1103787，400 dpi psm 4 讀得到 "INVOICE DATE 21-Jan-25")。
+    只重做認得出 DSV 帳單的掃描頁，其他頁維持原樣。"""
+    pages = extract_pages_from_pdf(pdf_path)
+    for i in _scanned_page_indexes(pdf_path):
+        if detect_dsv(pages[i]):
+            pages[i] = _ocr_page_with_psm(pdf_path, i, 4)
+    return pages
+
+
 register_supplier(
     "DSV", "PT DSV Transport Indonesia",
     detect_dsv, parse_dsv, multi_page=True,
     extract_total=_dsv_extract_total,
+    page_text=_dsv_pages,
 )
 
 
