@@ -633,7 +633,11 @@ def parse_kuehne_nagel(text: str) -> Dict:
         or _search(r"Pengusaha Kena Pajak:\s*\n\s*Nama\s*:\s*(.+)", text)
     )
 
-    header["consignee"] = _search(rf"INVOICE TO\s*\n\s*(.+?){_KN_STOP}", text)
+    # 退款單 (CREDIT NOTE) 的收件人標籤是 "CREDIT TO"，不是 "INVOICE TO" (2026-02-05 JKT9112075)
+    header["consignee"] = (
+        _search(rf"INVOICE TO\s*\n\s*(.+?){_KN_STOP}", text)
+        or _search(rf"CREDIT TO\s*\n\s*(.+?){_KN_STOP}", text)
+    )
     # Sales Invoice 頁的 "CONSIGNEE SHIPPER" 這個區塊裡，SHIPPER 欄位有時
     # 跟上面的 INVOICE TO (header["consignee"]) 是同一家公司 (觀察到的部分
     # 樣本都是 PT. POU YUEN INDONESIA，這裡的 CONSIGNEE 欄位其實是另一個
@@ -697,7 +701,10 @@ def parse_kuehne_nagel(text: str) -> Dict:
         m2 = re.search(r"AS PER ATTACHED\s+([\d,\.]+)\s+([\d,\.]+)", text)
         # 散貨：CBM (統一寫法見 _fmt_volume)。"AS PER ATTACHED" 後面沒有數字時 (2026-01 JKT1458864)，
         # 改抓費用行 "5.762 CBM X 24.67 USD" 的材積 (VOL 欄，使用者提示：CFS 抓 VOL)
-        cbm_val = m2.group(2).replace(",", "") if m2 else _search(r"([\d.]+)\s+CBM\s+X\b", text)
+        cbm_val = m2.group(2).replace(",", "") if m2 else None
+        # 還沒有數字時，改抓貨物行 "73 CARTON(S) 692.15 6.244" 的最後一欄 (VOL)，再退回費用行 "5.762 CBM X"
+        cbm_val = cbm_val or _search(r"CARTON\(S\)[^\n]*?\s[\d,]+\.\d+\s+([\d.]+)[ \t]*$", text) \
+            or _search(r"([\d.]+)\s+CBM\s+X\b", text)
         header["volume"] = _fmt_volume(cbm=cbm_val) if cbm_val else None
 
     # 這種帳單沒有主提單，留空給 expand_to_rows() 補 N/A
