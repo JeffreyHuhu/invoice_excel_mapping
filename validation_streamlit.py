@@ -60,7 +60,8 @@ REQUIRED_HEADER_FIELDS = ("invoice_date", "invoice_no", "supplier", "consignee")
 
 # 個別供應商另外的必要欄位 (使用者在答案 Excel 提示列標「(必要)」的欄位)：
 # {供應商: {欄位: 缺值時的等級}}。"container_no" 只在整櫃 (材積是「數量X櫃型」) 時才必要。
-# - KUEHNE_NAGEL (使用者 2026-10-31，樣本 JKT1521476)：Volume 缺值先列 WARN；散貨櫃號非必要；
+# - KUEHNE_NAGEL (使用者 2026-10-31，樣本 JKT1521476)：Volume 缺值先列 WARN；貨櫃號碼非必要 (2026-11-02 使用者規定：
+#   沒抓到櫃號不計入 ERROR，有值仍檢查格式)；
 #   沒有 VAT 的帳單只要通過金額稽核就可以，所以 VAT 不列入。
 # - DHL / INDOPROSTIME_TRANSPORT / OPL (使用者 2026-10-31，KEY 值範例)：缺值列 WARN (等級最多「中」)。
 #   VAT 一律不列入：這幾家都有含稅總額勾稽，帳單有印稅金卻漏抓會勾稽不符 (ERROR)，沒有稅金不扣分。
@@ -70,7 +71,7 @@ SUPPLIER_REQUIRED_FIELDS = {
     "KUEHNE_NAGEL": {
         "arrive_date": "ERROR", "onboard_date": "ERROR", "bl_no": "ERROR",
         "port_of_loading": "ERROR", "port_of_discharge": "ERROR", "vessel": "ERROR",
-        "volume": "WARN", "container_no": "ERROR",
+        "volume": "WARN",
     },
     "DHL": {"onboard_date": _W, "bl_no": _W, "port_of_loading": _W, "port_of_discharge": _W,
             "volume": _W},
