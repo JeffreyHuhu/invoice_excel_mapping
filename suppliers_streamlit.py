@@ -330,6 +330,10 @@ def detect_kuehne_nagel(text: str) -> bool:
     # 越南 KN (VN10，越南文電子發票/附件清單) 另有規則 KN_VN
     if "KUEHNE + NAGEL" in upper and ("HÓA ĐƠN" in upper or "HOÁ ĐƠN" in upper or "VIỆT NAM" in upper):
         return False
+    # DSV 印尼帳單的附件 (例如 "Nama : KUEHNE NAGEL INDONESIA") 會印 KUEHNE NAGEL，
+    # 但 KN 先註冊，所以這裡要先排除 DSV 帳單 (使用者 2026-11-02 回報)
+    if detect_dsv(text):
+        return False
     return "KUEHNE" in upper and "NAGEL" in upper
 
 
