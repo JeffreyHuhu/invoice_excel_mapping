@@ -546,7 +546,11 @@ def _kn_extract_containers(text: str) -> List[tuple]:
 def _kn_container_type(kind: str) -> str:
     """KN 櫃型代碼轉成跨供應商寫法 (完整代碼)：一般用途櫃 GE 寫成 GP (跟 YUSEN 一致)，
     其他照寫，例如 HC -> HC。(2026-11-02 使用者決定)"""
-    return "GP" if kind.upper() == "GE" else kind.upper()
+    kind = kind.upper()
+    # HCFOR40 (QTY TYPE 印 "40HCFOR40"，2026-11-02 使用者規定視為 40G)：照 GE 處理寫成 GP
+    if kind in ("GE", "HCFOR40"):
+        return "GP"
+    return kind
 
 
 def _kn_container_volume(containers: List[tuple]) -> Optional[str]:
@@ -704,7 +708,7 @@ def parse_kuehne_nagel(text: str) -> Dict:
     containers = _kn_extract_containers(text)
     movement = (_search(r"MOVEMENT TYPE\s*:\s*(\S+)", text) or "").upper()
     qty_types = [(int(q), f"{s}{_kn_container_type(k)}") for q, s, k in
-                 re.findall(r"(\d+)\s+(\d{2})'\s*([A-Z]{2})\s+CONTAINER", text)]
+                 re.findall(r"(\d+)\s+(\d{2})'?\s*([A-Z]{2}(?:FOR\d{2})?)\s+CONTAINER", text)]
     if "CFS" not in movement and containers:
         header["container_no"] = ", ".join(c[0] for c in containers)
         header["volume"] = _kn_container_volume(containers)
