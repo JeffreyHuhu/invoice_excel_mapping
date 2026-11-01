@@ -692,10 +692,19 @@ def parse_kuehne_nagel(text: str) -> Dict:
     #     櫃號串成 Container no.，櫃型彙總成櫃量 (例如 "1X40G+1X40H+1X20G")
     #     填 Volume，整張帳單每一列都一樣。
     #   - 散貨 (LCL)：沒有櫃號，Volume 填 "AS PER ATTACHED 重量 材積" 的材積數字。
+    # 2026-11-02 使用者規定 (Volume 來源看 MOVEMENT TYPE)：
+    #   - MOVEMENT TYPE 有 CFS 字樣 -> 抓 VOL (散貨，下面 else 分支)
+    #   - 其他 (例如 CY/CY) 且沒有櫃號 -> 抓 QTY TYPE，"1 40' HC" 寫成 "1X40HC"
     containers = _kn_extract_containers(text)
-    if containers:
+    movement = (_search(r"MOVEMENT TYPE\s*:\s*(\S+)", text) or "").upper()
+    qty_types = [(int(q), f"{s}{k}") for q, s, k in
+                 re.findall(r"(\d+)\s+(\d{2})'\s*([A-Z]{2})\s+CONTAINER", text)]
+    if "CFS" not in movement and containers:
         header["container_no"] = ", ".join(c[0] for c in containers)
         header["volume"] = _kn_container_volume(containers)
+    elif "CFS" not in movement and qty_types:
+        header["container_no"] = None
+        header["volume"] = _fmt_volume(containers=qty_types)
     else:
         header["container_no"] = None
         m2 = re.search(r"AS PER ATTACHED\s+([\d,\.]+)\s+([\d,\.]+)", text)
