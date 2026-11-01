@@ -5466,10 +5466,62 @@ def _ecomet_rekap_sheet(name: str, rows: List[list]) -> Optional[Tuple[Dict, Dic
             {"invoice_no": inv.group(1), "total": total, "grand_total": None, "final_total": None})
 
 
+def _ecomet_nikomas_sheet(name: str, rows: List[list]) -> Optional[Tuple[Dict, Dict]]:
+    # 沒有 "INV :" 抬頭的 REKAP (2025-11 NIKOMAS .xls 版型，POUCHEN 11 月抽樣)：
+    # 發票號碼用 JOB NO :，發票日期用 TANGGAL ORDER，NO POLISI 寫入船名 (依答案檔)，
+    # 材積與 ORDER NO 留空 (依答案檔)。只在上面 _ecomet_rekap_sheet() 回傳 None 時才用。
+    head = next((i for i, r in enumerate(rows[:20])
+                 if {"TRUCKING", "JUMLAH", "CONTAINER"} <= {_vn_text(c).strip().upper() for c in r}), None)
+    if head is None:
+        return None
+    labels = [_vn_text(c).strip().upper() for c in rows[head]]
+    start, end = labels.index("TRUCKING"), labels.index("JUMLAH")
+    col = {k: labels.index(k) for k in ("CONTAINER", "NO POLISI", "JOB NO :") if k in labels}
+
+    def label(k):
+        sub = _vn_text(_vn_cell(rows[head + 1], k)).strip() if head + 1 < len(rows) else ""
+        return re.sub(r"\s+", " ", f"{_vn_text(rows[head][k]).strip()} {sub}").strip()
+
+    items: List[Dict] = []
+    total = None
+    dates, jobs = [], []
+    for r in rows[head + 1:]:
+        if _vn_num(_vn_cell(r, 0)) is not None:          # 明細列 (NO 欄是序號)
+            job = _vn_text(_vn_cell(r, col["JOB NO :"])).strip() if "JOB NO :" in col else ""
+            if job:
+                jobs.append(job)
+            extra = {"container_no": _vn_text(_vn_cell(r, col["CONTAINER"])).strip() or None
+                     if "CONTAINER" in col else None,
+                     "vessel": _vn_text(_vn_cell(r, col["NO POLISI"])).strip() or None
+                     if "NO POLISI" in col else None,
+                     "volume": None, "order_no": None}
+            for k in range(start, end):
+                amount = _vn_amount(_vn_cell(r, k))
+                if amount:
+                    items.append({"description": label(k), "amount": amount, "vat": None, **extra})
+            d = _vn_cell(r, 1)
+            if isinstance(d, (datetime.date, datetime.datetime)):
+                dates.append(d)
+        elif not _vn_text(_vn_cell(r, 0)).strip() and _vn_num(_vn_cell(r, start)) is not None:
+            total = _vn_num(_vn_cell(r, end))                 # 各欄合計列：第一段到這裡結束
+            break
+    if not items or not jobs:
+        return None
+    inv = jobs[0]
+    # 同一段的 TANGGAL ORDER 都相同時取最後一個，與 INV 版型的裝櫃日做法一致
+    date = max(dates).strftime("%d %b %Y") if dates else None
+    consignee = next((_vn_text(c).strip() for r in rows[1:head] for c in r
+                      if _vn_text(c).strip().upper().startswith("PT.") and "ECOMET" not in _vn_text(c).upper()), None)
+    header = {"invoice_no": inv, "supplier": _ECOMET_SUPPLIER, "consignee": consignee,
+              "invoice_date": date}
+    return ({"header": header, "items": items},
+            {"invoice_no": inv, "total": total, "grand_total": None, "final_total": None})
+
+
 def _ecomet_sheets(book) -> Tuple[List[Dict], List[Dict]]:
     found: Dict[str, Tuple[bool, Tuple[Dict, Dict]]] = {}
     for name, rows in book.sheets:
-        got = _ecomet_rekap_sheet(name, rows)
+        got = _ecomet_rekap_sheet(name, rows) or _ecomet_nikomas_sheet(name, rows)
         if not got:
             continue
         inv, revise = got[1]["invoice_no"], "REVISE" in name.upper()
