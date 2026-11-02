@@ -162,6 +162,9 @@ def detect_dwiharta(text: str) -> bool:
     # (使用者 2026-11-02 回報 DSV-EDC1294431)
     if detect_dsv(text):
         return False
+    # DHL 快遞帳單的收件人/託運人可能是 DWIHARTA (2026-11-03 低等級 SRGR003150988)
+    if _is_dhl_express_bill(text):
+        return False
     return "DWIHARTA" in text.upper()
 
 
@@ -340,6 +343,9 @@ def detect_kuehne_nagel(text: str) -> bool:
     # DSV 印尼帳單的附件 (例如 "Nama : KUEHNE NAGEL INDONESIA") 會印 KUEHNE NAGEL，
     # 但 KN 先註冊，所以這裡要先排除 DSV 帳單 (使用者 2026-11-02 回報)
     if detect_dsv(text):
+        return False
+    # DHL 快遞帳單的附件/託運人可能印 KUEHNE NAGEL (2026-11-03 低等級 SRGR002928462)
+    if _is_dhl_express_bill(text):
         return False
     return "KUEHNE" in upper and "NAGEL" in upper
 
@@ -2986,6 +2992,9 @@ _EXPRESS_DATE_PATTERN = re.compile(r"^(\d{1,2})/([A-Za-z]{3})/(\d{2})")
 
 
 def detect_express(text: str) -> bool:
+    # DHL 快遞帳單的託運人可能是 EXPRESS MAXIMUM (2026-11-03 低等級 SRGR003191724)
+    if _is_dhl_express_bill(text):
+        return False
     return "EXPRESS MAXIMUM" in text.upper()
 
 
@@ -3829,6 +3838,15 @@ def _is_dhl_vnpt(text: str) -> bool:
     """越南 DHL-VNPT 快遞 (VN04) 的帳單：別家的 detect 都要排除 (附件裡常出現 APL、DSV
     等託運人名稱，2026-10-28 抽樣)。"""
     return re.search(r"DHL\s*-?\s*VNPT", text.upper()) is not None
+
+
+def _is_dhl_express_bill(text: str) -> bool:
+    """DHL Express 國內/快遞帳單 (供應商抬頭 "PT BIROTIKA SEMESTA/DHL EXPRESS")。
+    託運人、收件人、附件 (Faktur Pajak) 常印 EXPRESS MAXIMUM、KUEHNE NAGEL、
+    DWIHARTA 等名稱，這些供應商先註冊、detect 只看字串，會先把 DHL 帳單認走，
+    所以他們的 detect 要先呼叫這裡排除 (2026-11-03 低等級 SRGR003191724/002928462/003150988)。"""
+    upper = text.upper()
+    return "BIROTIKA SEMESTA" in upper and "DHL EXPRESS" in upper
 
 
 def detect_dhl(text: str) -> bool:
