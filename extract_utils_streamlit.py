@@ -30,7 +30,9 @@ import sys
 import json
 import math
 import datetime
+import threading
 from collections import OrderedDict
+from concurrent.futures import ThreadPoolExecutor
 from typing import Callable, Dict, List, Optional, Tuple
 
 import pdfplumber
@@ -128,6 +130,17 @@ DISPLAY_HEADERS: Dict[str, str] = {
 # find_best_extraction() 會用不同的 kwargs 重複呼叫這支函式最多 20 次，
 # 用快取避免同一頁被重複 OCR 20 次、白白浪費時間。
 _OCR_TEXT_CACHE: Dict[Tuple[str, int], str] = {}
+# OCR 快取上限 (每頁約數 KB 文字)：批次跑很久也不會無限制長大 (2026-11-03)
+_OCR_CACHE_LIMIT = 2000
+_OCR_CACHE_LOCK = threading.Lock()
+
+
+def _cache_put(cache: Dict, key, value) -> None:
+    """寫入 OCR 快取；超過上限就丟掉最早放進去的一筆 (dict 保持插入順序)。"""
+    with _OCR_CACHE_LOCK:
+        cache[key] = value
+        while len(cache) > _OCR_CACHE_LIMIT:
+            cache.pop(next(iter(cache)), None)
 
 
 def _ocr_page_text(pdf_path: str, page_index: int, page) -> str:
@@ -140,8 +153,9 @@ def _ocr_page_text(pdf_path: str, page_index: int, page) -> str:
     整個擷取流程掛掉。
     """
     cache_key = (pdf_path, page_index)
-    if cache_key in _OCR_TEXT_CACHE:
-        return _OCR_TEXT_CACHE[cache_key]
+    cached = _OCR_TEXT_CACHE.get(cache_key)
+    if cached is not None:
+        return cached
 
     text = ""
     if _OCR_AVAILABLE:
@@ -165,7 +179,7 @@ def _ocr_page_text(pdf_path: str, page_index: int, page) -> str:
         except Exception:
             text = ""
 
-    _OCR_TEXT_CACHE[cache_key] = text
+    _cache_put(_OCR_TEXT_CACHE, cache_key, text)
     return text
 
 
@@ -187,24 +201,64 @@ def _ocr_page_fast(pdf_path: str, page_index: int, page) -> Tuple[str, bool]:
     """低解析度 OCR，回傳 (文字, 是否轉向)。轉向的頁 (例如 DHL 第 2 頁) 低解析度
     讀出來是亂碼、判斷不了，呼叫端一律改用高解析度。"""
     cache_key = (pdf_path, page_index)
-    if cache_key not in _OCR_FAST_CACHE:
-        text, rotated = "", False
-        if _OCR_AVAILABLE:
-            try:
-                image = page.to_image(resolution=_OCR_FAST_DPI).original
-                text = pytesseract.image_to_string(image) or ""
-                # 轉向偵測每頁約 1 秒，比低解析度 OCR 還貴：只有讀出來像亂碼
-                # 的頁才做
-                if _looks_garbled(text):
+    cached = _OCR_FAST_CACHE.get(cache_key)
+    if cached is not None:
+        return cached
+    result = ("", False)
+    if _OCR_AVAILABLE:
+        try:
+            result = _fast_ocr_image(page.to_image(resolution=_OCR_FAST_DPI).original)
+        except Exception:
+            result = ("", False)
+    _cache_put(_OCR_FAST_CACHE, cache_key, result)
+    return result
+
+
+def _fast_ocr_image(image) -> Tuple[str, bool]:
+    """低解析度影像 OCR，回傳 (文字, 是否轉向)。只做 tesseract，不碰 pdfplumber，
+    可以放在執行緒裡跑。"""
+    text = pytesseract.image_to_string(image) or ""
+    rotated = False
+    # 轉向偵測每頁約 1 秒，比低解析度 OCR 還貴：只有讀出來像亂碼的頁才做
+    if _looks_garbled(text):
+        try:
+            m = re.search(r"Rotate:\s*(\d+)", pytesseract.image_to_osd(image))
+            rotated = bool(m and int(m.group(1)))
+        except Exception:
+            rotated = False
+    return text, rotated
+
+
+# 低解析度 OCR 的執行緒數 (一半實體核心)。tesseract 是另外開的程序，執行緒之間
+# 不會互相卡住 (pytesseract 等待子程序時會釋放 GIL)。
+_OCR_THREADS = max(1, (os.cpu_count() or 2) // 2)
+
+
+def _prefetch_fast_ocr(pdf_path: str, page_indexes: List[int]) -> None:
+    """掃描頁的低解析度 OCR 用多執行緒同時跑，結果放進 _OCR_FAST_CACHE，之後
+    呼叫 _ocr_page_fast() 直接命中快取。分工：頁面渲染在主執行緒依序做
+    (pdfium 不保證多執行緒安全，平行渲染曾造成 DSV 無訊息中止)，tesseract
+    OCR 才平行 (它是另外開的程序)。分批渲染，不會同時把全部頁面影像放進記憶體。
+    個別頁失敗就略過，之後仍由循序路徑處理。"""
+    todo = [i for i in page_indexes if (pdf_path, i) not in _OCR_FAST_CACHE]
+    if len(todo) < 2 or not _OCR_AVAILABLE:
+        return
+    batch = _OCR_THREADS * 2
+    try:
+        with ThreadPoolExecutor(max_workers=_OCR_THREADS) as executor, \
+                pdfplumber.open(pdf_path) as pdf:
+            for start in range(0, len(todo), batch):
+                images = []
+                for i in todo[start:start + batch]:
                     try:
-                        m = re.search(r"Rotate:\s*(\d+)", pytesseract.image_to_osd(image))
-                        rotated = bool(m and int(m.group(1)))
+                        images.append((i, pdf.pages[i].to_image(resolution=_OCR_FAST_DPI).original))
                     except Exception:
-                        rotated = False
-            except Exception:
-                text = ""
-        _OCR_FAST_CACHE[cache_key] = (text, rotated)
-    return _OCR_FAST_CACHE[cache_key]
+                        pass
+                ocr = executor.map(lambda item: _fast_ocr_image(item[1]), images)
+                for (i, _), res in zip(images, ocr):
+                    _cache_put(_OCR_FAST_CACHE, (pdf_path, i), res)
+    except Exception:
+        pass
 
 
 _OCR_PSM_CACHE: Dict[Tuple[str, int, int], str] = {}
@@ -218,21 +272,23 @@ def _ocr_page_with_psm(pdf_path: str, page_index: int, psm: int, contrast: bool 
     GALUH 的金額欄跟費用名稱分得很開，預設模式會漏掉整欄金額，psm 6 (整頁
     當成一個文字區塊) 才讀得到。供應商用 register_supplier(ocr_psm=6) 指定。"""
     cache_key = (pdf_path, page_index, psm, contrast)
-    if cache_key not in _OCR_PSM_CACHE:
-        text = ""
-        if _OCR_AVAILABLE:
-            try:
-                with pdfplumber.open(pdf_path) as pdf:
-                    image = pdf.pages[page_index].to_image(resolution=_OCR_PSM_DPI).original
-                if contrast:
-                    # 灰階 + 自動對比 (contrast=True)：見 invoice_text() 的自我檢查
-                    from PIL import ImageOps
-                    image = ImageOps.autocontrast(image.convert("L"))
-                text = pytesseract.image_to_string(image, config=f"--psm {psm}") or ""
-            except Exception:
-                text = ""
-        _OCR_PSM_CACHE[cache_key] = text
-    return _OCR_PSM_CACHE[cache_key]
+    cached = _OCR_PSM_CACHE.get(cache_key)
+    if cached is not None:
+        return cached
+    text = ""
+    if _OCR_AVAILABLE:
+        try:
+            with pdfplumber.open(pdf_path) as pdf:
+                image = pdf.pages[page_index].to_image(resolution=_OCR_PSM_DPI).original
+            if contrast:
+                # 灰階 + 自動對比 (contrast=True)：見 invoice_text() 的自我檢查
+                from PIL import ImageOps
+                image = ImageOps.autocontrast(image.convert("L"))
+            text = pytesseract.image_to_string(image, config=f"--psm {psm}") or ""
+        except Exception:
+            text = ""
+    _cache_put(_OCR_PSM_CACHE, cache_key, text)
+    return text
 
 
 def limited_pages(pdf):
@@ -306,8 +362,9 @@ def _ocr_page_text_enhanced(pdf_path: str, page_index: int, page) -> str:
     原本給『沒有文字層』的一般掃描件供應商 (例如 DHL) 使用的既有行為。
     """
     cache_key = (pdf_path, page_index)
-    if cache_key in _OCR_ENHANCED_TEXT_CACHE:
-        return _OCR_ENHANCED_TEXT_CACHE[cache_key]
+    cached = _OCR_ENHANCED_TEXT_CACHE.get(cache_key)
+    if cached is not None:
+        return cached
 
     text = ""
     if _OCR_AVAILABLE:
@@ -326,7 +383,7 @@ def _ocr_page_text_enhanced(pdf_path: str, page_index: int, page) -> str:
         except Exception:
             text = ""
 
-    _OCR_ENHANCED_TEXT_CACHE[cache_key] = text
+    _cache_put(_OCR_ENHANCED_TEXT_CACHE, cache_key, text)
     return text
 
 
@@ -458,6 +515,7 @@ def extract_pages_from_pdf(pdf_path: str, **pdfplumber_kwargs) -> List[str]:
         if scanned:
             # 沒有文字層的掃描頁：先低解析度，認得出是帳單頁的再高解析度重做；
             # 低解析度一頁都認不出 (例如整份掃歪) 時全部用高解析度，跟以前一樣
+            _prefetch_fast_ocr(pdf_path, scanned)
             fast = {i: _ocr_page_fast(pdf_path, i, pdf.pages[i]) for i in scanned}
             full = [i for i in scanned if _page_needs_full_ocr(fast[i])]
             if not any(detect_supplier(fast[i][0]) for i in scanned):
