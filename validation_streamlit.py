@@ -91,7 +91,6 @@ SUPPLIER_REQUIRED_WHEN = {
 # 選填欄位的基本格式規則 (WARN)：(欄位, 規則代碼, 檢查函式, 說明)
 _CONTAINER_NO_RE = re.compile(r"[A-Z]{4}\d{6,7}")
 _OPTIONAL_FORMAT_RULES = (
-    ("order_no", "ID_NO_DIGIT", lambda v: re.search(r"\d", v), "單號裡沒有任何數字"),
     ("bl_no", "ID_NO_DIGIT", lambda v: re.search(r"\d", v), "提單號碼裡沒有任何數字"),
     ("mbl_no", "ID_NO_DIGIT", lambda v: re.search(r"\d", v), "主提單號碼裡沒有任何數字"),
     # 貨櫃號碼可能是多個、中間有空白或換行 (例如 "BMOU 4921920")，去掉空白後
@@ -124,8 +123,6 @@ KNOWN_SOURCE_ISSUES: Dict[str, Dict[Tuple[str, str], Tuple[str, Optional[Union[s
         # ETA 晚於今天 60 天以上 (例如 5617816192 ETD 14-Jul-2026 ETA 26-Feb-2027)：
         # 照抄 PDF 的「ETA:」，使用者 2026-10-28：在 Excel 備註就好，不計入
         ("arrive_date", "DATE_OUT_OF_RANGE"): ("MAERSK 原帳單的 ETA 本身就寫這個日期", None),
-        # Order No. 原帳單就是 FCRMENU (沒有數字)，使用者 2026-10-31 確認不計入
-        ("order_no", "ID_NO_DIGIT"): ("MAERSK 原帳單的 Order No. 本身就是 FCRMENU", {"FCRMENU"}),
     },
     # KUEHNE_NAGEL 原帳單的 ETD/ATD、ETA/ATA 欄本來就是空白 (使用者 2026-11-01 確認，
     # 例如 JKT1485198、JKT1517926)：只在值為空白時才算，有值但抓不到仍列 ERROR
@@ -133,10 +130,9 @@ KNOWN_SOURCE_ISSUES: Dict[str, Dict[Tuple[str, str], Tuple[str, Optional[Union[s
         ("onboard_date", "MISSING_REQUIRED"): ("KUEHNE NAGEL 原帳單的 ETD/ATD 欄本來就是空白", {"N/A", "None", ""}),
         ("arrive_date", "MISSING_REQUIRED"): ("KUEHNE NAGEL 原帳單的 ETA/ATA 欄本來就是空白", {"N/A", "None", ""}),
     },
-    # DSV 印尼帳單：ORDER 沒有任何數字 (例如 "FIAT, OCTOBER, PWJ") 與 MBL NO. 只有英文、
-    # 沒有任何數字，都是原帳單問題 (使用者 2026-11-02 確認)；只限「沒有數字」的值，有數字但抓不到仍列 ERROR
+    # DSV 印尼帳單：MBL NO. 只有英文、沒有任何數字，是原帳單問題 (使用者 2026-11-02 確認)；
+    # 只限「沒有數字」的值，有數字但抓不到仍列 ERROR
     "DSV": {
-        ("order_no", "ID_NO_DIGIT"): ("DSV 原帳單的 ORDER 號碼本身沒有數字", re.compile(r"[^0-9]+")),
         ("mbl_no", "ID_NO_DIGIT"): ("DSV 原帳單的 MBL NO. 本身只有英文、沒有數字",
                                     re.compile(r"[A-Za-z][A-Za-z .,/\-]*")),
     },
