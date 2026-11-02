@@ -3293,6 +3293,9 @@ def _pancaran_extract_total(text: str) -> Optional[int]:
 
 
 def _dhl_extract_total(text: str) -> Optional[int]:
+    if _dhl_is_forwarding(text):
+        # 海運帳單的未稅小計 "SUBTOTAL 7.316.854" (不含 PPN)
+        return _dhl_fwd_amount(_search(r"SUBTOTAL\s+([\d.]+)", text))
     return _dhl_clean_amount(_search(r"Total\s+Amount\s*\(IDR\)\s+([\d,]+)", text))
 
 
@@ -3306,7 +3309,7 @@ def _dsv_extract_total(text: str) -> Optional[int]:
     raw = _search(r"SUBTOTAL\s+(\d[\d .]{0,20}\d|\d)", text)
     nospace = re.sub(r"\s", "", raw) if raw else ""
     total = _dsv_clean_amount(nospace) if re.fullmatch(r"\d+(?:\.\d+)*", nospace) else None
-    inv = _search(r"^INVOICE\s+(ID\d+)\b", text) if total is not None else None
+    inv = _dsv_invoice_no(_search(r"^INVOICE\s+([I1]D\d+)\b", text)) if total is not None else None
     return {inv: total} if inv else total
 
 
@@ -3832,7 +3835,7 @@ def detect_dhl(text: str) -> bool:
     upper = text.upper()
     if _is_dhl_vnpt(text):
         return False
-    return "BIROTIKA SEMESTA" in upper or "DHL EXPRESS" in upper
+    return "BIROTIKA SEMESTA" in upper or "DHL EXPRESS" in upper or _dhl_is_forwarding(text)
 
 
 def _dhl_fix_ocr_zero(value: Optional[str]) -> Optional[str]:
@@ -4309,6 +4312,85 @@ def _parse_dhl_duty(text: str) -> Dict:
     return {"header": header, "items": items or [{"description": "UNREADABLE", "amount": None, "vat": None}]}
 
 
+# ---------------------------------------------------------------------------
+# (C) PT DHL GLOBAL FORWARDING INDONESIA 海運費用帳單 (2026-11-02 新版型)
+# ---------------------------------------------------------------------------
+#
+# 抬頭是 "PT. DHL GLOBAL FORWARDING INDONESIA"，一張帳單對應一組 HBL/MBL，
+# 不是逐票拆解。費用是「Charges」表，每一列 "Org. <費用名稱> 11%=<VAT>
+# <金額>"，每一列自帶 VAT (金額與 VAT 用「.」當千分位，例如 2.387.500)。
+# 航程、船名/提單、貨櫃列都是單行固定樣式，用 regex 直接抓。
+# 費用名稱前面的 "Org. " 是帳單的費用類別標籤，答案 Excel 不保留，這裡一併去掉。
+
+_DHL_FWD_CHARGE_PATTERN = re.compile(
+    r"^Org\.\s+(?P<desc>.+?)\s+\d+%=(?P<vat>[\d.]+)\s+(?P<amount>[\d.]+)\s*$", re.MULTILINE)
+# "IDJKT = Jakarta, Java, Indonesia 03-09-26 NLRTM = Rotterdam, Netherlands 19-10-26"
+_DHL_FWD_ROUTE_PATTERN = re.compile(
+    r"^(?P<ocode>[A-Z]{5}) = (?P<oname>.+?)\s+(?P<etd>\d{2}-\d{2}-\d{2})\s+"
+    r"(?P<dcode>[A-Z]{5}) = (?P<dname>.+?)\s+(?P<eta>\d{2}-\d{2}-\d{2})\s*$", re.MULTILINE)
+# "ITAL BONNY / N104 / 9786970 N425911687 BDOA07275" (船名 / 航次, IMO, MBL, HBL)
+_DHL_FWD_VESSEL_PATTERN = re.compile(
+    r"^(?P<vessel>.+? / \S+?) / \d+\s+(?P<mbl>\S+)\s+(?P<hbl>\S+)\s*$", re.MULTILINE)
+# "BMOU3159810 - 40GP"
+_DHL_FWD_CONTAINER_PATTERN = re.compile(
+    r"^(?P<cno>[A-Z]{4}\d{7}) - (?P<size>\d{2})(?P<kind>[A-Z]{1,2})\s*$", re.MULTILINE)
+
+
+def _dhl_is_forwarding(text: str) -> bool:
+    return "DHL GLOBAL FORWARDING INDONESIA" in text.upper() and "PPN IN IDR" in text.upper()
+
+
+def _dhl_fwd_amount(text: Optional[str]) -> Optional[int]:
+    """'2.387.500' (點當千分位) -> 2387500；None 或非數字回傳 None。"""
+    if not text:
+        return None
+    digits = text.replace(".", "")
+    return int(digits) if digits.isdigit() else None
+
+
+def _dhl_parse_short_date(text: Optional[str]) -> Optional[str]:
+    """'03-09-26' (DD-MM-YY) -> '03 Sep 2026'。"""
+    m = re.match(r"(\d{1,2})-(\d{1,2})-(\d{2})$", text or "")
+    return _format_date_en(m.group(1), m.group(2), 2000 + int(m.group(3))) if m else None
+
+
+def _parse_dhl_forwarding(text: str) -> Dict:
+    header: Dict[str, Optional[str]] = {"supplier": "PT. DHL GLOBAL FORWARDING INDONESIA"}
+    header["invoice_no"] = _search(r"^INVOICE\s+([A-Z]\d{5,})\s*$", text)
+    date_m = re.search(r"INVOICE DATE\s*(\d{1,2})-([A-Za-z]{3})-(\d{2})", text)
+    header["invoice_date"] = (
+        _format_date_en_from_month_name(date_m.group(1), date_m.group(2), 2000 + int(date_m.group(3)))
+        if date_m else None)
+    # 左上角客戶名稱 (INVOICE DATE 前面那一段) 同時是 Shipper 與 CONSIGNEE (2026-11-02 使用者確認)
+    client = _search(r"^(.+?)\s+INVOICE DATE", text)
+    header["shipper"] = client
+    header["consignee"] = client
+    header["order_no"] = _search(r"REFERENCE TYPE & NUMBERS\s*\n(.+)", text)
+
+    route = _DHL_FWD_ROUTE_PATTERN.search(text)
+    header["port_of_loading"] = f"{route.group('ocode')} = {route.group('oname')}" if route else None
+    header["port_of_discharge"] = f"{route.group('dcode')} = {route.group('dname')}" if route else None
+    header["onboard_date"] = _dhl_parse_short_date(route.group("etd")) if route else None
+    header["arrive_date"] = _dhl_parse_short_date(route.group("eta")) if route else None
+
+    vessel = _DHL_FWD_VESSEL_PATTERN.search(text)
+    header["vessel"] = vessel.group("vessel") if vessel else None
+    header["mbl_no"] = vessel.group("mbl") if vessel else None
+    header["bl_no"] = vessel.group("hbl") if vessel else None
+
+    containers = list(_DHL_FWD_CONTAINER_PATTERN.finditer(text))
+    header["container_no"] = ", ".join(m.group("cno") for m in containers) or None
+    header["volume"] = _fmt_volume(
+        containers=[(1, f"{m.group('size')}{m.group('kind')}") for m in containers])
+
+    # 每一列費用自帶 VAT (見上面區塊註解)
+    items = [{"description": m.group("desc").strip(),
+              "amount": _dhl_fwd_amount(m.group("amount")),
+              "vat": _dhl_fwd_amount(m.group("vat"))}
+             for m in _DHL_FWD_CHARGE_PATTERN.finditer(text)]
+    return {"header": header, "items": items}
+
+
 def _dhl_is_unreadable(text: str) -> bool:
     """海關報關文件 (BC 1.1 艙單) 被混進 DHL 帳單，且沒有任何帳單表格標記：
     無法判讀，不硬拆成費用項目 (使用者 2026-10-31 確認：判 ERROR，原因無法判讀；BDOIR00051508)。
@@ -4325,6 +4407,8 @@ def parse_dhl(text: str) -> Dict:
         # 標記值要跟 validation_streamlit.UNREADABLE_DESC 一致 (驗證層判 ERROR)
         result = {"header": _dhl_common_header(text),
                   "items": [{"description": "UNREADABLE", "amount": None, "vat": None}]}
+    elif _dhl_is_forwarding(text):
+        result = _parse_dhl_forwarding(text)
     elif _dhl_is_duty(text):
         result = _parse_dhl_duty(text)
     elif _dhl_is_regular(text) and (regular := _parse_dhl_regular(text)) is not None:
@@ -4340,6 +4424,9 @@ def _dhl_extract_grand_total(text: str) -> Optional[int]:
     """含稅總額 = 每一票最後單獨一行的總費用 (例如 "2,917,670" = 該票費用 + VAT)
     加總 (使用者 2026-10-27 提示：每一票的項目總額 + VAT = 每一票的總費用)；
     找不到就用第 1 頁 Total Amount (IDR) 的含稅總額。"""
+    if _dhl_is_forwarding(text):
+        # 海運帳單的含稅總額 "TOTAL IDR 8.121.708"
+        return _dhl_fwd_amount(_search(r"^TOTAL IDR\s+([\d.]+)", text))
     # 只看逐票明細 (第一個 "Air Waybill" 表頭到最後一個 "Service Sub Total")，
     # 不吃到後面附件 (報關單、商業發票) 裡單獨一行的數字
     start = text.find("Air Waybill")
@@ -4401,11 +4488,25 @@ _DSV_AIR_FLIGHT_PATTERN = re.compile(
     r"^(?P<flight>[A-Z0-9]{2}\d{2,4})\s*/\s*\S+\s*/\s*\S+\s+(?P<mawb>\d[\d-]*)\s+(?P<hawb>[A-Z0-9][A-Z0-9-]*)\s*$",
     re.MULTILINE,
 )
+# 船名/航次 | 船運號碼 (OCEAN BILL OF LADING) | 分提單號碼 (HOUSE BILL OF LADING)。
+# 第 4 段 (IMO/REFERENCE) 可能有逗號與空白 ("CID1850383, CSG322832")，前面一律略過
 _DSV_VESSEL_BL_PATTERN = re.compile(
-    r"^(?P<vessel>.+?)\s*/\s*(?P<voyage>\S+)\s*/\s*\S+\s*/\s*\S+\s+"
-    r"(?P<ocean_bl>\S+)\s+(?P<house_bl>\S+)$",
+    r"^(?P<vessel>.+?)\s*/\s*(?P<voyage>\S+)\s*/\s*\S+\s*/\s*(?:[^\n]*?\s)?"
+    r"(?P<ocean_bl>[A-Z0-9]+),?\s+(?P<house_bl>[A-Z0-9]+)$",
     re.MULTILINE,
 )
+# 船運號碼可能換行接在下一行 ("OOLU2323060790, EDC1665906" 下面還有 "ONEYSING15012400")
+_DSV_OCEAN_BL_CONT_PATTERN = re.compile(r"[ \t]*\n[ \t]*(?P<bl>[A-Z]+\d{6,})[ \t]*(?=\n|$)")
+# 費用行的金額讀不出來 ("Customs EDI Fee - Base Rate IDR 300000,00 33.000 ys")：仍列出，金額 N/A
+_DSV_UNREADABLE_ITEM_PATTERN = re.compile(
+    r"^(?P<desc>[A-Za-z][^\n]*?)[ \t]+(?:\d+%=)?(?P<ppn>\d{1,3}\.\d{3})[ \t]+(?P<junk>[A-Za-z][^\n]*)$",
+    re.MULTILINE,
+)
+
+
+def _dsv_invoice_no(value: Optional[str]) -> Optional[str]:
+    """DSV 發票號碼一律是 ID 開頭；掃描時 I 常被讀成 1 ("1D610315221"，2026-11-02)。"""
+    return re.sub(r"^1D", "ID", value) if value else value
 
 
 def _dsv_parse_date(text: Optional[str]) -> Optional[str]:
@@ -4468,6 +4569,14 @@ def _dsv_extract_items(text: str) -> List[Dict]:
             # 本來就有抓這個群組，只是先前沒有用上。
             "vat": _dsv_clean_amount(m.group("ppn")),
         })
+    # 金額讀不出來的費用行：照列，金額 N/A，讓驗證層標出來 (2026-11-02 EDC1591119 Customs EDI Fee)
+    if sec:
+        for m in _DSV_UNREADABLE_ITEM_PATTERN.finditer(sec.group(1)):
+            items.append({
+                "description": re.split(r"\s+-\s+|\s+IDR\s", m.group("desc").strip())[0],
+                "amount": None,
+                "vat": _dsv_clean_amount(m.group("ppn")),
+            })
     return items
 
 
@@ -4475,7 +4584,7 @@ def parse_dsv(text: str) -> Dict:
     header: Dict[str, Optional[str]] = {}
 
     header["supplier"] = "PT DSV Transport Indonesia"
-    header["invoice_no"] = _search(r"INVOICE\s+(\S+)\s+ORIGINAL", text)
+    header["invoice_no"] = _dsv_invoice_no(_search(r"INVOICE\s+(\S+)\s+ORIGINAL", text))
 
     # 掃描檔的標籤可能變成 "INVOICEDATE" 或前面多一個 "["：("PT. HARDASES ABADI INDONESIA [INVOICEDATE 23-Apr-26"，
     # 2026-11-02 掃描 INV000000484196)
@@ -4535,8 +4644,11 @@ def parse_dsv(text: str) -> Dict:
         m = _DSV_VESSEL_BL_PATTERN.search(sec.group(1))
         if m:
             header["vessel"] = f"{m.group('vessel').strip()} / {m.group('voyage').strip()}"
-            header["bl_no"] = m.group("house_bl").strip()
-            header["mbl_no"] = m.group("ocean_bl").strip()
+            # 使用者 2026-11-02 規定：OCEAN BILL OF LADING → B/L NO.，HOUSE BILL OF LADING → MBL NO.
+            cont = _DSV_OCEAN_BL_CONT_PATTERN.match(sec.group(1), m.end())
+            ocean = [m.group("ocean_bl")] + ([cont.group("bl")] if cont else [])
+            header["bl_no"] = ", ".join(ocean)
+            header["mbl_no"] = m.group("house_bl").strip()
             # MBL NO. 只有英文、沒有數字是原帳單問題 (validation_streamlit.py KNOWN_SOURCE_ISSUES)，不要在這裡改擷取規則
         else:
             m = re.search(r"^\s*/\s*([A-Z0-9]+)\s*$", sec.group(1), re.MULTILINE)
