@@ -3884,13 +3884,28 @@ def _dhl_common_header(text: str) -> Dict[str, Optional[str]]:
         header["invoice_no"] = _dhl_fix_ocr_zero(m.group(1))
         header["invoice_date"] = _dhl_parse_date(m.group(4))
     else:
+        # OCR 會把號碼切成 "JKTIRO 1003993"、"JKTIROO8 18492" (數字中間有空白)，
+        # 先容許空白再把空白去掉 (2026-11-02 低等級 INV JKTIR01003993、DHL sample1)
+        spaced = _search(r"Invoice\s+Number\s*:\s*([A-Za-z]{3,6}[O0]*\s*\d[\d ]{5,})", text)
         header["invoice_no"] = _dhl_fix_ocr_zero(
-            _search(r"Invoice\s+Number\s*:\s*(\S+)", text)
+            (spaced.replace(" ", "") if spaced else None)
+            or _search(r"Invoice\s+Number\s*:\s*(\S+)", text)
             or _search(r"\b([A-Z]{2,6}[O0-9]{6,})\b", text)
         )
         header["invoice_date"] = _dhl_parse_date(
             _search(r"Invoice\s+Date\s*:\s*\n?\s*(\d{1,2}-\d{1,2}-\d{4})", text)
         )
+    if not header["invoice_date"]:
+        # 掃描檔標籤常被 OCR 讀錯，例如 "inveice Date: 16-06-2026" (INV JKTIR01003993，2026-11-02)
+        m = re.search(r"[Ii]nv\w{2,5}\s+Date\s*:\s*(\d{1,2}-\d{1,2}-\d{4})", text)
+        if m:
+            header["invoice_date"] = _dhl_parse_date(m.group(1))
+    if not header["invoice_date"]:
+        # INBOUND CHARGES INVOICE (D 開頭發票，2026-11-02 低等級 D000464655 等)：
+        # 標籤只寫 "Date :"，日期格式是 DD/MM/YYYY，轉成 DD-MM-YYYY 再沿用上面的轉換
+        m = re.search(r"(?<![A-Za-z])Date\s*:\s*(\d{1,2})/(\d{1,2})/(\d{4})", text)
+        if m:
+            header["invoice_date"] = _dhl_parse_date(f"{m.group(1)}-{m.group(2)}-{m.group(3)}")
     return header
 
 

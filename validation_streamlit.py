@@ -145,6 +145,14 @@ KNOWN_SOURCE_ISSUES: Dict[str, Dict[Tuple[str, str], Tuple[str, Optional[Union[s
     "DSV_VN": {
         ("arrive_date", "DATE_OUT_OF_RANGE"): ("DSV 原帳單的 ETA 本身就寫這個日期", None),
     },
+    # DHL 印尼帳單：DUTIES & TAXES / INBOUND 版型原帳單沒有開船日、啟運港、材積、提單號碼
+    # (使用者 2026-11-02 確認：列備註，不算錯誤)；只限擷取不到的空值，有值仍照常檢查
+    "DHL": {
+        ("onboard_date", "MISSING_REQUIRED"): ("DHL 原帳單沒有開船日", {"N/A", "None", ""}),
+        ("port_of_loading", "MISSING_REQUIRED"): ("DHL 原帳單沒有啟運港", {"N/A", "None", ""}),
+        ("volume", "MISSING_REQUIRED"): ("DHL 原帳單沒有材積", {"N/A", "None", ""}),
+        ("bl_no", "MISSING_REQUIRED"): ("DHL 原帳單沒有提單號碼", {"N/A", "None", ""}),
+    },
     "DWIHARTA": {
         # 沒有船名時 Vessel 欄印佔位符號 ". / ." (使用者確認)、"- / -"、"0 / 0"
         ("vessel", "TEXT_NO_LETTER"): ("DWIHARTA 沒有船名時 Vessel 欄原文就是佔位符號",
