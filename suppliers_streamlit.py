@@ -4572,10 +4572,11 @@ def _dsv_extract_items(text: str) -> List[Dict]:
     # 金額讀不出來的費用行：照列，金額 N/A，讓驗證層標出來 (2026-11-02 EDC1591119 Customs EDI Fee)
     if sec:
         for m in _DSV_UNREADABLE_ITEM_PATTERN.finditer(sec.group(1)):
+            # VAT 也不填：金額與稅額都 N/A 才會被驗證層判為缺漏 (有稅額的 N/A 金額會被當成稅金列)
             items.append({
                 "description": re.split(r"\s+-\s+|\s+IDR\s", m.group("desc").strip())[0],
                 "amount": None,
-                "vat": _dsv_clean_amount(m.group("ppn")),
+                "vat": None,
             })
     return items
 
