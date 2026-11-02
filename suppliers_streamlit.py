@@ -3885,10 +3885,17 @@ def _dhl_clean_amount(text: Optional[str]) -> Optional[int]:
     return int(text) if text.isdigit() else None
 
 
+def _dhl_is_credit_note(text: str) -> bool:
+    """DHL CREDIT NOTE (INBOUND/OUTBOUND CREDIT NOTE)：抬頭寫 "CREDIT NOTE"。"""
+    return "CREDIT NOTE" in text.upper()
+
+
 def _dhl_common_header(text: str) -> Dict[str, Optional[str]]:
     """兩種子格式共用的抬頭欄位 (收件人/供應商名稱/發票號碼/發票日期)。"""
     header: Dict[str, Optional[str]] = {}
     first_line = text.split("\n", 1)[0].strip()
+    # CREDIT NOTE 的號碼照帳單印的字母 O 保留 (使用者 2026-11-03 確認 BDOIR...)，不換成 0
+    fix_zero = (lambda v: v) if _dhl_is_credit_note(text) else _dhl_fix_ocr_zero
     # Credit Note 的抬頭標籤是 "Credit Number:" (2026-11-03 DHL CREDIT NOTE BDOIR00043483)
     m = re.search(r"^([^\n]+?)[ \t]+(?:Invoice|Credit)[ \t]+Number[ \t]*:", text, re.MULTILINE)
     header["consignee"] = m.group(1).strip() if m else (first_line or None)
@@ -3910,13 +3917,13 @@ def _dhl_common_header(text: str) -> Dict[str, Optional[str]]:
         text,
     )
     if m:
-        header["invoice_no"] = _dhl_fix_ocr_zero(m.group(1))
+        header["invoice_no"] = fix_zero(m.group(1))
         header["invoice_date"] = _dhl_parse_date(m.group(4))
     else:
         # OCR 會把號碼切成 "JKTIRO 1003993"、"JKTIROO8 18492" (數字中間有空白)，
         # 先容許空白再把空白去掉 (2026-11-02 低等級 INV JKTIR01003993、DHL sample1)
         spaced = _search(r"(?:Invoice|Credit)\s+Number\s*:\s*([A-Za-z]{3,6}[O0]*\s*\d[\d ]{5,})", text)
-        header["invoice_no"] = _dhl_fix_ocr_zero(
+        header["invoice_no"] = fix_zero(
             (spaced.replace(" ", "") if spaced else None)
             or _search(r"(?:Invoice|Credit)\s+Number\s*:\s*(\S+)", text)
             or _search(r"\b([A-Z]{2,6}[O0-9]{6,})\b", text)
