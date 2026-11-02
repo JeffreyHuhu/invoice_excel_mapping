@@ -3928,7 +3928,8 @@ _DHL_SERVICE_NAME_PATTERN = re.compile(
 _DHL_EXTRA_CHARGE_NAMES_PATTERN = re.compile(
     r"Analysis of Extra Charges.*?\n(?P<block>.*?)Total Extra Charges", re.DOTALL
 )
-_DHL_EXTRA_CHARGE_NAME_LINE = re.compile(r"^([A-Z][A-Z /&]+[A-Z])\s+[\d,]+\s*$", re.MULTILINE)
+# 名稱可能含 "-" ("NON-CONVEYABLE PIECE - WEIGHT 700,000"，2026-11-02 BDOIR00047737)
+_DHL_EXTRA_CHARGE_NAME_LINE = re.compile(r"^([A-Z][A-Z /&-]+[A-Z])\s+[\d,]+\s*$", re.MULTILINE)
 
 # 每一票主要那一行 (基本運費)，例如：
 #   "7387602585 26-12-2024 XMN, FUJIAN PROVINCE BDO, BANDUNG EXPRESS 14.50
@@ -3984,8 +3985,10 @@ def _parse_dhl_regular(text: str) -> Optional[Dict]:
         # 170,000 1,870 A 171,870")，後半 ("PROTECTION") 落到下一行 (2026-10-31
         # BDOIR00044998)。所以除了完整名稱，也接受至少兩個字的前綴，再對回白名單
         # 裡的完整名稱，白名單的防誤判效果不變。
+        # 另外，第一段夠長的單字也接受 (例如 "NON-CONVEYABLE" 在主行、"PIECE - WEIGHT" 落到下一行，
+        # 2026-11-02 BDOIR00047737)；太短的單字 (FUEL) 不接受，避免誤判地址文字
         prefixes = {" ".join(n.split()[:k]) for n in whitelist
-                    for k in range(2, len(n.split()) + 1)}
+                    for k in range(1 if len(n.split()[0]) >= 6 else 2, len(n.split()) + 1)}
         alt = "|".join(re.escape(p) for p in sorted(prefixes, key=len, reverse=True))
         extra_pattern = re.compile(
             rf"(?P<desc>{alt})\s+(?P<amount>[\d,]+)\s+(?P<vat>[\d,]+)\s+[A-Z]\s+(?P<total>[\d,]+)"
