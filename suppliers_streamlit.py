@@ -3301,10 +3301,11 @@ def _dsv_extract_total(text: str) -> Optional[int]:
     頁首有 "INVOICE ID610295705 ORIGINAL/COPY" 時回傳 {發票號碼: 總額}，直接歸給這張。
     費用說明可能提到另一張發票 ("THE ALREADY BILL UNDER ID610295704")，核心用「頁面上
     出現的發票號碼」歸屬時會配錯張 (2026-10-30 GLOSTAR_12DECEMBER：705 的小計配給 704)。"""
-    # 掃描檔的數字間可能有空白 ("SUBTOTAL 240 . 067"、"SUBTOTAL 2 5 8 .12 3"，2026-11-02 掃描 EDC1103787/EDC1107472)，
-    # 只收「千分位點格式」的數字，去掉空白再換算；後面接著的其他數字不會被併進來
-    raw = _search(r"SUBTOTAL\s+(\d(?:\s?\d){0,2}(?:\s?\.\s?\d(?:\s?\d){2})+|\d+)", text)
-    total = _dsv_clean_amount(re.sub(r"\s", "", raw) if raw else None)
+    # 掃描檔的數字間可能有空白 ("SUBTOTAL 240 . 067"、"SUBTOTAL 2 5 8 .12 3"、"SUBTOTAL 1.2 50 421"，
+    # 2026-11-02 掃描 EDC1103787/EDC1107472/EDC1591126)：抓數字、空白、點，去掉空白後要是「數字與點」才採用
+    raw = _search(r"SUBTOTAL\s+(\d[\d .]{0,20}\d|\d)", text)
+    nospace = re.sub(r"\s", "", raw) if raw else ""
+    total = _dsv_clean_amount(nospace) if re.fullmatch(r"\d+(?:\.\d+)*", nospace) else None
     inv = _search(r"^INVOICE\s+(ID\d+)\b", text) if total is not None else None
     return {inv: total} if inv else total
 
@@ -4476,8 +4477,10 @@ def parse_dsv(text: str) -> Dict:
     header["supplier"] = "PT DSV Transport Indonesia"
     header["invoice_no"] = _search(r"INVOICE\s+(\S+)\s+ORIGINAL", text)
 
+    # 掃描檔的標籤可能變成 "INVOICEDATE" 或前面多一個 "["：("PT. HARDASES ABADI INDONESIA [INVOICEDATE 23-Apr-26"，
+    # 2026-11-02 掃描 INV000000484196)
     m = re.search(
-        r"^(.+?)\s+INVOICE DATE\s+(\d{1,2}-[A-Za-z]{3}-\d{2})", text, re.MULTILINE
+        r"^(.+?)\s*\[?\s*INVOICE\s*DATE\s+(\d{1,2}-[A-Za-z]{3}-\d{2})", text, re.MULTILINE
     )
     if m:
         header["consignee"] = m.group(1).strip()
@@ -4578,8 +4581,17 @@ def _dsv_pages(pdf_path: str) -> List[str]:
     只重做認得出 DSV 帳單的掃描頁，其他頁維持原樣。"""
     pages = extract_pages_from_pdf(pdf_path)
     for i in _scanned_page_indexes(pdf_path):
-        if detect_dsv(pages[i]):
-            pages[i] = _ocr_page_with_psm(pdf_path, i, 4)
+        if not (detect_dsv(pages[i]) or re.search(r"INVOICE\s*\w{0,2}\d{9}\s*ORIGINAL", pages[i])):
+            continue
+        # psm 4 有時整行漏掉 "INVOICE DATE" 那一行 (2026-11-02 掃描 RAF0492357)，psm 6 讀得到，
+        # 但 psm 6 整頁換掉會改變其他欄位 (訂單號、發票號碼)，所以只把 psm 6 的「發票日期那一行」接到 psm 4 後面
+        text = _ocr_page_with_psm(pdf_path, i, 4)
+        if not re.search(r"INVOICE\s*DATE", text):
+            m = re.search(r"^[^\n]*INVOICE\s*DATE\s+\d{1,2}-[A-Za-z]{3}-\d{2}[^\n]*$",
+                          _ocr_page_with_psm(pdf_path, i, 6), re.MULTILINE)
+            if m:
+                text = text + "\n" + m.group(0)
+        pages[i] = text
     return pages
 
 
