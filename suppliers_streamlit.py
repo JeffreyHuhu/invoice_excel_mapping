@@ -3305,7 +3305,7 @@ def _dhl_extract_total(text: str) -> Optional[int]:
     if _dhl_is_forwarding(text):
         # 海運帳單的未稅小計 "SUBTOTAL 7.316.854" (不含 PPN)
         return _dhl_fwd_amount(_search(r"SUBTOTAL\s+([\d.]+)", text))
-    return _dhl_clean_amount(_search(r"Total\s+Amount\s*\(IDR\)\s+([\d,]+)", text))
+    return _dhl_clean_amount(_search(r"Total\s+Amount\s*\(IDR\)\s+(-?[\d,]+)", text))
 
 
 def _dsv_extract_total(text: str) -> Optional[int]:
@@ -3857,7 +3857,8 @@ def detect_dhl(text: str) -> bool:
 
 
 def _dhl_fix_ocr_zero(value: Optional[str]) -> Optional[str]:
-    """OCR 常把發票編號裡的數字 '0' 認成英文字母 'O'，這裡統一換回來。"""
+    """OCR 常把發票編號裡的數字 '0' 認成英文字母 'O'，這裡統一換回來。
+    正確答案的 DHL 發票號碼也是數字 0 (BD0IR00043036)，前綴的 O 也一併換。"""
     if not value:
         return value
     return value.replace("O", "0")
@@ -3875,10 +3876,12 @@ def _dhl_parse_date(text: Optional[str]) -> Optional[str]:
 
 
 def _dhl_clean_amount(text: Optional[str]) -> Optional[int]:
-    """'662,295' (逗號千分位、無小數) -> 662295。"""
+    """'662,295' (逗號千分位、無小數) -> 662295；Credit Note 的負數 '-662,295' -> -662295。"""
     if not text:
         return None
     text = text.strip().replace(",", "")
+    if text.startswith("-"):
+        return -int(text[1:]) if text[1:].isdigit() else None
     return int(text) if text.isdigit() else None
 
 
@@ -3886,7 +3889,8 @@ def _dhl_common_header(text: str) -> Dict[str, Optional[str]]:
     """兩種子格式共用的抬頭欄位 (收件人/供應商名稱/發票號碼/發票日期)。"""
     header: Dict[str, Optional[str]] = {}
     first_line = text.split("\n", 1)[0].strip()
-    m = re.search(r"^([^\n]+?)[ \t]+Invoice[ \t]+Number[ \t]*:", text, re.MULTILINE)
+    # Credit Note 的抬頭標籤是 "Credit Number:" (2026-11-03 DHL CREDIT NOTE BDOIR00043483)
+    m = re.search(r"^([^\n]+?)[ \t]+(?:Invoice|Credit)[ \t]+Number[ \t]*:", text, re.MULTILINE)
     header["consignee"] = m.group(1).strip() if m else (first_line or None)
     header["supplier"] = _search(r"(PT\s+BIROTIKA\s+SEMESTA)\s*/\s*DHL\s+EXPRESS", text)
     if header["supplier"]:
@@ -3898,7 +3902,7 @@ def _dhl_common_header(text: str) -> Dict[str, Optional[str]]:
     # "Invoice Number: BDOIR00043036" 緊接在同一行。兩種都試，抓到哪個
     # 算哪個。
     m = re.search(
-        r"Invoice\s+Number\s*:\s*\n"
+        r"(?:Invoice|Credit)\s+Number\s*:\s*\n"
         r"Account\s+Number\s*:\s*\n"
         r"Tax\s+ID\s*:\s*\n"
         r"Invoice\s+Date\s*:\s*\n\s*\n"
@@ -3911,10 +3915,10 @@ def _dhl_common_header(text: str) -> Dict[str, Optional[str]]:
     else:
         # OCR 會把號碼切成 "JKTIRO 1003993"、"JKTIROO8 18492" (數字中間有空白)，
         # 先容許空白再把空白去掉 (2026-11-02 低等級 INV JKTIR01003993、DHL sample1)
-        spaced = _search(r"Invoice\s+Number\s*:\s*([A-Za-z]{3,6}[O0]*\s*\d[\d ]{5,})", text)
+        spaced = _search(r"(?:Invoice|Credit)\s+Number\s*:\s*([A-Za-z]{3,6}[O0]*\s*\d[\d ]{5,})", text)
         header["invoice_no"] = _dhl_fix_ocr_zero(
             (spaced.replace(" ", "") if spaced else None)
-            or _search(r"Invoice\s+Number\s*:\s*(\S+)", text)
+            or _search(r"(?:Invoice|Credit)\s+Number\s*:\s*(\S+)", text)
             or _search(r"\b([A-Z]{2,6}[O0-9]{6,})\b", text)
         )
         header["invoice_date"] = _dhl_parse_date(
@@ -3938,16 +3942,17 @@ def _dhl_common_header(text: str) -> Dict[str, Optional[str]]:
 # (A) 一般格式：逐票 (Air Waybill) 拆解
 # ---------------------------------------------------------------------------
 
+# 數字前面可能有負號 "-"：Credit Note 的金額、件數、重量都是負數 (2026-11-03 BDOIR00043483)
 _DHL_SERVICE_NAME_PATTERN = re.compile(
     r"Type of Service.*?\n(?:.*\n)*?"
-    r"(?P<svc>[A-Z][A-Z /&]+[A-Z])\s+\d+\s+[\d.]+\s+\d+\s+"
-    r"[\d,]+\s+[\d,]+\s+[\d,]+\s+[\d,]+"
+    r"(?P<svc>[A-Z][A-Z /&]+[A-Z])\s+-?\d+\s+-?[\d.]+\s+-?\d+\s+"
+    r"-?[\d,]+\s+-?[\d,]+\s+-?[\d,]+\s+-?[\d,]+"
 )
 _DHL_EXTRA_CHARGE_NAMES_PATTERN = re.compile(
     r"Analysis of Extra Charges.*?\n(?P<block>.*?)Total Extra Charges", re.DOTALL
 )
 # 名稱可能含 "-" ("NON-CONVEYABLE PIECE - WEIGHT 700,000"，2026-11-02 BDOIR00047737)
-_DHL_EXTRA_CHARGE_NAME_LINE = re.compile(r"^([A-Z][A-Z /&-]+[A-Z])\s+[\d,]+\s*$", re.MULTILINE)
+_DHL_EXTRA_CHARGE_NAME_LINE = re.compile(r"^([A-Z][A-Z /&-]+[A-Z])\s+-?[\d,]+\s*$", re.MULTILINE)
 
 # 每一票主要那一行 (基本運費)，例如：
 #   "7387602585 26-12-2024 XMN, FUJIAN PROVINCE BDO, BANDUNG EXPRESS 14.50
@@ -3964,8 +3969,8 @@ _DHL_MAIN_LINE_PATTERN = re.compile(
     # 地名可能有括號、句點、撇號、連字號 ("MAA, CHENNAI (MADRAS)"，2026-10-27 抽樣)
     r"(?P<ocode>[A-Z]{2,4}),\s*(?P<oregion>[A-Za-z][A-Za-z ().'\-]*?)\s+"
     r"(?P<dcode>[A-Z]{2,4}),\s*(?P<dregion>[A-Za-z][A-Za-z ().'\-]*?)\s+EXPRESS\s+"
-    r"(?P<weight>[\d.]+)\s*[A-Z]?\s+(?P<items>\d+)\s+"
-    r"(?P<charge>[\d,]+)\s+(?P<vat>[\d,]+)\s+[A-Z]\s+(?P<total>[\d,]+)\s*$",
+    r"(?P<weight>-?[\d.]+)\s*[A-Z]?\s+(?P<items>-?\d+)\s+"
+    r"(?P<charge>-?[\d,]+)\s+(?P<vat>-?[\d,]+)\s+[A-Z]\s+(?P<total>-?[\d,]+)\s*$",
     re.MULTILINE,
 )
 
@@ -4009,7 +4014,7 @@ def _parse_dhl_regular(text: str) -> Optional[Dict]:
                     for k in range(1 if len(n.split()[0]) >= 6 else 2, len(n.split()) + 1)}
         alt = "|".join(re.escape(p) for p in sorted(prefixes, key=len, reverse=True))
         extra_pattern = re.compile(
-            rf"(?P<desc>{alt})\s+(?P<amount>[\d,]+)\s+(?P<vat>[\d,]+)\s+[A-Z]\s+(?P<total>[\d,]+)"
+            rf"(?P<desc>{alt})\s+(?P<amount>-?[\d,]+)\s+(?P<vat>-?[\d,]+)\s+[A-Z]\s+(?P<total>-?[\d,]+)"
         )
 
     boundaries = [m.start() for m in main_matches] + [len(text)]
@@ -4453,10 +4458,10 @@ def _dhl_extract_grand_total(text: str) -> Optional[int]:
     start = text.find("Air Waybill")
     end = text.rfind("Service Sub Total")
     detail = text[start:end] if 0 <= start < end else ""
-    per_shipment = re.findall(r"^\s*(\d{1,3}(?:,\d{3})+)\s*$", detail, re.MULTILINE)
+    per_shipment = re.findall(r"^\s*(-?\d{1,3}(?:,\d{3})+)\s*$", detail, re.MULTILINE)
     if per_shipment:
         return sum(_dhl_clean_amount(v) for v in per_shipment)
-    m = re.search(r"Total\s+Amount\s*\(IDR\)\s+[\d,]+\s+[\d,]+\s+([\d,]+)", text)
+    m = re.search(r"Total\s+Amount\s*\(IDR\)\s+-?[\d,]+\s+-?[\d,]+\s+(-?[\d,]+)", text)
     return _dhl_clean_amount(m.group(1)) if m else None
 
 
@@ -5750,7 +5755,7 @@ _HANDAL_NON_ITEM_PREFIXES = (
 _HANDAL_CODE_RE = re.compile(r'\b([A-Z]{4,8}\d{6,10})\b')
 _HANDAL_ORDER_NO_RE = re.compile(r'(?<![A-Z])([A-Z])(\d{5,7})(?!\d)')
 # 發票號碼後面可能多一個字母，例如 "HG01240125S"
-_HANDAL_INVOICE_NO_RE = re.compile(r'\bHG\d{8}[A-Z]{0,2}\b')  # 2026-11-01：後綴可能是 SS (250112SS)
+_HANDAL_INVOICE_NO_RE = re.compile(r'\bHG\s?\d{8}[A-Z]{0,2}\b')  # 2026-11-01：後綴可能是 SS (250112SS)；掃描檔 OCR 常在 HG 後多一個空白 ("HG 10670826")
 _HANDAL_INVOICE_DATE_RE = re.compile(r'\b(\d{1,2}\s+[A-Za-z]+\s+\d{4})\b')
 _HANDAL_ROUTE_RE = re.compile(r'([A-Z][A-Z ]*?) *- *([A-Z][A-Z ]*?) *- *(\d{1,2}/\d{1,2}/\d{4})')
 # 多種櫃型用逗號連起來，例如 "1X20,6X40"
@@ -5867,6 +5872,10 @@ def _handal_parse_date_monthname(s):
     if not m:
         return None
     day, month_name, year = m.groups()
+    # 掃描檔 OCR 常把 "14" 讀成 "44" (使用者 2026-11 樣本 NIKOMAS AGUST 2026)：
+    # 日期不可能超過 31，所以第一碼 4 改成 1
+    if int(day) > 31 and day[0] == "4":
+        day = "1" + day[1:]
     return _format_date_en_from_month_name(day, month_name, year)
 
 
@@ -5947,7 +5956,7 @@ def _handal_extract_header(text: str) -> Dict:
     h['mbl_no'] = code
 
     m = _HANDAL_INVOICE_NO_RE.search(text)
-    h['invoice_no'] = m.group(0) if m else None
+    h['invoice_no'] = re.sub(r'\s', '', m.group(0)) if m else None
 
     m = _HANDAL_INVOICE_DATE_RE.search(text)
     h['invoice_date'] = _handal_parse_date_monthname(m.group(1)) if m else None
@@ -6030,6 +6039,17 @@ def _handal_pick_amounts(nums: List, n: int, target: Optional[int]) -> List:
     return cands[0] if cands else (nums + [None] * n)[:n]
 
 
+_HANDAL_OCR_DIGIT_MAP = str.maketrans({"g": "9", "G": "9", "o": "0", "O": "0", "A": "0",
+                                       "l": "1", "I": "1", "S": "5"})
+# 只修「含千分位逗號」的數字欄：'777,AAA' -> '777,000'、'3,g92,o4o' -> '3,992,040'
+# (使用者 2026-11 樣本 NIKOMAS AGUST 2026)。不碰發票號碼與英文字 (SEGEL、LIFT)。
+_HANDAL_OCR_AMOUNT_TOKEN_RE = re.compile(r'(?<![A-Za-z])(?=[0-9gGoOAlIS,]*,)[0-9gGoOAlIS,]{5,}(?![A-Za-z])')
+
+
+def _handal_fix_ocr_digits(line: str) -> str:
+    return _HANDAL_OCR_AMOUNT_TOKEN_RE.sub(lambda m: m.group(0).translate(_HANDAL_OCR_DIGIT_MAP), line)
+
+
 def _handal_extract_items(text: str):
     region = _handal_item_region(text)
     # 有 "DESCRIPTION" 表頭時從表頭開始 (上面的船名行不是費用)；
@@ -6050,6 +6070,7 @@ def _handal_extract_items(text: str):
         line = re.sub(r"\s+[^\w\s()]{1,2}$", "", line)             # 行尾雜訊 "'"
         line = re.sub(r"(?<=\s)[^\w\s(),.\-/]{1,2}(?=\s)", "", line)  # 中間雜訊 "°"
         line = re.sub(r"\s{2,}", " ", line)
+        line = _handal_fix_ocr_digits(line)
         if not line:
             continue
         if re.match(r'for and on', line, re.IGNORECASE):
