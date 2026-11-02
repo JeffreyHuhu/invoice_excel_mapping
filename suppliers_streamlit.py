@@ -3876,12 +3876,11 @@ def _dhl_parse_date(text: Optional[str]) -> Optional[str]:
 
 
 def _dhl_clean_amount(text: Optional[str]) -> Optional[int]:
-    """'662,295' (逗號千分位、無小數) -> 662295；Credit Note 的負數 '-662,295' -> -662295。"""
+    """'662,295' (逗號千分位、無小數) -> 662295。Credit Note 的負數 '-662,295' 也回傳正數：
+    退款單金額一律寫正數，負數由本機 local_quality 處理 (2026-11-01 使用者規定)。"""
     if not text:
         return None
-    text = text.strip().replace(",", "")
-    if text.startswith("-"):
-        return -int(text[1:]) if text[1:].isdigit() else None
+    text = text.strip().replace(",", "").lstrip("-")
     return int(text) if text.isdigit() else None
 
 
