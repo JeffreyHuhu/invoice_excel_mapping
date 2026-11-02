@@ -3301,7 +3301,9 @@ def _dsv_extract_total(text: str) -> Optional[int]:
     頁首有 "INVOICE ID610295705 ORIGINAL/COPY" 時回傳 {發票號碼: 總額}，直接歸給這張。
     費用說明可能提到另一張發票 ("THE ALREADY BILL UNDER ID610295704")，核心用「頁面上
     出現的發票號碼」歸屬時會配錯張 (2026-10-30 GLOSTAR_12DECEMBER：705 的小計配給 704)。"""
-    total = _dsv_clean_amount(_search(r"SUBTOTAL\s+([\d.]+)", text))
+    # 掃描檔的千分位點前後可能有空白 ("SUBTOTAL 240 . 067"，2026-11-02 掃描 EDC1103787)，先去掉空白再換算
+    raw = _search(r"SUBTOTAL\s+(\d{1,3}(?:\s?\.\s?\d{3})+|\d+)", text)
+    total = _dsv_clean_amount(re.sub(r"\s", "", raw) if raw else None)
     inv = _search(r"^INVOICE\s+(ID\d+)\b", text) if total is not None else None
     return {inv: total} if inv else total
 
