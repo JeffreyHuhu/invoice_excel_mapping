@@ -4474,7 +4474,8 @@ def _dhl_is_unreadable(text: str) -> bool:
 
 _DHL_IC_BLOCK_RE = re.compile(r"Billing Details(?P<block>.*?)Payment Terms", re.DOTALL)
 _DHL_IC_ITEM_RE = re.compile(
-    r"^(?P<desc>[A-Za-z][A-Za-z \-]*?)\s+(?P<amount>[\d,]+)\s+(?P<vat>[\d,]+)\s+(?P<total>[\d,]+)\s*$",
+    # 名稱可能有括號 "Bonded Storage (1 day(s))" (2026-11-03 D000811556)
+    r"^(?P<desc>[A-Za-z][A-Za-z0-9 \-()/.]*?)\s+(?P<amount>[\d,]+)\s+(?P<vat>[\d,]+)\s+(?P<total>[\d,]+)\s*$",
     re.MULTILINE)
 
 
