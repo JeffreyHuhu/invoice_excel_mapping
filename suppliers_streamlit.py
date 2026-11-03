@@ -4119,7 +4119,8 @@ def _parse_dhl_regular(text: str) -> Optional[Dict]:
 # 不含字母 O，所以直接把整個擷取到的編號裡的 'O' 全部換成 '0' 是安全的
 # 修正方式；之後如果遇到其他 OCR 常誤判的字元，比照這個做法在擷取後加一
 # 個修正函式即可。
-_DHL_CUSTOMS_ITEM_PATTERN = re.compile(r"^([A-Z][A-Z /]+[A-Z])\s+([\d,]+)$")
+# 名稱可能含 "-" ("NON-CONVEYABLE PIECE - WEIGHT 367,500"，2026-11-03 JKTIR00983864)
+_DHL_CUSTOMS_ITEM_PATTERN = re.compile(r"^([A-Z][A-Z /-]+[A-Z])\s+([\d,]+)$")
 _DHL_CUSTOMS_AWB_ROW_PATTERN = re.compile(
     r"(\d{6,12})\s+(\d{6,12})\s+(\d{1,2}-\d{1,2}-\d{4})\s+JKT"
 )
@@ -4222,7 +4223,8 @@ def _dhl_customs_extract_items(text: str) -> List[Dict]:
             break
         # OCR 雜訊："FUELSURCHARGE —— 1,756,394 ," -> "FUEL SURCHARGE 1,756,394"
         stripped = re.sub(r"[\s—–_|.,-]+$", "", stripped)
-        stripped = re.sub(r"\s+[—–_|-]+\s+", " ", stripped)
+        # 名稱中間的 " - " (NON-CONVEYABLE PIECE - WEIGHT) 是真實名稱，不當成雜訊刪掉
+        stripped = re.sub(r"\s+[—–_|]+\s+", " ", stripped)
         stripped = stripped.replace("FUELSURCHARGE", "FUEL SURCHARGE")
         m = _DHL_CUSTOMS_ITEM_PATTERN.match(stripped)
         if not m:
