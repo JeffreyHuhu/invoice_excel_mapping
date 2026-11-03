@@ -10,9 +10,8 @@ validation_streamlit.py
 
   1. 必填欄位缺失 (ERROR)：INVOICE DATE、INVOICE NO、SUPPLIER、CONSIGNEE、
      Description、AMOUNT (使用者指定的六個必要欄位)。
-  2. 格式檢查：金額/稅額不是數字、日期格式認不得、日期不合理 (太舊或在
-     未來)、到達日早於開船日；選填欄位的基本格式 (單號要有數字、貨櫃號碼
-     要有 4 碼英文 + 7 碼數字、材積要有數字、港口/船名/出貨方要有文字)。
+  2. 格式檢查：金額/稅額不是數字、日期格式認不得、金額為負數 (帳單有
+     CREDIT 字樣的折讓不計入)。
   3. 金額勾稽：沿用 audit_invoice_totals() 的三項稽核 (未稅加總=未稅總額、
      未稅+稅額=含稅總額、含稅-代扣稅=實付金額)，任何一項不一致就是錯誤。
 
@@ -27,7 +26,6 @@ fallback_streamlit.py 的備援擷取，並列入異常清單 (Exceptions)。
 這支檔案只讀取擷取結果，不修改任何供應商規則或核心引擎的行為。
 """
 
-import datetime
 import io
 import re
 from typing import Dict, List, Optional, Pattern, Tuple, Union
@@ -55,7 +53,7 @@ _SEVERITY_PENALTY = {ERROR: 0.35, WARN: 0.1, INFO: 0.05}
 
 # 使用者指定的必要欄位：抬頭 4 個 + 費用明細 2 個 (description/amount，見
 # _check_items())。缺任何一個都是 ERROR。其餘 12 個欄位為選填，缺值不算
-# 異常，有值時才做基本格式檢查 (_check_optional_formats())。
+# 異常 (選填欄位不做格式檢查)。
 REQUIRED_HEADER_FIELDS = ("invoice_date", "invoice_no", "supplier", "consignee")
 
 # 個別供應商另外的必要欄位 (使用者在答案 Excel 提示列標「(必要)」的欄位)：
@@ -87,23 +85,6 @@ _FCL_VOLUME_RE = re.compile(r"\d+\s*X\s*\d{2}", re.IGNORECASE)
 SUPPLIER_REQUIRED_WHEN = {
     "OPL": lambda row: str(row.get("invoice_no") or "").upper().startswith("NCLR"),
 }
-
-# 選填欄位的基本格式規則 (WARN)：(欄位, 規則代碼, 檢查函式, 說明)
-_CONTAINER_NO_RE = re.compile(r"[A-Z]{4}\d{6,7}")
-_OPTIONAL_FORMAT_RULES = (
-    ("bl_no", "ID_NO_DIGIT", lambda v: re.search(r"\d", v), "提單號碼裡沒有任何數字"),
-    ("mbl_no", "ID_NO_DIGIT", lambda v: re.search(r"\d", v), "主提單號碼裡沒有任何數字"),
-    # 貨櫃號碼可能是多個、中間有空白或換行 (例如 "BMOU 4921920")，去掉空白後
-    # 只要找得到至少一組「4 碼英文 + 6~7 碼數字」就算合格
-    ("container_no", "CONTAINER_FORMAT",
-     lambda v: _CONTAINER_NO_RE.search(re.sub(r"\s", "", v.upper())),
-     "找不到「4 碼英文 + 7 碼數字」格式的貨櫃號碼"),
-    ("volume", "VOLUME_NO_DIGIT", lambda v: re.search(r"\d", v), "材積裡沒有任何數字"),
-    ("port_of_loading", "TEXT_NO_LETTER", lambda v: re.search(r"[A-Za-z]", v), "啟運港沒有任何文字"),
-    ("port_of_discharge", "TEXT_NO_LETTER", lambda v: re.search(r"[A-Za-z]", v), "目的港沒有任何文字"),
-    ("vessel", "TEXT_NO_LETTER", lambda v: re.search(r"[A-Za-z]", v), "船名/航班沒有任何文字"),
-    ("shipper", "TEXT_NO_LETTER", lambda v: re.search(r"[A-Za-z]", v), "出貨方沒有任何文字"),
-)
 
 # 正確答案裡常見的「不適用」佔位字元，視同空值 (不算缺漏，也不做格式檢查)
 _PLACEHOLDERS = {"-", "--", "/"}
@@ -239,10 +220,6 @@ EXCLUDED_CONSIGNEES: Dict[str, str] = {
     "POUPHONG": "POU PHONG VIETNAM COMPANY LIMITED",
 }
 
-# 日期合理範圍：早於這一年，或晚於今天 + 這麼多天，視為可疑
-_MIN_REASONABLE_YEAR = 2015
-_MAX_FUTURE_DAYS = 60
-
 LEVEL_HIGH = "高"
 LEVEL_MEDIUM = "中"
 LEVEL_LOW = "低"
@@ -274,18 +251,6 @@ def _issue(severity: str, field: str, rule: str, message: str,
 def _is_blank(value) -> bool:
     """N/A、空值，或「-」這類不適用佔位字元。"""
     return _is_na(value) or str(value).strip() in _PLACEHOLDERS
-
-
-def _check_optional_formats(row: Dict) -> List[Dict]:
-    """選填欄位有值時的基本格式檢查。"""
-    issues = []
-    for code, rule, check, message in _OPTIONAL_FORMAT_RULES:
-        raw = row.get(code)
-        if _is_blank(raw):
-            continue
-        if not check(str(raw)):
-            issues.append(_issue(WARN, code, rule, f"「{FIELD_LABELS[code]}」{message}：{raw}"))
-    return issues
 
 
 def _to_number(value) -> Optional[float]:
@@ -321,29 +286,13 @@ def _check_header(row: Dict, supplier_key: Optional[str] = None) -> List[Dict]:
         if key in flat:
             issues.append(_issue(ERROR, "consignee", "EXCLUDED_CONSIGNEE",
                                  f"客戶是 {name}，這張發票不計入"))
-    issues.extend(_check_optional_formats(row))
-
-    today = datetime.date.today()
-    parsed_dates: Dict[str, datetime.date] = {}
     for code in DATE_FIELD_CODES:
         raw = row.get(code)
         if _is_na(raw):
             continue
-        date_value = _coerce_to_date(raw)
-        if date_value is None:
+        if _coerce_to_date(raw) is None:
             issues.append(_issue(WARN, code, "DATE_FORMAT",
                                  f"「{FIELD_LABELS[code]}」日期格式無法辨識：{raw}"))
-            continue
-        parsed_dates[code] = date_value
-        if date_value.year < _MIN_REASONABLE_YEAR or \
-                date_value > today + datetime.timedelta(days=_MAX_FUTURE_DAYS):
-            issues.append(_issue(WARN, code, "DATE_OUT_OF_RANGE",
-                                 f"「{FIELD_LABELS[code]}」日期不合理：{raw}"))
-
-    onboard, arrive = parsed_dates.get("onboard_date"), parsed_dates.get("arrive_date")
-    if onboard and arrive and arrive < onboard:
-        issues.append(_issue(WARN, "arrive_date", "DATE_ORDER",
-                             f"到達日 ({row.get('arrive_date')}) 早於開船日 ({row.get('onboard_date')})"))
     return issues
 
 
@@ -434,6 +383,11 @@ def _check_extra_charges(group_rows: List[Dict], audit_passed: bool = False) -> 
     return issues
 
 
+def _has_credit_text(row: Dict) -> bool:
+    """這一筆費用名稱是否有 CREDIT 字樣 (折讓)。只看費用名稱，不看公司名稱。"""
+    return "CREDIT" in str(row.get("description") or "").upper()
+
+
 def _check_items(group_rows: List[Dict]) -> List[Dict]:
     issues = []
     has_any_item = False
@@ -470,7 +424,8 @@ def _check_items(group_rows: List[Dict]) -> List[Dict]:
             issues.append(dict(_issue(INFO, "amount", "AMOUNT_ZERO",
                                       f"{label}金額為 0（帳單原文就是 0，屬原帳單問題，非擷取錯誤）", row),
                                known_source_issue=True))
-        elif amount < 0:
+        elif amount < 0 and not _has_credit_text(group_rows[idx - 1]):
+            # 帳單有 CREDIT 字樣代表折讓，不計入 (使用者 2026-11-03)
             issues.append(_issue(WARN, "amount", "AMOUNT_NEGATIVE",
                                  f"{label}金額為負數 ({amount_raw})，請確認是否為折讓/扣款", row))
 
