@@ -3305,6 +3305,9 @@ def _dhl_extract_total(text: str) -> Optional[int]:
     if _dhl_is_forwarding(text):
         # 海運帳單的未稅小計 "SUBTOTAL 7.316.854" (不含 PPN)
         return _dhl_fwd_amount(_search(r"SUBTOTAL\s+([\d.]+)", text))
+    if _dhl_is_inbound_charges(text):
+        # 進口代墊費用的未稅小計 "Sub-Total 27,826,122 265,129"
+        return _dhl_clean_amount(_search(r"Sub-Total\s+([\d,]+)", text))
     return _dhl_clean_amount(_search(r"Total\s+Amount\s*\(IDR\)\s+(-?[\d,]+)", text))
 
 
@@ -4438,8 +4441,38 @@ def _dhl_is_unreadable(text: str) -> bool:
     upper = text.upper()
     has_invoice_table = any(k in upper for k in (
         "AIR WAYBILL", "TYPE OF SERVICE", "DUTY INVOICE", "CHARGE DESCRIPTION",
-        "ANALYSIS OF", "SERVICE SUB TOTAL"))
+        "ANALYSIS OF", "SERVICE SUB TOTAL", "INBOUND CHARGES INVOICE", "BILLING DETAILS"))
     return "BC 1.1" in upper and not has_invoice_table
+
+
+# ---------------------------------------------------------------------------
+# (D) INBOUND CHARGES INVOICE (進口代墊費用帳單，2026-11-03 新格式)
+# ---------------------------------------------------------------------------
+#
+# 只有第 1 頁有 "INBOUND CHARGES INVOICE" 抬頭，是帳單；第 2 頁以後是海關 PIB、
+# 繳款單、稅務發票、運單等附件，不擷取 (使用者 2026-11-03 答案說明)。
+# 費用在第 1 頁 "Billing Details" 區塊，每一行 "<費用名稱> <未稅> <VAT> <含稅>"。
+# HWB Number 就是 B/L NO. (每張帳單一個，套用到每一列)。
+
+_DHL_IC_BLOCK_RE = re.compile(r"Billing Details(?P<block>.*?)Payment Terms", re.DOTALL)
+_DHL_IC_ITEM_RE = re.compile(
+    r"^(?P<desc>[A-Za-z][A-Za-z \-]*?)\s+(?P<amount>[\d,]+)\s+(?P<vat>[\d,]+)\s+(?P<total>[\d,]+)\s*$",
+    re.MULTILINE)
+
+
+def _dhl_is_inbound_charges(text: str) -> bool:
+    return "INBOUND CHARGES INVOICE" in text.upper()
+
+
+def _parse_dhl_inbound_charges(text: str) -> Dict:
+    header = _dhl_common_header(text)
+    header["bl_no"] = _search(r"HWB Number\s*:\s*(\d+)", text)
+    block = _DHL_IC_BLOCK_RE.search(text)
+    items = [{"description": m.group("desc").strip(),
+              "amount": _dhl_clean_amount(m.group("amount")),
+              "vat": _dhl_clean_amount(m.group("vat"))}
+             for m in _DHL_IC_ITEM_RE.finditer(block.group("block") if block else "")]
+    return {"header": header, "items": items}
 
 
 def parse_dhl(text: str) -> Dict:
@@ -4449,6 +4482,8 @@ def parse_dhl(text: str) -> Dict:
                   "items": [{"description": "UNREADABLE", "amount": None, "vat": None}]}
     elif _dhl_is_forwarding(text):
         result = _parse_dhl_forwarding(text)
+    elif _dhl_is_inbound_charges(text):
+        result = _parse_dhl_inbound_charges(text)
     elif _dhl_is_duty(text):
         result = _parse_dhl_duty(text)
     elif _dhl_is_regular(text) and (regular := _parse_dhl_regular(text)) is not None:
@@ -4467,6 +4502,9 @@ def _dhl_extract_grand_total(text: str) -> Optional[int]:
     if _dhl_is_forwarding(text):
         # 海運帳單的含稅總額 "TOTAL IDR 8.121.708"
         return _dhl_fwd_amount(_search(r"^TOTAL IDR\s+([\d.]+)", text))
+    if _dhl_is_inbound_charges(text):
+        # 進口代墊費用的應付總額 "Please Pay This Amount: IDR 28,091,251"
+        return _dhl_clean_amount(_search(r"Please Pay This Amount:\s*IDR\s+([\d,]+)", text))
     # 只看逐票明細 (第一個 "Air Waybill" 表頭到最後一個 "Service Sub Total")，
     # 不吃到後面附件 (報關單、商業發票) 裡單獨一行的數字
     start = text.find("Air Waybill")
