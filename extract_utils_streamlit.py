@@ -1102,9 +1102,9 @@ def register_supplier(key: str, label: str,
     (維持舊行為不變)。
 
     audit_tolerance_fn (可選，multi_page 供應商用)：依『一頁』的文字回傳這一頁
-    的金額稽核容許誤差 (IDR/VND 等)，預設 ±1。同一家供應商的不同版面可以
-    各自放寬，例如 TATA A/F 空運帳單「100 IDR 以內都不算錯誤」(使用者規定)，
-    其他版面維持 ±1。只影響 audit_invoice_totals() 的金額勾稽。
+    的金額稽核容許誤差。沒有設定時用 audit_tolerance() 的預設 (印尼 100 IDR，其他 ±1)。
+    例如 TATA A/F 空運帳單「100 IDR 以內都不算錯誤」(使用者規定)。
+    只影響 audit_invoice_totals() 的金額勾稽。
 
     audit_exclude (可選)：這家供應商的 items 裡，有哪些 description 是
     『不是真正費用、不該算進未稅總額加總』的合成列 (例如 YJE_TATA 的
@@ -1867,6 +1867,21 @@ def quality_score(rows: List[Dict]) -> float:
     return ok / total if total else 0.0
 
 
+# 印尼供應商金額稽核的容許誤差 (IDR)：100 以內都不算錯誤 (使用者 2026-11-03 規定，
+# 所有印尼供應商適用)。美元帳單不適用 (100 USD 不是小數點誤差)，列在這裡排除。
+INDO_AUDIT_TOLERANCE = 100
+NON_IDR_SUPPLIERS = {"OPL_USD"}
+
+
+def audit_tolerance(supplier_key: Optional[str]) -> float:
+    """金額稽核的容許誤差：印尼供應商 (供應商編號 ID 開頭、非美元帳單) 為 100，
+    其他為 ±1 (四捨五入誤差)。"""
+    if supplier_key and supplier_number(supplier_key).startswith("ID") \
+            and supplier_key not in NON_IDR_SUPPLIERS:
+        return INDO_AUDIT_TOLERANCE
+    return 1
+
+
 def audit_invoice_totals(
     supplier_key: Optional[str],
     pdf_path: str,
@@ -1934,16 +1949,17 @@ def audit_invoice_totals(
     exclude_descs = {normalize_value(d) for d in entry.get("audit_exclude", ())}
     deduction_prefixes = tuple(p.upper() for p in entry.get("deduction_prefixes", ()))
     need_vat_split = bool(extract_grand_total_fn or extract_final_total_fn or sheet_totals_fn)
+    base_tolerance = audit_tolerance(supplier_key)
     tolerance_fn = entry.get("audit_tolerance_fn")
 
     def _tolerance_of(page_text: str) -> float:
-        """這一頁的容許誤差 (沒有設定 audit_tolerance_fn 就是 ±1)。"""
+        """這一頁的容許誤差：有 audit_tolerance_fn 就用它，否則用預設 (見 audit_tolerance())。"""
         if not tolerance_fn:
-            return 1
+            return base_tolerance
         try:
             return tolerance_fn(page_text)
         except Exception:
-            return 1
+            return base_tolerance
 
     def _sum_rows(group_rows: List[Dict]) -> float:
         total = 0.0
@@ -1977,8 +1993,8 @@ def audit_invoice_totals(
         return add_total, deduct_total
 
     def _build_result(group_rows: List[Dict], invoice_total, grand_total, final_total,
-                      grand_tolerance: float = 1, final_tolerance: float = 1,
-                      vat_total=None, net_tolerance: float = 1) -> Dict:
+                      grand_tolerance: float = base_tolerance, final_tolerance: float = base_tolerance,
+                      vat_total=None, net_tolerance: float = base_tolerance) -> Dict:
         """grand_tolerance / final_tolerance：含稅總額 / 實付金額允許的誤差
         (預設 ±1)。帳單合計的稅額若是「未稅合計 × 稅率」、明細稅額卻是逐列四捨
         五入 (例如 CONG THANH 代墊款)，Excel 供應商可透過 sheet_totals 放寬到
@@ -2041,8 +2057,8 @@ def audit_invoice_totals(
         per_invoice: Dict[str, Dict] = {}
         for t in sheet_totals_fn(read_spreadsheet(pdf_path)):
             args = (t.get("total"), t.get("grand_total"), t.get("final_total"),
-                    t.get("grand_tolerance", 1), t.get("final_tolerance", 1),
-                    t.get("vat_total"), t.get("net_tolerance", 1))
+                    t.get("grand_tolerance", base_tolerance), t.get("final_tolerance", base_tolerance),
+                    t.get("vat_total"), t.get("net_tolerance", base_tolerance))
             if t.get("invoice_no") is None:
                 # 整份檔案的合計 (例如表格最後的合計列)：用全部明細勾稽
                 whole = _build_result(rows, *args)
@@ -2084,7 +2100,6 @@ def audit_invoice_totals(
         final_totals_found: Dict[str, float] = {}
         # 每張發票用它的總額所在頁的容許誤差 (見 register_supplier() 的 audit_tolerance_fn)
         tolerance_found: Dict[str, float] = {}
-
         def _assign(found: Dict[str, float], value, page_upper: str) -> None:
             """這一頁抓到的總額歸給頁面上印的那張發票 (整個字比對，避免 "4521"
             誤配 "45217")；擷取函式回傳 {發票號碼: 總額} 時逐票歸屬 (越南 KN 附件清單)。"""
@@ -2141,7 +2156,7 @@ def audit_invoice_totals(
             group_rows = groups.get(inv_key) or []
             if not group_rows:
                 continue
-            tol = tolerance_found.get(inv_key, 1)
+            tol = tolerance_found.get(inv_key, base_tolerance)
             results.append(_build_result(
                 group_rows, totals_found.get(inv_key), grand_totals_found.get(inv_key),
                 final_totals_found.get(inv_key),

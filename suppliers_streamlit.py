@@ -2153,8 +2153,8 @@ def parse_tata_receipt(text: str) -> Dict:
 #     INDONESIA"，後面的括號備註 "( ASICS)" 要去掉。
 #   - ⚠️ 稽核機制 (使用者規定，見 ASWER Excel 說明)：
 #       A/F 運費總額 + VAT 12% (FREIGHT ONLY) = TOTAL AMOUNT，100 IDR 以內都不算錯誤。
-#     對應實作：extract_total 抓 "A/F" 小計行、extract_grand_total 抓 "TOTAL AMOUNT"，
-#     容許誤差由 _yje_tata_audit_tolerance() 對這一頁給 100 (其他 YJE/TATA 版面仍 ±1)。
+#     對應實作：extract_total 抓 "A/F" 小計行、extract_grand_total 抓 "TOTAL AMOUNT"。
+#     容許誤差 100 IDR 是所有印尼供應商的共同規則 (見 extract_utils audit_tolerance())。
 #     帳單的 VAT 是 DPP × 12%，DPP = A/F × 11/12 (印尼 DPP Nilai Lain)，
 #     所以逐列 VAT 其實是 A/F 的 11%，這是帳單本身的算法，不是擷取錯誤。
 #     第 1 列 "1/Oct/19" (匯率 440) 不在小計內，已被上面的 Kurs < 1000 規則排除。
@@ -3259,12 +3259,6 @@ def _yje_tata_extract_grand_total(text: str) -> Optional[int]:
     return None
 
 
-def _yje_tata_audit_tolerance(text: str) -> float:
-    """TATA A/F 空運帳單的金額容許誤差：100 IDR 以內都不算錯誤 (使用者規定，
-    見 ASWER Excel 說明)。其他 YJE/TATA 版面維持 ±1。"""
-    return 100 if detect_tata_af(text) else 1
-
-
 def _trans_extract_total(text: str) -> Optional[int]:
     """注意：TRANS_DAYA_PRIMA 是 multi_page 供應商，text 是『一頁』的文字。
 
@@ -3482,7 +3476,6 @@ register_supplier(
     detect_yje_or_tata, parse_yje_or_tata, multi_page=True,
     extract_total=_yje_tata_extract_total,
     extract_grand_total=_yje_tata_extract_grand_total,
-    audit_tolerance_fn=_yje_tata_audit_tolerance,
 )
 register_supplier(
     "TRANS_DAYA_PRIMA", "PT. TRANS DAYA PRIMA", detect_trans, parse_trans,
