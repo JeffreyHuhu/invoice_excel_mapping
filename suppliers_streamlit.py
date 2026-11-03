@@ -4250,6 +4250,9 @@ def _dhl_allocate_vat(text: str, items: List[Dict]) -> None:
     稅基的費用，稅額分給這些費用 (多筆時依金額比例，尾差放最後一筆)；其餘費用
     VAT = 0 (使用者 2026-10-27 答案)。找不到對應的費用時，稅額單獨一筆。"""
     from itertools import combinations
+    # 沒有任何費用自帶 VAT (第 2 頁沒有逐項含稅小計) 時不分攤，稅額整張獨立一列
+    # (使用者 2026-11-03 JKTIR00983864：這份帳單沒有各項目的 VAT，用一列 VAT)
+    allocate = any(it.get("vat") is not None for it in items if it.get("amount"))
     pending = [it for it in items if it.get("vat") is None and it.get("amount")]
     if not pending:
         for it in items:
@@ -4265,8 +4268,8 @@ def _dhl_allocate_vat(text: str, items: List[Dict]) -> None:
         base, vat = _dhl_clean_amount(base_text), _dhl_clean_amount(vat_text)
         if not base or not vat:
             continue
-        group = tuple(pending) if sum(it["amount"] for it in pending) == base else None
-        for size in range(1, min(len(pending), 6) + 1) if not group else ():
+        group = tuple(pending) if allocate and sum(it["amount"] for it in pending) == base else None
+        for size in range(1, min(len(pending), 6) + 1) if allocate and not group else ():
             group = next((g for g in combinations(pending, size)
                           if sum(it["amount"] for it in g) == base), None)
             if group:
