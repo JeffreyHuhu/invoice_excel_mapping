@@ -1033,7 +1033,8 @@ def register_supplier(key: str, label: str,
                        invoice_page: Optional[Callable[[str], bool]] = None,
                        ocr_psm: Optional[int] = None,
                        page_text: Optional[Callable[[str], List[str]]] = None,
-                       ocr_attachments: bool = True) -> None:
+                       ocr_attachments: bool = True,
+                       audit_tolerance_fn: Optional[Callable[[str], float]] = None) -> None:
     """註冊一家供應商。
 
     ocr_attachments (可選，要搭配 invoice_page)：False 時，文字層已經有這家的
@@ -1100,6 +1101,11 @@ def register_supplier(key: str, label: str,
     tuple 代表這家供應商沒有這種『扣除類』VAT，所有逐筆 VAT 都算加總
     (維持舊行為不變)。
 
+    audit_tolerance_fn (可選，multi_page 供應商用)：依『一頁』的文字回傳這一頁
+    的金額稽核容許誤差 (IDR/VND 等)，預設 ±1。同一家供應商的不同版面可以
+    各自放寬，例如 TATA A/F 空運帳單「100 IDR 以內都不算錯誤」(使用者規定)，
+    其他版面維持 ±1。只影響 audit_invoice_totals() 的金額勾稽。
+
     audit_exclude (可選)：這家供應商的 items 裡，有哪些 description 是
     『不是真正費用、不該算進未稅總額加總』的合成列 (例如 YJE_TATA 的
     "DPP" 是額外附加的未稅金額備註列，不是一筆實際費用)，稽核加總時要
@@ -1120,7 +1126,7 @@ def register_supplier(key: str, label: str,
         "sheet_parse": sheet_parse, "sheet_totals": sheet_totals,
         "extract_vat_total": extract_vat_total, "invoice_page": invoice_page,
         "ocr_psm": ocr_psm, "page_text": page_text, "multi_page_pdf": multi_page,
-        "ocr_attachments": ocr_attachments,
+        "ocr_attachments": ocr_attachments, "audit_tolerance_fn": audit_tolerance_fn,
         # Excel 供應商一份檔案可能有好幾張對帳單，比對時跟 multi_page 一樣用
         # invoice_no 分組
         "multi_page": multi_page or sheet_parse is not None,
@@ -1338,7 +1344,7 @@ def _parse_multi_page_pdf(pdf_path: str, key: str, **pdfplumber_kwargs) -> List[
         pages = extract_pages_from_pdf_force_ocr(pdf_path)
     else:
         pages = supplier_pages(pdf_path, key, **pdfplumber_kwargs)
-    rows: List[Dict] = []
+    page_rows: List[List[Dict]] = []
     for page_text in pages:
         try:
             if not entry["detect"](page_text):
@@ -1346,10 +1352,29 @@ def _parse_multi_page_pdf(pdf_path: str, key: str, **pdfplumber_kwargs) -> List[
         except Exception:
             continue
         parsed = entry["parse"](page_text)
-        rows.extend(expand_to_rows(parsed))
+        page_rows.append(expand_to_rows(parsed))
+    rows = _drop_duplicate_invoice_pages(page_rows)
     if not rows:
         rows = expand_to_rows({"header": {}, "items": [{}]})
     return rows
+
+
+def _drop_duplicate_invoice_pages(page_rows: List[List[Dict]]) -> List[Dict]:
+    """稽核原則 (使用者 2026-11)：發票號碼相同、總金額相同視為重複的發票，只保留第一張。
+    發票號碼是 N/A 的頁面不比對。"""
+    seen: Dict[tuple, bool] = {}
+    kept: List[Dict] = []
+    for rows in page_rows:
+        if not rows:
+            continue
+        inv = rows[0].get("invoice_no")
+        total = sum(r.get("amount") for r in rows if isinstance(r.get("amount"), (int, float)))
+        if inv not in (None, "N/A", ""):
+            if (inv, total) in seen:
+                continue
+            seen[(inv, total)] = True
+        kept.extend(rows)
+    return kept
 
 
 _CUSTOM_PAGES_CACHE: "OrderedDict[tuple, List[str]]" = OrderedDict()
@@ -1909,6 +1934,16 @@ def audit_invoice_totals(
     exclude_descs = {normalize_value(d) for d in entry.get("audit_exclude", ())}
     deduction_prefixes = tuple(p.upper() for p in entry.get("deduction_prefixes", ()))
     need_vat_split = bool(extract_grand_total_fn or extract_final_total_fn or sheet_totals_fn)
+    tolerance_fn = entry.get("audit_tolerance_fn")
+
+    def _tolerance_of(page_text: str) -> float:
+        """這一頁的容許誤差 (沒有設定 audit_tolerance_fn 就是 ±1)。"""
+        if not tolerance_fn:
+            return 1
+        try:
+            return tolerance_fn(page_text)
+        except Exception:
+            return 1
 
     def _sum_rows(group_rows: List[Dict]) -> float:
         total = 0.0
@@ -2047,6 +2082,8 @@ def audit_invoice_totals(
         totals_found: Dict[str, float] = {}
         grand_totals_found: Dict[str, float] = {}
         final_totals_found: Dict[str, float] = {}
+        # 每張發票用它的總額所在頁的容許誤差 (見 register_supplier() 的 audit_tolerance_fn)
+        tolerance_found: Dict[str, float] = {}
 
         def _assign(found: Dict[str, float], value, page_upper: str) -> None:
             """這一頁抓到的總額歸給頁面上印的那張發票 (整個字比對，避免 "4521"
@@ -2065,6 +2102,8 @@ def audit_invoice_totals(
                     break
 
         for page_text in pages:
+            page_tolerance = _tolerance_of(page_text)
+            found_before = set(totals_found) | set(grand_totals_found) | set(final_totals_found)
             # 大部分供應商的『未稅總額』就印在發票抬頭頁本身 (detect_fn 認得
             # 的那一頁)；但少數供應商 (例如 DSV) 是「一張發票的資料跨好幾頁」
             # ，未稅總額印在後面的附屬頁 (例如 Page 2 of 2 的條款/簽收頁)，
@@ -2094,18 +2133,24 @@ def audit_invoice_totals(
                     final_total = None
                 if final_total is not None:
                     _assign(final_totals_found, final_total, page_text.upper())
+            # 這一頁新歸屬到的發票，記下這一頁的容許誤差
+            for inv_key in (set(totals_found) | set(grand_totals_found) | set(final_totals_found)) - found_before:
+                tolerance_found[inv_key] = page_tolerance
 
         for inv_key in set(totals_found) | set(grand_totals_found) | set(final_totals_found):
             group_rows = groups.get(inv_key) or []
             if not group_rows:
                 continue
+            tol = tolerance_found.get(inv_key, 1)
             results.append(_build_result(
                 group_rows, totals_found.get(inv_key), grand_totals_found.get(inv_key),
                 final_totals_found.get(inv_key),
+                grand_tolerance=tol, final_tolerance=tol, net_tolerance=tol,
             ))
     else:
         # 只用帳單頁勾稽 (附件頁的金額不算，見 invoice_text())
         text = invoice_text(pdf_path, supplier_key, **pdfplumber_kwargs)[0]
+
         invoice_total = None
         grand_total = None
         final_total = None
@@ -2142,8 +2187,10 @@ def audit_invoice_totals(
                     results.append(_build_result(group_rows, *picked))
             return results
         if (invoice_total is not None or grand_total is not None or final_total is not None) and rows:
+            tol = _tolerance_of(text)
             results.append(_build_result(rows, invoice_total, grand_total, final_total,
-                                         vat_total=vat_total))
+                                         vat_total=vat_total, grand_tolerance=tol,
+                                         final_tolerance=tol, net_tolerance=tol))
     return results
 
 
