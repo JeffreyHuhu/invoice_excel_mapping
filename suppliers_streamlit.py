@@ -3990,6 +3990,11 @@ _DHL_MAIN_LINE_PATTERN = re.compile(
 )
 
 
+# 稅額調整行，例如 "A TAX CODE ADJUSTMENT 8 8" (VAT、含稅金額)
+_DHL_TAX_ADJ_RE = re.compile(
+    r"^(?P<desc>A TAX CODE ADJUSTMENT)\s+(?P<vat>[\d,]+)\s+[\d,]+\s*$", re.MULTILINE)
+
+
 def _dhl_extract_charge_name_whitelist(text: str) -> List[str]:
     """從第 1 頁「Analysis of Extra Charges」區塊收集這張發票實際出現過
     的額外費用名稱，當作白名單去比對第 2 頁以後跟雜訊擠在同一行的費用
@@ -4072,6 +4077,14 @@ def _parse_dhl_regular(text: str) -> Optional[Dict]:
                     "vat": _dhl_clean_amount(em.group("vat")),
                     **overrides,
                 })
+
+    # 稅額調整 (只有 VAT 與含稅金額、沒有未稅金額)：整張帳單一列，不屬於任何一票，
+    # 金額 N/A、VAT 填金額 (2026-11-03 BDOR002924715 使用者答案)。明細頁與第 1 頁的
+    # 彙總都有這一行，只取第一次出現的那一列。
+    adj = _DHL_TAX_ADJ_RE.search(text)
+    if adj:
+        items.append({"description": adj.group("desc"), "amount": None,
+                      "vat": _dhl_clean_amount(adj.group("vat"))})
 
     header = _dhl_common_header(text)
     # 這種帳單抬頭本身沒有共通的到達日/主提單號碼/材積/船名/貨櫃號碼/
@@ -4511,10 +4524,14 @@ def _dhl_extract_grand_total(text: str) -> Optional[int]:
     end = text.rfind("Service Sub Total")
     detail = text[start:end] if 0 <= start < end else ""
     per_shipment = re.findall(r"^\s*(-?\d{1,3}(?:,\d{3})+)\s*$", detail, re.MULTILINE)
-    if per_shipment:
-        return sum(_dhl_clean_amount(v) for v in per_shipment)
     m = re.search(r"Total\s+Amount\s*\(IDR\)\s+-?[\d,]+\s+-?[\d,]+\s+(-?[\d,]+)", text)
-    return _dhl_clean_amount(m.group(1)) if m else None
+    printed = _dhl_clean_amount(m.group(1)) if m else None
+    if per_shipment:
+        total = sum(_dhl_clean_amount(v) for v in per_shipment)
+        # 最後一票之後的獨立費用 (例如 PLASTIC FLYER、A TAX CODE ADJUSTMENT) 不在任何一票的
+        # 小計行，每票加總會少算；兩者不同時以第 1 頁的含稅總額為準 (2026-11-03 BDOR002924715)
+        return printed if printed is not None and total != printed else total
+    return printed
 
 
 register_supplier(
