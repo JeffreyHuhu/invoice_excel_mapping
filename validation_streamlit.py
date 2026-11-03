@@ -86,7 +86,7 @@ SUPPLIER_REQUIRED_WHEN = {
     "OPL": lambda row: str(row.get("invoice_no") or "").upper().startswith("NCLR"),
 }
 
-# 正確答案裡常見的「不適用」佔位字元，視同空值 (不算缺漏，也不做格式檢查)
+# 正確答案裡常見的「不適用」佔位字元，視同空值 (不算缺漏)
 _PLACEHOLDERS = {"-", "--", "/"}
 
 # 解析器判定「原帳單無法判讀」時，把 description 設成這個標記，驗證層判 ERROR (原因：無法判讀)
@@ -100,27 +100,12 @@ UNREADABLE_DESC = "UNREADABLE"
 KNOWN_SOURCE_ISSUES: Dict[str, Dict[Tuple[str, str], Tuple[str, Optional[Union[set, Pattern]]]]] = {
     "MAERSK": {
         ("arrive_date", "DATE_FORMAT"): ("MAERSK 原帳單的 ETA 本身就是「--」", {"--"}),
-        ("arrive_date", "DATE_ORDER"): ("MAERSK 原帳單的 ETA 本身就早於 ETD", None),
-        # ETA 晚於今天 60 天以上 (例如 5617816192 ETD 14-Jul-2026 ETA 26-Feb-2027)：
-        # 照抄 PDF 的「ETA:」，使用者 2026-10-28：在 Excel 備註就好，不計入
-        ("arrive_date", "DATE_OUT_OF_RANGE"): ("MAERSK 原帳單的 ETA 本身就寫這個日期", None),
     },
     # KUEHNE_NAGEL 原帳單的 ETD/ATD、ETA/ATA 欄本來就是空白 (使用者 2026-11-01 確認，
     # 例如 JKT1485198、JKT1517926)：只在值為空白時才算，有值但抓不到仍列 ERROR
     "KUEHNE_NAGEL": {
         ("onboard_date", "MISSING_REQUIRED"): ("KUEHNE NAGEL 原帳單的 ETD/ATD 欄本來就是空白", {"N/A", "None", ""}),
         ("arrive_date", "MISSING_REQUIRED"): ("KUEHNE NAGEL 原帳單的 ETA/ATA 欄本來就是空白", {"N/A", "None", ""}),
-    },
-    # DSV 印尼帳單：MBL NO. 只有英文、沒有任何數字，是原帳單問題 (使用者 2026-11-02 確認)；
-    # 只限「沒有數字」的值，有數字但抓不到仍列 ERROR
-    "DSV": {
-        ("mbl_no", "ID_NO_DIGIT"): ("DSV 原帳單的 MBL NO. 本身只有英文、沒有數字",
-                                    re.compile(r"[A-Za-z][A-Za-z .,/\-]*")),
-    },
-    # DSV 越南 CargoWise 帳單的 ETA 照抄「ORIGIN ETD DESTINATION ETA」那一行 (例如
-    # SSGN0458587 ETD 13-Jul-26 ETA 04-Jun-27)；使用者 2026-10-28：比照 MAERSK 列附註
-    "DSV_VN": {
-        ("arrive_date", "DATE_OUT_OF_RANGE"): ("DSV 原帳單的 ETA 本身就寫這個日期", None),
     },
     # DHL 印尼帳單：DUTIES & TAXES / INBOUND 版型原帳單沒有開船日、啟運港、目的港、材積、提單號碼
     # (使用者 2026-11-02 確認：列備註，不算錯誤)；只限擷取不到的空值，有值仍照常檢查
@@ -131,30 +116,11 @@ KNOWN_SOURCE_ISSUES: Dict[str, Dict[Tuple[str, str], Tuple[str, Optional[Union[s
         ("volume", "MISSING_REQUIRED"): ("DHL 原帳單沒有材積", {"N/A", "None", ""}),
         ("bl_no", "MISSING_REQUIRED"): ("DHL 原帳單沒有提單號碼", {"N/A", "None", ""}),
     },
-    "DWIHARTA": {
-        # 沒有船名時 Vessel 欄印佔位符號 ". / ." (使用者確認)、"- / -"、"0 / 0"
-        ("vessel", "TEXT_NO_LETTER"): ("DWIHARTA 沒有船名時 Vessel 欄原文就是佔位符號",
-                                       {". / .", ".. / .", "- / -", "0 / 0"}),
-        # 原帳單 Shipper 欄空白 (擷取結果只剩 ";")，使用者 2026-10-31 確認不計入
-        ("shipper", "TEXT_NO_LETTER"): ("DWIHARTA 原帳單 Shipper 欄是空白", {";"}),
-    },
     "RONG_A_CHAU": {
         ("invoice_date", "MISSING_REQUIRED"): ("RỒNG Á CHÂU 的 Excel 對帳表本身沒有發票日期", None),
         # 擷取規則只在費用金額不為 0 時才轉成一列，金額空白的只會是使用者規定
         # 「進口每筆出貨都要列」的 VAT / VAT PASS THROUGH 列 (稅額 0 時金額、稅額都 N/A)
         ("amount", "MISSING_REQUIRED"): ("進口每筆出貨都列 VAT 列，VAT PASS THROUGH 為 0 時金額與稅額皆為 N/A", None),
-        ("bl_no", "ID_NO_DIGIT"): ("國內段 (Local) 出貨的提單欄本來就寫 LOCAL", {"LOCAL", "Local", "local"}),
-    },
-    # 使用者 2026-10-27 確認「原帳單就這樣寫，就是原帳單問題」；只限這幾個原始值
-    "ECOMET": {
-        # 到達日早於開船日：ECOMET 原帳單的到達日本身就寫錯 (使用者 2026-11-01 確認，全部不計入)
-        ("arrive_date", "DATE_ORDER"): ("ECOMET 原帳單的到達日本身就早於開船日", None),
-        # 貨櫃號碼格式：BSI8184133 只有 3 個英文字母；Container 欄只印 "," 或 "."
-        # (使用者 2026-11-01 確認是原帳單問題，不計入)
-        ("container_no", "CONTAINER_FORMAT"): ("ECOMET 原帳單的貨櫃號碼本身就不是標準格式",
-                                               {"BSI8184133", ",", "."}),
-        # HB/L No 欄只印 "BSWCG" 沒有號碼 (使用者 2026-10-28 確認是原帳單問題，不計入)
-        ("bl_no", "ID_NO_DIGIT"): ("ECOMET 原帳單的 HB/L No 本身就只有 BSWCG", {"BSWCG", "BSWCG:"}),
     },
     "INDOPROSTIME_TRANSPORT": {
         # 帳單印 "2026-JUN-31" (6 月沒有 31 日)；[POUCHEN]_IPE JUNI 的 FLIGHT 印
@@ -163,18 +129,8 @@ KNOWN_SOURCE_ISSUES: Dict[str, Dict[Tuple[str, str], Tuple[str, Optional[Union[s
                                          {"2026-JUN-31", "2025-MAY-87"}),
         ("onboard_date", "DATE_FORMAT"): ("INDOPROSTIME 原帳單的日期本身就不存在",
                                           {"2026-JUN-31", "2025-MAY-87"}),
-        # HAWB 欄印 "DIRECT TO COS"/"DIRECT TO CON" (直送收貨人，沒有分提單)；
-        # 使用者 2026-10-30 確認是原帳單問題
-        ("bl_no", "ID_NO_DIGIT"): ("INDOPROSTIME 直送收貨人的 HAWB 欄原文就是 DIRECT TO",
-                                   {"DIRECT TO COS", "DIRECT TO CON"}),
         # 原帳單本來就沒有 B/L NO. 值 (使用者 2026-11-01 確認，不計入)
         ("bl_no", "MISSING_REQUIRED"): ("INDOPROSTIME 原帳單本來就沒有 B/L NO. 值", None),
-    },
-    # 陸運帳單 (TRUCKING CHARGE TRAGA，INV.2510.0007~0012) 的 Container No. 欄印車牌
-    # ("B 9197 PCC,")；使用者 2026-10-30：保留車牌，屬原帳單問題。只限印尼車牌格式
-    "PANCARAN": {
-        ("container_no", "CONTAINER_FORMAT"): ("PANCARAN 陸運帳單的 Container No. 欄原文就是車牌",
-                                               re.compile(r"[A-Z]{1,2} \d{1,4} [A-Z]{1,3},?")),
     },
 }
 # INDO PROSTIME EXPRESS (ID16) 與 TRANSPORT (ID07) 是兩個供應商 (使用者 2026-11-01 要求分開)。
@@ -188,32 +144,13 @@ SUPPLIER_EXEMPTIONS: Dict[str, set] = {
     # CONG THANH 是拖車行：CONT/XE 欄是車牌或簡寫櫃號、Số xe (車號) 可能只有
     # 數字、帳單上原本就是 0 (或空白視為 0) 的費用，都照抄原文；負數是對帳單
     # 層級的扣款 (例如貨損)，使用者確認正確
-    # PANCARAN：沒有船名時 VESSEL NAME 印 ". / ." "- / -" (使用者確認，不列入)
-    "PANCARAN": {("vessel", "TEXT_NO_LETTER")},
+    "CONG_THANH": {("amount", "AMOUNT_ZERO"), ("amount", "AMOUNT_NEGATIVE")},
     # PSS Excel 帳單的 AMOUNT 為負數 = 折讓/扣款 (使用者 2026-10-31 確認：中 folder 的 -500,000)
     "PUTRA_SEJAHTERA_SENTOSA": {("amount", "AMOUNT_NEGATIVE")},
-    # DWIHARTA：到達日早於開船日是原帳單本身寫錯 (使用者確認，例如 INJK-2503-1051)
-    "DWIHARTA": {("arrive_date", "DATE_ORDER")},
     # ECOMET 費用 DISCOUNT TERLAMBAT 為負數 = 折讓 (使用者確認，D26-03-0263 -500,000)
     "ECOMET": {("amount", "AMOUNT_NEGATIVE")},
-    "CONG_THANH": {("container_no", "CONTAINER_FORMAT"), ("vessel", "TEXT_NO_LETTER"),
-                   ("amount", "AMOUNT_ZERO"), ("amount", "AMOUNT_NEGATIVE")},
-    # 越南拖車行 (VN06 BÌNH TÂN、VN16 SONG TRIỀU)：貨櫃號碼欄填車牌，比照 CONG THANH
-    # (使用者 2026-10-27 確認)
-    "BINH_TAN": {("container_no", "CONTAINER_FORMAT")},
-    "SONG_TRIEU": {("container_no", "CONTAINER_FORMAT")},
 }
 
-# 只對特定值的供應商例外 (同樣連附註都不列)
-SUPPLIER_VALUE_EXEMPTIONS: Dict[str, Dict[Tuple[str, str], set]] = {
-    # INDOPROSTIME 空運直送收貨人，HAWB 欄印 "DIRECT TO CON"，照抄 (使用者 2026-10-25 確認)
-    # 帳單本身拼錯 DIRCET (抽樣 POU CHEN JUNI 2025)、DIRET TO CONS (使用者 2026-10-28 確認不標警告)
-    "INDOPROSTIME": {("bl_no", "ID_NO_DIGIT"): {"DIRECT TO CON", "DIRCET TO CON", "DIRET TO CONS"}},
-    "INDOPROSTIME_TRANSPORT": {("bl_no", "ID_NO_DIGIT"): {"DIRECT TO CON", "DIRCET TO CON", "DIRET TO CONS"}},
-    # PSS 拖車 (TUNGYA)：貨櫃號碼欄是拖車行名稱，不是貨櫃號碼，不適用貨櫃格式規則，不計入
-    # (使用者 2026-10-31 確認；其他貨櫃號碼仍照規則檢查)
-    "PUTRA_SEJAHTERA_SENTOSA": {("container_no", "CONTAINER_FORMAT"): {"TUNGYA"}},
-}
 
 # 不計入的客戶：CONSIGNEE 去掉空白與符號後包含這個字就列 ERROR (使用者 2026-10-28)
 EXCLUDED_CONSIGNEES: Dict[str, str] = {
@@ -527,16 +464,11 @@ def validate_extraction(
         issues.extend(_check_items(group_rows))
         audit_issues = _check_audit(audit_by_invoice.get(inv_key), supplier_key)
         if supplier_key in EXTRA_CHARGE_ID_SUPPLIERS:
-            issues = [i for i in issues if i["rule"] != "ID_NO_DIGIT"]
             issues.extend(_check_extra_charges(group_rows, audit_passed=(
                 inv_key in audit_by_invoice and not audit_issues)))
         issues.extend(audit_issues)
         exempt = SUPPLIER_EXEMPTIONS.get(supplier_key or "", set())
         issues = [i for i in issues if (i["field"], i["rule"]) not in exempt]
-        value_exempt = SUPPLIER_VALUE_EXEMPTIONS.get(supplier_key or "", {})
-        issues = [i for i in issues
-                  if str(group_rows[0].get(i["field"], "")).strip()
-                  not in value_exempt.get((i["field"], i["rule"]), ())]
         issues = _explain_by_formula_issue(issues)
         issues = _formula_issue_as_info(issues, supplier_key, has_whole_audit)
         issues = _mark_known_source_issues(issues, supplier_key, group_rows[0])
