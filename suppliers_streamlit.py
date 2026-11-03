@@ -2151,12 +2151,13 @@ def parse_tata_receipt(text: str) -> Dict:
 #   - CONSIGNEE 抓 "To :" 那一行，但帳單上寫的是
 #     "PT POU CHEN INDONESIA ( ASICS)"，正確答案只要 "PT POU CHEN
 #     INDONESIA"，後面的括號備註 "( ASICS)" 要去掉。
-#   - ⚠️ 稽核機制特別說明：這張帳單印刷的小計 "A/F"/"TOTAL AMOUNT" 跟系統
-#     擷取到的品項加總兩邊核對起來，常態性地會差 1~3 塊錢 (帳單原文自己的
-#     小計看起來是用未顯示的小數位四捨五入組出來的，不是系統擷取錯誤)，
-#     超出系統 ±1 的稽核容許誤差，所以這個格式故意不實作
-#     extract_total/extract_grand_total，让稽核機制視為「不適用」而不是
-#     顯示假警報的「不一致」。
+#   - ⚠️ 稽核機制 (使用者規定，見 ASWER Excel 說明)：
+#       A/F 運費總額 + VAT 12% (FREIGHT ONLY) = TOTAL AMOUNT，100 IDR 以內都不算錯誤。
+#     對應實作：extract_total 抓 "A/F" 小計行、extract_grand_total 抓 "TOTAL AMOUNT"，
+#     容許誤差由 _yje_tata_audit_tolerance() 對這一頁給 100 (其他 YJE/TATA 版面仍 ±1)。
+#     帳單的 VAT 是 DPP × 12%，DPP = A/F × 11/12 (印尼 DPP Nilai Lain)，
+#     所以逐列 VAT 其實是 A/F 的 11%，這是帳單本身的算法，不是擷取錯誤。
+#     第 1 列 "1/Oct/19" (匯率 440) 不在小計內，已被上面的 Kurs < 1000 規則排除。
 #   - ⚠️ 2026-10 補充：ON BOARD DATE/B/L NO./啟運港 其實每一筆品項各自有自
 #     己的值 (就是每行自己的 DATE/HAWB/Country 欄位)，不是整張發票共用、也
 #     不是真的沒有 —— 這點最初的樣本 (sample7) 剛好只有一張發票、沒機會注意
@@ -3225,6 +3226,10 @@ def _yje_tata_extract_total(text: str) -> Optional[int]:
     金額格式都不同，依序嘗試；都抓不到就回傳 None (這一頁不稽核，不是
     「不一致」——例如 YJE 英文費率表目前還沒有對應的規則)。
     """
+    # TATA A/F 空運帳單：表格下方的 "A/F 41.631.725" 小計行 (見 TATA 第三種格式的稽核說明)
+    m = _search(r"^A/F\s+([\d.]+)\s*$", text)
+    if m:
+        return _tata_af_clean_amount(m)
     m = _search(r"SUB-TOTAL\s+Rp\s+([\d,]+)", text)
     if m:
         return _tata_clean_amount(m)
@@ -3244,10 +3249,20 @@ def _yje_tata_extract_grand_total(text: str) -> Optional[int]:
     還沒有對應的含稅總額規則，抓不到就回傳 None (不稽核，不是「不
     一致」)。
     """
+    # TATA A/F 空運帳單：表格下方的 "TOTAL AMOUNT 46.211.215" (A/F + VAT 12%)
+    m = _search(r"^TOTAL AMOUNT\s+([\d.]+)\s*$", text)
+    if m:
+        return _tata_af_clean_amount(m)
     m = _search(r"^TOTAL\s+Rp\s+([\d,]+)\s*$", text)
     if m:
         return _tata_clean_amount(m)
     return None
+
+
+def _yje_tata_audit_tolerance(text: str) -> float:
+    """TATA A/F 空運帳單的金額容許誤差：100 IDR 以內都不算錯誤 (使用者規定，
+    見 ASWER Excel 說明)。其他 YJE/TATA 版面維持 ±1。"""
+    return 100 if detect_tata_af(text) else 1
 
 
 def _trans_extract_total(text: str) -> Optional[int]:
@@ -3467,6 +3482,7 @@ register_supplier(
     detect_yje_or_tata, parse_yje_or_tata, multi_page=True,
     extract_total=_yje_tata_extract_total,
     extract_grand_total=_yje_tata_extract_grand_total,
+    audit_tolerance_fn=_yje_tata_audit_tolerance,
 )
 register_supplier(
     "TRANS_DAYA_PRIMA", "PT. TRANS DAYA PRIMA", detect_trans, parse_trans,
@@ -5944,13 +5960,15 @@ _HANDAL_NON_ITEM_PREFIXES = (
     # 收件地址 (例如 GLOSTAR 的 "BOJONG CIKEMBAR SUKABUMI JAWA BARAT," 與
     # 單獨一行的 "INDONESIA")，不是費用項目
     "JL ", "BOJONG", "INDONESIA",
+    # 單獨一行的 "PART OFF" 是 "CUSTOM CLEARANCE (PART OFF n)" 的標籤殘字 (使用者 2026-11 樣本 NIKO-AGUST 2025 第 37 頁)
+    "PART OFF",
 )
 
 _HANDAL_CODE_RE = re.compile(r'\b([A-Z]{4,8}\d{6,10})\b')
 _HANDAL_ORDER_NO_RE = re.compile(r'(?<![A-Z])([A-Z])(\d{5,7})(?!\d)')
 # 發票號碼後面可能多一個字母，例如 "HG01240125S"
 _HANDAL_INVOICE_NO_RE = re.compile(r'\bHG\s?\d{8}[A-Z]{0,2}\b')  # 2026-11-01：後綴可能是 SS (250112SS)；掃描檔 OCR 常在 HG 後多一個空白 ("HG 10670826")
-_HANDAL_INVOICE_DATE_RE = re.compile(r'\b(\d{1,2}\s+[A-Za-z]+\s+\d{4})\b')
+_HANDAL_INVOICE_DATE_RE = re.compile(r'\b(\d{1,3}\s+[A-Za-z]+\s+\d{4})\b')  # 掃描檔 OCR 會在日期前多黏一個數字 ("608 August 2025")
 _HANDAL_ROUTE_RE = re.compile(r'([A-Z][A-Z ]*?) *- *([A-Z][A-Z ]*?) *- *(\d{1,2}/\d{1,2}/\d{4})')
 # 多種櫃型用逗號連起來，例如 "1X20,6X40"
 _HANDAL_VOLUME_RE = re.compile(r'\b(\d{1,2}X\d{2,3}(?:,\s*\d{1,2}X\d{2,3})*)\b')
@@ -6030,7 +6048,8 @@ def _looks_like_handal_item_desc(line: str) -> bool:
     if re.match(r'^[A-Z][A-Z ]*-[A-Z ]+-', upper):
         return False
     # 船名 + 航次 (例如 "MTT SENARI 040E")：名稱後面是 3～4 位數航次，不是費用
-    if re.match(r'^[A-Z][A-Z ]*\s\d{3,4}[A-Z]?$', upper):
+    # OCR 會在船名前面多讀雜訊字元 ("VSSS5] SINAR SUNDA 194S")，所以允許開頭有數字與括號
+    if re.match(r'^[A-Z0-9\[\] ]*[A-Z]{3,} \d{3,4}[A-Z]?$', upper):
         return False
     if (_HANDAL_CODE_RE.search(upper) or _HANDAL_ORDER_NO_RE.search(upper)
             or _HANDAL_INVOICE_NO_RE.search(upper)):
@@ -6065,10 +6084,13 @@ _HANDAL_MONTHS_EN = {
 def _handal_parse_date_monthname(s):
     if not s:
         return None
-    m = re.match(r'(\d{1,2})\s+([A-Za-z]+)\s+(\d{4})', s.strip())
+    m = re.match(r'(\d{1,3})\s+([A-Za-z]+)\s+(\d{4})', s.strip())
     if not m:
         return None
     day, month_name, year = m.groups()
+    # 三位數日期：前面多黏一個 OCR 雜訊數字，取最後兩碼 ("608 August" -> "08")
+    if len(day) == 3:
+        day = day[-2:]
     # 掃描檔 OCR 常把 "14" 讀成 "44" (使用者 2026-11 樣本 NIKOMAS AGUST 2026)：
     # 日期不可能超過 31，所以第一碼 4 改成 1
     if int(day) > 31 and day[0] == "4":
@@ -6094,7 +6116,7 @@ def _handal_clean_port(s: str) -> str:
 
 _HANDAL_COMBINED_ITEM_RE = re.compile(
     # 名稱後面可能有 OCR 讀出的標點雜訊 ("SEGEL , ; 25,000 25,000")
-    rf'^(?:\d+\s+)?(?P<desc>[A-Z][A-Za-z0-9 /().=*\-]*?)[\s,;:]+(?:\d+[\s,;:]+)?'
+    rf'^(?:\d+\s+)?(?P<desc>[A-Z][A-Za-z0-9 /().=*\->]*?)[\s,;:]+(?:\d+[\s,;:]+)?'
     rf'(?P<unit>{_HANDAL_NUM}){_HANDAL_SEP}(?P<amount>{_HANDAL_NUM})(?!\d)[^\n0-9]*$'
 )
 _HANDAL_PAIR_ONLY_RE = re.compile(
@@ -6110,6 +6132,8 @@ def _handal_extract_vessel(text: str, order_no):
         for line in text.splitlines():
             if order_no in line:
                 before = line.split(order_no)[0]
+                # 掃描檔船名前面常有 OCR 雜訊 ("NWi=ists]=a] STARSHIP VENUS 2506S"，使用者 2026-11 樣本 NIKO-AGUST 2025)：取 "]" 後面
+                before = before.rsplit("]", 1)[-1]
                 words = re.findall(r'[A-Z0-9]+', before)
                 if words:
                     candidate = ' '.join(words)
@@ -6247,11 +6271,32 @@ _HANDAL_OCR_DIGIT_MAP = str.maketrans({"g": "9", "G": "9", "o": "0", "O": "0", "
 _HANDAL_OCR_AMOUNT_TOKEN_RE = re.compile(r'(?<![A-Za-z])(?=[0-9gGoOAlIS,]*,)[0-9gGoOAlIS,]{5,}(?![A-Za-z])')
 
 
+def _handal_fix_custom_word(m) -> str:
+    """只改『看起來像 CUSTOM』的字 (相似度 >= 0.6)；CUSTOMS 與正確的 CUSTOM 原樣保留。"""
+    word = m.group(1)
+    if word.upper() in ("CUSTOM", "CUSTOMS"):
+        return word
+    if difflib.SequenceMatcher(None, word.upper(), "CUSTOM").ratio() >= 0.6:
+        return "CUSTOM"
+    return word
+
+
 def _handal_fix_ocr_digits(line: str) -> str:
     return _HANDAL_OCR_AMOUNT_TOKEN_RE.sub(lambda m: m.group(0).translate(_HANDAL_OCR_DIGIT_MAP), line)
 
 
 def _handal_extract_items(text: str):
+    items = _handal_extract_items_core(text)
+    # 金額在 "# … Rupiah #" 大寫行之後時，那一行會把金額切掉 (使用者 2026-11 樣本 NIKO-AGUST 2025 第 67 頁)：
+    # 一筆都抓不到時，移除大寫行再抓一次
+    if not items:
+        m = _HANDAL_WORDS_RE.search(text)
+        if m:
+            items = _handal_extract_items_core(text[:m.start()] + text[m.end():])
+    return items
+
+
+def _handal_extract_items_core(text: str):
     region = _handal_item_region(text)
     # 有 "DESCRIPTION" 表頭時從表頭開始 (上面的船名行不是費用)；
     # "For and on behalf" (簽名欄) 之後只收數字 (欄位分開的掃描版金額在後面)
@@ -6274,9 +6319,20 @@ def _handal_extract_items(text: str):
         # ("TRUCKING LAUT 40 (PPH 23) 3,420,000 '"，抽樣 PCI-FEB 2025)
         line = re.sub(r'\s*\|\s*', ' ', line).strip()
         line = re.sub(r"\s+[^\w\s()]{1,2}$", "", line)             # 行尾雜訊 "'"
-        line = re.sub(r"(?<=\s)[^\w\s(),.\-/]{1,2}(?=\s)", "", line)  # 中間雜訊 "°"
+        line = re.sub(r"(?<=\s)[^\w\s(),.\-/>]{1,2}(?=\s)", "", line)  # 中間雜訊 "°" (保留 "CUSTOM > 5 CBM" 的 ">")
         line = re.sub(r"\s{2,}", " ", line)
         line = _handal_fix_ocr_digits(line)
+        # 數量 "3" 旁邊的 OCR 底線與重複數字 ("(PART OFF 3_ 3 300,000") 只留到括號：(PART OFF 3)
+        # (使用者 2026-11 樣本 251104_SAMPLE，2026-11-03 確認)
+        line = re.sub(r'\(PART OFF (\d+)_ \d+', r'(PART OFF \1)', line)
+        # 行首的 OCR 引號 ("‘COLLECTION FEE 737,000"，使用者 2026-11 樣本 NIKO-AGUS 2025 第 61 頁) 去掉
+        line = re.sub(r'^[‘’“”"\'`|]+\s*', '', line)
+        # OCR 把 "ADM REPAIR" 讀成 "ADM IR’ Fe\"" (使用者 2026-11 樣本 NIKO-AGUST 2025 第 34 頁)：還原成 ADM REPAIR
+        line = re.sub(r'^ADM\s+IR\S*\s*F\w*.*$', 'ADM REPAIR', line)
+        # CUSTOM 的字型錯字 / OCR 錯字 ("CU$TOM"、"cusToM"、"cusroM"、"CUSTOiTI") 統一寫成 CUSTOM
+        # (使用者 2026-11 樣本 NIKO-AGUST 2025_SAMPLE，2026-11-03 確認)。CUSTOMS 是真的字，不改。
+        line = re.sub(r'(?<![A-Za-z])([A-Za-z$]{5,8})(?=\s+CLEARANCE\b)', _handal_fix_custom_word, line,
+                      flags=re.IGNORECASE)
         if not line:
             continue
         if re.match(r'for and on', line, re.IGNORECASE):
@@ -6289,6 +6345,17 @@ def _handal_extract_items(text: str):
             items.append({
                 "description": m.group('desc').strip(),
                 "amount": _handal_amount_to_int(m.group('amount')),
+                "vat": None,
+            })
+            continue
+
+        # 單價欄是 OCR 雜訊 ("COLLECTION FEE ?23,000 523,000"，使用者 2026-11 樣本 NIKO-AGUST 2025 第 56 頁)：
+        # 取最後一個完整金額，名稱若像費用名稱就直接收
+        mg = re.match(rf'^(?P<desc>[A-Z][A-Z ]+?)\s+(?=\S*,\d{{3}})\S*[^\d,\s]\S*(?:\s+\S+)*?\s+(?P<amount>{_HANDAL_NUM})$', line)
+        if mg and _looks_like_handal_item_desc(mg.group('desc')):
+            items.append({
+                "description": mg.group('desc').strip(),
+                "amount": _handal_amount_to_int(mg.group('amount')),
                 "vat": None,
             })
             continue
