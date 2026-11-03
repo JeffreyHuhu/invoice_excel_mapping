@@ -3857,10 +3857,13 @@ def detect_dhl(text: str) -> bool:
 
 
 def _dhl_fix_ocr_zero(value: Optional[str]) -> Optional[str]:
-    """OCR 常把發票編號裡的數字 '0' 認成英文字母 'O'，這裡統一換回來。
-    正確答案的 DHL 發票號碼也是數字 0 (BD0IR00043036)，前綴的 O 也一併換。"""
+    """OCR 常把發票編號裡的數字 '0' 認成英文字母 'O'，這裡換回數字 0。
+    例外：BDO 開頭是帳單本身的前綴，保留字母 O (BDOIR00043036，使用者 2026-11-03 確認，
+    可用檔名核對)，只換前綴之後的 O。"""
     if not value:
         return value
+    if value.startswith("BDO"):
+        return "BDO" + value[3:].replace("O", "0")
     return value.replace("O", "0")
 
 
@@ -3974,9 +3977,12 @@ _DHL_MAIN_LINE_PATTERN = re.compile(
     r"^(?P<awb>\d{6,12})(?:\s+(?P<ref>\S.*?))?\s+(?P<date>\d{1,2}-\d{1,2}-\d{4})\s+"
     # 地名可能有括號、句點、撇號、連字號 ("MAA, CHENNAI (MADRAS)"，2026-10-27 抽樣)
     r"(?P<ocode>[A-Z]{2,4}),\s*(?P<oregion>[A-Za-z][A-Za-z ().'\-]*?)\s+"
-    r"(?P<dcode>[A-Z]{2,4}),\s*(?P<dregion>[A-Za-z][A-Za-z ().'\-]*?)\s+EXPRESS\s+"
+    # 進口關稅類 (INBOUND REGULAR INVOICE) 的服務名稱是 "DUTIES & TAXES"，名稱可能在換行處斷開
+    # (2026-11-03 BDOIR00049351)，所以 DUTIES 那一行只剩 "DUTIES &"
+    r"(?P<dcode>[A-Z]{2,4}),\s*(?P<dregion>[A-Za-z][A-Za-z ().'\-]*?)\s+(?:EXPRESS\s+|DUTIES\s*&\s*(?:TAXES\s+)?)"
     r"(?P<weight>-?[\d.]+)\s*[A-Z]?\s+(?P<items>-?\d+)\s+"
-    r"(?P<charge>-?[\d,]+)\s+(?P<vat>-?[\d,]+)\s+[A-Z]\s+(?P<total>-?[\d,]+)\s*$",
+    # VAT 欄可能沒有 (DUTIES & TAXES 行只有 "Z" 代碼，例如 "0.00 0 0 Z 0")，沒有就當 0
+    r"(?P<charge>-?[\d,]+)\s+(?:(?P<vat>-?[\d,]+)\s+)?[A-Z]\s+(?P<total>-?[\d,]+)\s*$",
     re.MULTILINE,
 )
 
@@ -4040,14 +4046,16 @@ def _parse_dhl_regular(text: str) -> Optional[Dict]:
             "port_of_loading": port_of_loading,
             "port_of_discharge": port_of_discharge,
             # 材積 = 每票的 Weight in Kg (使用者 2026-10-27 答案 "14.5 KG")
-            "volume": _fmt_volume(kg=f"{float(m.group('weight')):g}"),
+            # 重量 0 (進口關稅費用沒有重量) 的材積寫數字 0 (使用者 2026-11-03 答案)
+            "volume": (0 if float(m.group("weight")) == 0
+                       else _fmt_volume(kg=f"{float(m.group('weight')):g}")),
         }
 
         # 每筆費用自帶 VAT (使用者 2026-10-27 答案)
         items.append({
             "description": service_name,
             "amount": _dhl_clean_amount(m.group("charge")),
-            "vat": _dhl_clean_amount(m.group("vat")),
+            "vat": _dhl_clean_amount(m.group("vat") or "0"),
             **overrides,
         })
         if extra_pattern:
