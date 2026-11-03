@@ -5887,6 +5887,9 @@ def _looks_like_handal_item_desc(line: str) -> bool:
         return False
     if re.match(r'^[A-Z][A-Z ]*-[A-Z ]+-', upper):
         return False
+    # 船名 + 航次 (例如 "MTT SENARI 040E")：名稱後面是 3～4 位數航次，不是費用
+    if re.match(r'^[A-Z][A-Z ]*\s\d{3,4}[A-Z]?$', upper):
+        return False
     if (_HANDAL_CODE_RE.search(upper) or _HANDAL_ORDER_NO_RE.search(upper)
             or _HANDAL_INVOICE_NO_RE.search(upper)):
         return False
@@ -6078,13 +6081,17 @@ def _handal_pair_blocks(nums: List) -> Optional[List]:
 def _handal_pick_amounts(nums: List, n: int, target: Optional[int]) -> List:
     """名稱跟數字分開時，從數字清單挑出 n 筆金額；有總額時挑加總相符的排法。"""
     cands = []
+    # 沒有 "Rupiah" 行的掃描檔：總額接在金額後面，且等於前面金額的加總 (使用者 2026-11 樣本 NIKOMAS AGUST 2026 第 11 頁)
+    if len(nums) == 2 * n + 1 and nums[-1] in (sum(nums[:n]), sum(nums[n:2 * n])):
+        nums = nums[:-1]
     if len(nums) == n:
         cands.append(nums)
     elif len(nums) == 2 * n:
-        cands += [nums[1::2], nums[n:]]
+        # 金額段優先：欄位分開時 (單價段、金額段各一段)，整段對齊最可靠
         blocks = _handal_pair_blocks(nums)
         if blocks and len(blocks) == n:
             cands.append(blocks)
+        cands += [nums[n:], nums[1::2]]
     for c in cands:
         if target is not None and None not in c and sum(c) == target:
             return c
@@ -6107,8 +6114,13 @@ def _handal_extract_items(text: str):
     # 有 "DESCRIPTION" 表頭時從表頭開始 (上面的船名行不是費用)；
     # "For and on behalf" (簽名欄) 之後只收數字 (欄位分開的掃描版金額在後面)
     head = re.search(r'^\s*DESCRIPTION\b.*$', region, re.MULTILINE)
-    if head:
+    # 掃描檔 OCR 有時把表頭印在費用名稱之後 (使用者 2026-11 樣本 NIKOMAS AGUST 2026 第 11 頁)：
+    # 表頭前面已有費用名稱時，不切掉，免得名稱跟著被丟掉
+    if head and not any(_looks_like_handal_item_desc(ln.strip())
+                        for ln in region[:head.start()].splitlines()):
         region = region[head.end():]
+    elif head:
+        region = region[:head.start()] + region[head.end():]
     lines = [l.strip() for l in region.splitlines()]
     items = []
     pending_descs = []
@@ -6167,6 +6179,9 @@ def _handal_extract_items(text: str):
         amounts = _handal_pick_amounts(pending_numbers, len(pending_descs),
                                        None if total is None else total - done)
         for desc, amount in zip(pending_descs, amounts):
+            # 掃描檔表頭雜訊 (OCR 讀成 "NVIO"、"E.NLK.L E.M.K.U") 只有名稱、沒有金額：不是費用，跳過
+            if amount is None:
+                continue
             items.append({"description": desc, "amount": amount, "vat": None})
 
     return items
