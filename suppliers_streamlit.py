@@ -2178,7 +2178,7 @@ def detect_tata_af(text: str) -> bool:
 
 _TATA_AF_ITEM_LINE_RE = re.compile(
     r"^(?P<no>\d+)\s+(?P<date>\d{1,2}/[A-Za-z]{3}/\d{2})\s+(?P<mid>.*?)\s*"
-    r"(?P<attn>[A-Z]+\s+RONG)\s+(?P<hawb>\S+)\s+(?P<qty>\d+)\s*PKGS\s+"
+    r"(?P<attn>[A-Z]+\s+RONG|[A-Z]+)\s+(?P<hawb>\S+)\s+(?P<qty>\d+)\s*PKGS\s+"
     r"(?P<weight>[\d,]+)\s*kgs\s+Rp\s+(?P<kurs>[\d.]+)\s+(?P<amount>[\d.]+)\s+"
     r"(?P<vat>[\d.,]+)\s*$"
 )
@@ -2191,7 +2191,7 @@ _TATA_AF_ITEM_LINE_RE = re.compile(
 
 # 已知的國家字樣清單 (多字的排在前面，優先比對)：目前樣本出現這四種，
 # 之後遇到新國家字樣再加進來即可。
-_TATA_AF_KNOWN_COUNTRIES = ["HONG KONG", "CHINA", "VIETNAM", "TAIWAN"]
+_TATA_AF_KNOWN_COUNTRIES = ["HONG KONG", "CHINA", "VIETNAM", "TAIWAN", "ANGUILLA"]
 
 # 本行主體以外、不該被誤當成 Shipper/Country 換行殘字的行首字樣 (帳單下方
 # 小計/備註/銀行資訊區塊)。
