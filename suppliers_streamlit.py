@@ -4493,6 +4493,123 @@ def _parse_dhl_inbound_charges(text: str) -> Dict:
     return {"header": header, "items": items}
 
 
+# ---------------------------------------------------------------------------
+# (E) 掃描版多票帳單 (2026-11-03 JKTR002728131 SCAN)
+# ---------------------------------------------------------------------------
+#
+# 第 1 頁是彙總表；第 2 頁是前 3 票的 Air Waybill 表，OCR 把每個欄位打散成幾段
+# (票號、日期、起運/目的地、重量、標準運費、額外費用名稱/金額、VAT/總計)，
+# 各段依票的順序排列；第 3 頁是最後一票 (一行主行 + 額外費用行)。
+# 重量只有 DHL 體積重量 "W" 的數字可用，OCR 讀不到寫 N/A (使用者 2026-11-03)。
+
+_DHL_SCAN_AWB_LINE_RE = re.compile(r"^(\d{10})(?:\s+(\d{10}))?$")
+_DHL_SCAN_ROUTE_RE = re.compile(r"^[A-Z]{3}, [A-Z ]+$")
+_DHL_SCAN_WEIGHT_W_RE = re.compile(r"(\d+\.\d+)\s+W\b")
+_DHL_SCAN_VAT_LINE_RE = re.compile(r"^([\d,]+)\s*A\s*=?\s*([\d,]+)$")
+_DHL_SCAN_P3_MAIN_RE = re.compile(
+    r"^(?P<awb>\d{10})\s+(?P<ref>\d{10})\s+(?P<date>\d{2}-\d{2}-\d{4})\s+"
+    r"(?P<origin>[A-Z]{3}, [A-Z ]+?)\s+(?P<dest>[A-Z]{3}, [A-Z ]+?)\s+EXPRESS\s+"
+    r"(?P<items>\d+)\s+(?P<charge>[\d,]+)\s+(?P<vat>[\d,]+)\s+A\s+(?P<total>[\d,]+)\s*$",
+    re.MULTILINE)
+_DHL_SCAN_P3_EXTRA_RE = re.compile(
+    r"(?P<desc>DEMAND SURCHARGE|FUEL SURCHARGE)\s+(?P<amount>[\d,]+)\s+(?P<vat>[\d,]+)\s*A\s+[\d,]+")
+
+
+def _parse_dhl_scan_multi(text: str) -> Optional[Dict]:
+    lines = [s.strip() for s in text.split("\n")]
+
+    def find(pred, start=0, end=None):
+        end = len(lines) if end is None else end
+        return next((i for i in range(start, end) if pred(lines[i])), None)
+
+    p2 = find(lambda s: s.startswith("Number of Pages: 2 of"))
+    p3 = find(lambda s: s.startswith("Number of Pages: 3 of"))
+    if p2 is None or p3 is None or p3 <= p2:
+        return None
+    i_dest = find(lambda s: s.startswith("Destination / Consignee"), p2, p3)
+    i_type = find(lambda s: s.startswith("Type of"), p2, p3)
+    i_charge = find(lambda s: s == "Charge", p2, p3)
+    i_extra = find(lambda s: s.startswith("Extra Charges"), p2, p3)
+    i_extra_amt = find(lambda s: s == "Extra", i_extra or p2, p3)
+    i_vat = find(lambda s: s.startswith("VAT / Code"), p2, p3)
+    if None in (i_dest, i_type, i_charge, i_extra, i_extra_amt, i_vat):
+        return None
+
+    # 票號 (可能跟 Shipper's Reference 同一行，也可能分行)
+    awbs: List[List[Optional[str]]] = []
+    for s in lines[p2:i_dest]:
+        if re.fullmatch(r"0853\d{6}", s) and awbs and awbs[-1][1] is None:
+            awbs[-1][1] = s  # 獨立一行的 Shipper's Reference
+            continue
+        m = _DHL_SCAN_AWB_LINE_RE.match(s)
+        if m:
+            awbs.append([m.group(1), m.group(2)])
+    dates = [s for s in lines[p2:i_dest] if re.fullmatch(r"\d{2}-\d{2}-\d{4}", s)]
+    origins = [s for s in lines[p2:i_dest] if _DHL_SCAN_ROUTE_RE.match(s)]
+    dests = [s for s in lines[i_dest:i_type] if _DHL_SCAN_ROUTE_RE.match(s)]
+
+    # 重量：每票的 "EXPRESS" 行開始一個區塊，只取 DHL 體積重量 (W)
+    blocks: List[List[str]] = []
+    for s in lines[i_type:i_charge]:
+        if s.startswith("EXPRESS"):
+            blocks.append([])
+        if blocks:
+            blocks[-1].append(s)
+    weights = [(_DHL_SCAN_WEIGHT_W_RE.search(" ".join(b)) or [None, None])[1] for b in blocks]
+
+    # 標準運費 "2 4,877,574" = 件數、金額
+    std = [_dhl_clean_amount(m.group(1)) for s in lines[i_charge + 1:i_extra]
+           if (m := re.fullmatch(r"\d+\s+([\d,]+)", s))]
+    names = [s for s in lines[i_extra + 1:i_extra_amt] if re.fullmatch(r"[A-Z][A-Z ]+", s)
+             and s != "DESCRIPTION"]
+    amts = [_dhl_clean_amount(s) for s in lines[i_extra_amt + 1:i_vat] if re.fullmatch(r"[\d,]+", s)]
+    vats = [(_dhl_clean_amount(m.group(1)), _dhl_clean_amount(m.group(2)))
+            for s in lines[i_vat + 1:p3] if (m := _DHL_SCAN_VAT_LINE_RE.match(s))]
+
+    n = len(awbs)
+    if not (n and len(dates) == n and len(origins) == n and len(dests) == n
+            and len(weights) == n and len(std) == n and len(names) == 2 * n
+            and len(amts) == 2 * n and len(vats) == 3 * n):
+        return None  # 版面對不上：讓呼叫端改用掃描檔備援
+
+    p3_text = "\n".join(lines[p3:])
+    service = _search(r"^(EXPRESS WORLDWIDE [A-Z]+)\s*$", text)
+    items: List[Dict] = []
+
+    def add(k, awb, ref, date, origin, dest, weight, charge_row, extra_rows):
+        overrides = {
+            "bl_no": awb,
+            "order_no": ref,
+            "onboard_date": _dhl_parse_date(date),
+            "port_of_loading": origin,
+            "port_of_discharge": dest,
+            "volume": _fmt_volume(kg=f"{float(weight):g}") if weight else None,
+        }
+        for desc, amount, vat in [charge_row, *extra_rows]:
+            items.append({"description": desc, "amount": amount, "vat": vat, **overrides})
+
+    for k in range(n):
+        awb, ref = awbs[k]
+        add(k, awb, ref, dates[k], origins[k], dests[k], weights[k],
+            (service, std[k], vats[3 * k][0]),
+            [(names[2 * k + j], amts[2 * k + j], vats[3 * k + j + 1][0]) for j in (0, 1)])
+
+    # 第 3 頁：最後一票
+    for m in _DHL_SCAN_P3_MAIN_RE.finditer(p3_text):
+        nxt = _DHL_SCAN_P3_MAIN_RE.search(p3_text, m.end())
+        block = p3_text[m.end(): nxt.start() if nxt else len(p3_text)]
+        extras = [(e.group("desc"), _dhl_clean_amount(e.group("amount")), _dhl_clean_amount(e.group("vat")))
+                  for e in _DHL_SCAN_P3_EXTRA_RE.finditer(block)]
+        add(n, m.group("awb"), m.group("ref"), m.group("date"), m.group("origin"), m.group("dest"), None,
+            (service, _dhl_clean_amount(m.group("charge")), _dhl_clean_amount(m.group("vat"))), extras)
+
+    header = _dhl_common_header(text)
+    for code in ("order_no", "arrive_date", "mbl_no", "bl_no", "onboard_date",
+                 "port_of_loading", "port_of_discharge", "volume", "vessel", "container_no"):
+        header[code] = None
+    return {"header": header, "items": items}
+
+
 def parse_dhl(text: str) -> Dict:
     if _dhl_is_unreadable(text):
         # 標記值要跟 validation_streamlit.UNREADABLE_DESC 一致 (驗證層判 ERROR)
@@ -4506,6 +4623,8 @@ def parse_dhl(text: str) -> Dict:
         result = _parse_dhl_duty(text)
     elif _dhl_is_regular(text) and (regular := _parse_dhl_regular(text)) is not None:
         result = regular
+    elif _dhl_is_regular(text) and (scan_multi := _parse_dhl_scan_multi(text)) is not None:
+        result = scan_multi
     else:
         result = _parse_dhl_scanned_customs(text)
     # OCR 把抬頭讀成 "PT GIROTIKA SEMESTA" 時供應商會抓不到：供應商固定
