@@ -9951,7 +9951,10 @@ def _tw_cong_no_sheets(book) -> Tuple[List[Dict], List[Dict]]:
                     usd = consts.get((ridx, c))
                 if usd:                                   # 0 或空白不列
                     # Excel ROUND 是四捨五入 (金額皆為正數)
-                    items.append({**base, "description": name, "amount": int(usd * rate + 0.5),
+                    # 費用名稱加註 USD 金額 (答案檔：DO (USD 65)、O/FRT (USD 1,000)、CFS/THC (USD 35.84))
+                    usd_text = f"{usd:,.2f}".rstrip("0").rstrip(".")
+                    items.append({**base, "description": f"{name} (USD {usd_text})",
+                                  "amount": int(usd * rate + 0.5),
                                   "vat": None})
             # 每張發票最後一列 VAT (本檔為 0)
             items.append({**base, "description": "VAT", "amount": None,
