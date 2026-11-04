@@ -86,5 +86,35 @@
   "HANDAL": {
     "config": {},
     "score": 1.0
+  },
+  "DSV_VN": {
+    "config": {
+      "layout": true
+    },
+    "score": 1.0
+  },
+  "MOL": {
+    "config": {},
+    "score": 1.0
+  },
+  "DHL_VN": {
+    "config": {},
+    "score": 1.0
+  },
+  "YUSEN": {
+    "config": {},
+    "score": 1.0
+  },
+  "EXPEDITORS": {
+    "config": {},
+    "score": 1.0
+  },
+  "OPL_USD": {
+    "config": {},
+    "score": 1.0
+  },
+  "INDOPROSTIME_TRANSPORT": {
+    "config": {},
+    "score": 1.0
   }
 }
