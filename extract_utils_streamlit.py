@@ -1875,17 +1875,25 @@ def quality_score(rows: List[Dict]) -> float:
 # 印尼供應商金額稽核的容許誤差 (IDR)：100 以內都不算錯誤 (使用者 2026-11-03 規定，
 # 所有印尼供應商適用)。美元帳單不適用 (100 USD 不是小數點誤差)，列在這裡排除。
 INDO_AUDIT_TOLERANCE = 100
-VN_AUDIT_TOLERANCE = 100  # 越南帳單以 VND 計，容許誤差 VND 100 (使用者 2026-11-04 原則)
+VN_AUDIT_TOLERANCE = 100  # 越南 VND 帳單的容許誤差 (使用者 2026-11-04 原則，只適用 VND)
 NON_IDR_SUPPLIERS = {"OPL_USD"}
 
 
 def audit_tolerance(supplier_key: Optional[str]) -> float:
     """金額稽核的容許誤差：印尼供應商 (供應商編號 ID 開頭、非美元帳單) 為 100，
-    越南供應商 (VN 開頭) 為 VND 100，其他為 ±1 (四捨五入誤差)。"""
+    其他為 ±1 (四捨五入誤差)。越南 VND 帳單的 100 見 vnd_tolerance()。"""
     if supplier_key and supplier_number(supplier_key).startswith("ID") \
             and supplier_key not in NON_IDR_SUPPLIERS:
         return INDO_AUDIT_TOLERANCE
-    if supplier_key and supplier_number(supplier_key).startswith("VN"):
+    return 1
+
+
+def vnd_tolerance(page_text: str) -> float:
+    """越南供應商一頁帳單的容許誤差。幣別依供應商國家 (越南 = VND)：
+    文字沒有 USD 就視為 VND，給 VN_AUDIT_TOLERANCE (100)；有 USD (含混合幣別) 維持 ±1。
+    (Excel 帳單文字常沒有 VND 字樣，所以用國家預設，見 CLAUDE.md 幣別規則)"""
+    upper = (page_text or "").upper()
+    if "USD" not in upper:
         return VN_AUDIT_TOLERANCE
     return 1
 
@@ -1958,12 +1966,14 @@ def audit_invoice_totals(
     deduction_prefixes = tuple(p.upper() for p in entry.get("deduction_prefixes", ()))
     need_vat_split = bool(extract_grand_total_fn or extract_final_total_fn or sheet_totals_fn)
     base_tolerance = audit_tolerance(supplier_key)
+    is_vn = supplier_number(supplier_key).startswith("VN")
     tolerance_fn = entry.get("audit_tolerance_fn")
 
     def _tolerance_of(page_text: str) -> float:
-        """這一頁的容許誤差：有 audit_tolerance_fn 就用它，否則用預設 (見 audit_tolerance())。"""
+        """這一頁的容許誤差：有 audit_tolerance_fn 就用它；越南供應商看這一頁是不是 VND (見 vnd_tolerance())；
+        其他用預設 (見 audit_tolerance())。"""
         if not tolerance_fn:
-            return base_tolerance
+            return vnd_tolerance(page_text) if is_vn else base_tolerance
         try:
             return tolerance_fn(page_text)
         except Exception:

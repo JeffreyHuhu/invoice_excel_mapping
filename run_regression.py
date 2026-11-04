@@ -17,6 +17,10 @@ import sys
 import glob
 import os
 
+# Windows 主控台預設是 cp950，印中文或符號會崩潰 (UnicodeEncodeError)，這裡固定改成 UTF-8
+sys.stdout.reconfigure(encoding="utf-8")
+sys.stderr.reconfigure(encoding="utf-8")
+
 import suppliers_streamlit  # noqa: F401  (觸發 register_supplier())
 import extract_utils_streamlit as eu
 
