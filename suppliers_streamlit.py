@@ -9223,6 +9223,15 @@ def _vt_parse_sheet(name: str, rows: List[list], cfg: Dict, supplier: str,
     keys = [_vt_col(labels, k) for k in cfg["key"]]
     # volume_raw：材積直接照表上的數字 (樣本答案 VN06 IMP/EXP，2026-11-04)，依序取第一個有值的欄
     raw_vol_cols = [_vt_col(labels, k) for k in cfg.get("volume_raw", ())]
+    # pct_col：費用名稱裡 "{pct}" 代入的百分比欄 (樣本答案 VN06 NB 的 FUEL SURCHARGE 16%，2026-11-05)
+    pct_col = _vt_col(labels, cfg["pct_col"]) if cfg.get("pct_col") else None
+
+    def _fee_desc(desc, row):
+        if "{pct}" not in desc:
+            return desc
+        v = _vn_num(_vn_cell(row, pct_col)) if pct_col is not None else None
+        pct = (round(v * 100) if v is not None and v <= 1 else round(v or 0))
+        return desc.replace("{pct}", str(pct))
     # 發票號碼由好幾欄用逗號連起來 (VN02 代墊吊櫃費：SỐ HĐ NÂNG, SỐ HĐ HẠ，使用者 2026-10-27)
     join_keys = [_vt_col(labels, k) for k in cfg.get("key_join", ())]
     fees = [(find(f[0]), f[1]) for f in cfg["fees"]]
@@ -9327,13 +9336,15 @@ def _vt_parse_sheet(name: str, rows: List[list], cfg: Dict, supplier: str,
         if cells and re.match(r"^(V\.?A\.?T\b|THUE)", _vt_norm(cells[0])) and cfg.get("vat_row"):
             nums = [_vn_amount(c) for c in cells[1:] if _vn_amount(c)]
             if nums:
-                items.append({"description": _vn_text(cells[0]), "amount": None, "vat": nums[0],
+                items.append({"description": cfg.get("vat_label") or _vn_text(cells[0]), "amount": None, "vat": nums[0],
                               **common, "invoice_no": doc_key or f"{name.strip()} VAT"})
                 # vat_no_date：整張 VAT 列沒有日期 (樣本答案 VN06 IMP/EXP，2026-11-04)
                 # 其他欄位也填 N/A，避免表頭層的共用欄位 (提單、材積) 被補進 VAT 列
                 if cfg.get("vat_no_date"):
+                    # 有 doc_key (整張一個發票號碼) 時，VAT 列仍用該號碼 (VN06 NB)
                     items[-1].update({k: "N/A" for k in (
-                        "invoice_no", "invoice_date", "bl_no", "order_no", "volume", "port_of_loading", "port_of_discharge",
+                        ("invoice_no",) if not doc_key else ()) + (
+                        "invoice_date", "bl_no", "order_no", "volume", "port_of_loading", "port_of_discharge",
                         "vessel", "container_no", "shipper", "onboard_date", "arrive_date")})
             break
     if cfg.get("vat_total"):
@@ -9346,6 +9357,7 @@ def _vt_parse_sheet(name: str, rows: List[list], cfg: Dict, supplier: str,
                                   "vat": nums[-1], **common, "invoice_no": doc_key or f"{name.strip()} VAT"})
                 break
     last_key = last_date = None
+    cur_grp, grp_parts = None, []      # merge_no_fee 用：同一台車的列
     last_base, group_n, last_fields = "", 0, {}
     sheet_year = None
     if col.get("date") is not None:
@@ -9431,9 +9443,26 @@ def _vt_parse_sheet(name: str, rows: List[list], cfg: Dict, supplier: str,
                 head["volume"] = int(raw_vol) if float(raw_vol).is_integer() else round(raw_vol, 3)
             else:
                 head["volume"] = _vn_text(raw_vol)
+        if cfg.get("cbm_always") and col.get("cbm") is not None and _vn_cell(row, col["cbm"]) not in (None, ""):
+            # 有 CBM 欄就一律寫 CBM，即使是 0 (樣本答案 08-CFS：CBM 0 寫 "0 CBM"，不改用重量)
+            cbm_val = _vn_num(_vn_cell(row, col["cbm"])) or 0
+            head["volume"] = f"{round(cbm_val, 3):g} CBM"
+        if cfg.get("kg_always") and col.get("kg") is not None and _vn_cell(row, col["kg"]) not in (None, ""):
+            # 同上，有 KG 欄就一律寫 KG (樣本答案 08-AIR：KG 0 寫 "0 KG")
+            kg_val = _vn_num(_vn_cell(row, col["kg"])) or 0
+            head["volume"] = f"{round(kg_val, 3):g} KG"
+        if cfg.get("merge_no_fee"):
+            # 同一台車的續行列 (沒有費用、只有單號)：併入上一張 (有費用的那一列)，
+            # 單號用 ", " 連接、材積用 " + " 連接 (樣本答案 VN06 NB，2026-11-04)
+            if any(_vn_amount(_vn_cell(row, c)) for c, _ in fees) or cur_grp is None:
+                cur_grp = len(grp_parts)
+                grp_parts.append([])
+            grp_parts[cur_grp].append({"bl_no": head.get("bl_no"), "order_no": head.get("order_no"),
+                                       "volume": head.get("volume")})
+            head["_grp"] = cur_grp
         # 費用名稱 "@欄位" 代表取該欄的文字 (例如 VN07 Remark 欄 "Late come charge")
         row_items = [{"description": (_vn_text(_vn_cell(row, find(desc[1:]))) or desc[1:])
-                      if desc.startswith("@") else desc,
+                      if desc.startswith("@") else _fee_desc(desc, row),
                       "amount": _vn_amount(_vn_cell(row, c)), "vat": None, **head}
                      for c, desc in fees if _vn_amount(_vn_cell(row, c))]
         for it in row_items:
@@ -9480,6 +9509,19 @@ def _vt_parse_sheet(name: str, rows: List[list], cfg: Dict, supplier: str,
             value = _vn_num(_vn_cell(row, col[name_])) if col.get(name_) is not None else None
             if value is not None:
                 t[i] = (t[i] or 0) + value
+    if cfg.get("merge_no_fee"):
+        for it in items:
+            grp = it.pop("_grp", None)
+            if grp is None:
+                continue
+            parts = grp_parts[grp]
+
+            def joined(field, sep=", "):
+                vals = [str(p[field]) for p in parts if p.get(field) not in (None, "", "N/A")]
+                return sep.join(dict.fromkeys(vals)) or "N/A"
+            it["bl_no"] = joined("bl_no")
+            it["order_no"] = joined("order_no")
+            it["volume"] = joined("volume", " + ")
     # 整張表一個 VAT 的列沒有自己的日期，抬頭也沒寫日期時：用這張表最晚的日期
     dated = [datetime.datetime.strptime(it["invoice_date"], "%d %b %Y") for it in items
              if it.get("invoice_date") and re.fullmatch(r"\d{2} \w{3} \d{4}", it["invoice_date"])]
@@ -9623,7 +9665,15 @@ def _vt_path_customer(book) -> Optional[str]:
 def _vn_full_consignee(name: Optional[str]) -> Optional[str]:
     """客戶簡稱 -> 全名 (_VN_CONSIGNEES)。去掉空白與符號後跟簡稱完全相同才換，其他照抄。"""
     flat = re.sub(r"[^A-Z]", "", _vt_norm(name or ""))
-    return next((full for key, full in _VN_CONSIGNEES.items() if key.replace(" ", "") == flat), name)
+    full = next((full for key, full in _VN_CONSIGNEES.items() if key.replace(" ", "") == flat), None)
+    if full:
+        return full
+    # 整句越南公司名 ("CÔNG TY TNHH POU HUNG VIỆT NAM"，樣本答案 VN06 NB 表)：含 "POU 寶成廠別" 且是公司名才換
+    norm = _vt_norm(name or "")
+    m = re.search(r"\bPOU\s*(SUNG|CHEN|YUEN|LI|HUNG)\b", norm)
+    if m and ("CONG TY" in norm or "VIET" in norm):
+        return _VN_CONSIGNEES.get(f"POU {m.group(1)}", name)
+    return name
 
 
 def _vt_name_month(book) -> Optional[Tuple[int, int]]:
@@ -10145,11 +10195,19 @@ _VT_BINH_TAN = [
                       "date": "DEC DATE",
                       "fields": {"order_no": "=INV", "bl_no": ("LOT NO", "DEC NO")}, "cbm": "TOTAL CFS/AIR",
                       "volume_raw": ("TOTAL CON", "TOTAL CFS/AIR")}),
+    # NB / PHV (2026-11-05 樣本答案，兩張表格式相同)：費用名稱帶英文說明 (寫入前在解析時加上)，FUEL SURCHARGE 的百分比
+    # 取 "TỶ LỆ TĂNG GIÁ…" 欄 (0.16 -> 16%)；VAT 列名稱 "Thuế VAT (8%) (VAT 8%)"
     (r"^(NB|PHV)$", {"header": "SO LO", "key": ["=SO LO"],
-                     "fees": [("CUOC VC CHUA VAT", None), ("SO TIEN PHU THU", None)],
-                     "total": "TONG TIEN THANH TOAN", "vat_row": True, "date": "=NGAY",
-                     "cbm": "SO LUONG CBM",
-                     "fields": {"vessel": "SO XE", "container_no": "SO XE", "order_no": "SO INV"}}),
+               "fees": [("CUOC VC CHUA VAT", "CƯỚC VC CHƯA VAT (TRUCKING FREIGHT)"),
+                        ("SO TIEN PHU THU", "SỐ TIỀN PHỤ THU (FUEL SURCHARGE {pct}%)")],
+               "pct_col": "TY LE TANG GIA",
+               "vat_label": "Thuế VAT (8%) (VAT 8%)", "vat_last": True,
+               "total": "TONG TIEN THANH TOAN", "vat_row": True, "date": "=NGAY",
+               "cbm": "SO LUONG CBM",
+               # 2026-11-04 樣本答案：發票號碼 = 抬頭 "Đính kèm hóa đơn số" (整張一個)，SỐ LÔ 放 B/L NO.，
+               # 船名與貨櫃號碼留空
+               "doc_key": r"(\d[A-Z]\d{2}[A-Z]{3} \d{3,5})", "merge_no_fee": True, "vat_no_date": True,
+               "fields": {"order_no": "SO INV", "bl_no": "=SO LO"}}),
     # --- 2026-10-28 抽樣補的運費表 (工作表名稱也有 CFS/AIR，用必要欄位區分) ---
     # PLV CFS / PLV AIR：AMOUNT | % TĂNG | SỐ TIỀN % TĂNG | AMOUNT SAU TĂNG | VAT | TOTAL
     (r"(?!)", {"header": "AMOUNT SAU TANG", "two_rows": False, "key": ["SO LO", "=LOT NO"],
@@ -10208,12 +10266,24 @@ _VT_BINH_TAN = [
                "const": {"port_of_discharge": "VIETNAM"},
                "fields": {"vessel": "=SO XE", "container_no": "=SO XE", "port_of_loading": "TEN CANG"}}),
     # 舊版 08-CFS / 08-AIR (有 ST/1 LÔ 欄)
-    (r"CFS|AIR", {"header": "SO LO", "two_rows": False, "key": ["SO LO"], "name_require": "ST/1 LO",
-                  "fees": [("ST/1 LO CHUA VAT", "Cước vận chuyển"), ("PHU PHI XANG DAU", None)],
+    (r"CFS", {"header": "SO LO", "two_rows": False, "key": ["SO LO"], "name_require": "ST/1 LO",
+                  # 2026-11-05 樣本答案 (08-CFS)：費用名稱照表頭 + 英文說明；SỐ LÔ 同時當發票號碼與 B/L NO.；
+                  # 船名與貨櫃號碼留空
+                  "fees": [("ST/1 LO CHUA VAT", "ST/1 lô chưa VAT (TRUCKING FREIGHT)"),
+                           ("PHU PHI XANG DAU", "PHỤ PHÍ XĂNG DẦU (16%) (FUEL SURCHARGE)")],
                   "total": "TONG TIEN/1 LO", "vat": "VAT 8%", "vat_desc": "VAT 8%",
                   "grand": ("=TONG CONG", "=TOTAL"), "date": "NGAY NHAN HANG", "ffill_date": True,
-                  "cbm": "CMB", "kg": "=KG",
-                  "fields": {"vessel": "SO XE", "container_no": "SO XE", "port_of_loading": "=CANG"}}),
+                  "cbm": "CMB", "kg": "=KG", "cbm_always": True,
+                  "fields": {"bl_no": "=SO LO", "port_of_loading": "=CANG"}}),
+    (r"AIR", {"header": "SO LO", "two_rows": False, "key": ["SO LO"], "name_require": "ST/1 LO",
+                  # 2026-11-05 樣本答案 (08-CFS)：費用名稱照表頭 + 英文說明；SỐ LÔ 同時當發票號碼與 B/L NO.；
+                  # 船名與貨櫃號碼留空
+                  "fees": [("ST/1 LO CHUA VAT", "ST/1 lô chưa VAT (TRUCKING FREIGHT)"),
+                           ("PHU PHI XANG DAU", "PHỤ PHÍ XĂNG DẦU (16%) (FUEL SURCHARGE)")],
+                  "total": "TONG TIEN/1 LO", "vat": "VAT 8%", "vat_desc": "VAT 8%",
+                  "grand": ("=TONG CONG", "=TOTAL"), "date": "NGAY NHAN HANG", "ffill_date": True,
+                  "cbm": "CMB", "kg": "=KG", "kg_always": True,
+                  "fields": {"bl_no": "SO LO", "port_of_loading": "=CANG"}}),
 ]
 
 
