@@ -128,5 +128,9 @@
   "BINH_TAN": {
     "config": {},
     "score": 1.0
+  },
+  "MAERSK_VN": {
+    "config": {},
+    "score": 1.0
   }
 }

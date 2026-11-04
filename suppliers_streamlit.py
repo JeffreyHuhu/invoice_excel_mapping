@@ -9194,6 +9194,10 @@ def _vt_loose_date(text: str, year: Optional[str]) -> Optional[str]:
     months = ("JAN", "FEB", "MAR", "APR", "MAY", "JUN", "JUL", "AUG", "SEP", "OCT", "NOV", "DEC")
     if m and m.group(1).upper() in months and year:
         return _format_date_en(m.group(2), str(months.index(m.group(1).upper()) + 1), year)
+    # "17-Aug"、"17 Aug" (日在前、沒有年份，年份用同一張表的年份) (2026-11-05 VN07 MAERSK Excel)
+    m = re.match(r"(\d{1,2})[-\s]([A-Za-z]{3})$", text.strip())
+    if m and m.group(2).upper() in months and year:
+        return _format_date_en(m.group(1), str(months.index(m.group(2).upper()) + 1), year)
     return None
 
 
@@ -9495,8 +9499,21 @@ def _vt_parse_sheet(name: str, rows: List[list], cfg: Dict, supplier: str,
             extra = (_vn_num(_vn_cell(row, col["total"])) or 0) - sum(it.get("amount") or 0 for it in row_items)
             if extra > 0.5:
                 row_items.append({"description": cfg["rest_fee"], "amount": round(extra, 2), "vat": None, **head})
+        # desc_usd：費用名稱後面加括號註記 J 欄的外幣金額 ("Late come charge (USD 13.824)")；
+        # 數字加 "USD " 前綴，文字照抄 ("Min charge 50USD")。(2026-11-05 VN07 答案提示列)
+        usd_col = find(cfg["desc_usd"]) if cfg.get("desc_usd") else None
+        if usd_col is not None and row_items:
+            raw_usd = _vn_cell(row, usd_col)
+            usd_num = _vn_num(raw_usd)
+            usd_note = f"USD {usd_num:g}" if usd_num is not None else _vn_text(raw_usd)
+            if usd_note:
+                for it in row_items:
+                    it["description"] = f"{it['description']} ({usd_note})"
         vat =_vn_amount(_vn_cell(row, col.get("vat"))) if col.get("vat") is not None else None
-        if vat:
+        if vat and cfg.get("vat_same_row") and row_items:
+            # 每列都有自己的 VAT：寫在費用同一列的 vat 欄，不另外拆成 VAT 列 (2026-11-05 VN07 MAERSK Excel)
+            row_items[0]["vat"] = vat
+        elif vat:
             row_items.append({"description": cfg.get("vat_desc", "VAT"), "amount": None, "vat": vat, **head})
         if not row_items:
             continue
@@ -10877,10 +10894,11 @@ def parse_maersk_vn(text: str) -> Dict:
     h: Dict[str, Optional[str]] = {}
     series = _search(r"K[ýy] hi[ệe]u[^:]*:\s*(\S+)", text)
     number = _search(r"S[ốo] \(Invoice No\.\):\s*(\d+)", text)
-    h["invoice_no"] = number   # 只用號碼 (發票符號 series 待使用者確認要不要加)
+    # 發票號碼 = 發票符號 + "-" + 號碼 (樣本答案 VN07 "1C26TSG-00164419"，使用者 2026-11-05 確認)
+    h["invoice_no"] = f"{series}-{number}" if series and number else number
     h["invoice_date"] = _vn_pdf_date(_search(r"\(Invoice Date\):\s*(\S+)", text))
-    h["supplier"] = "CÔNG TY TNHH MAERSK LOGISTICS & SERVICES VIỆT NAM"
-    h["consignee"] = _search(r"S[ốo] \(Invoice No\.\):[^\n]*\n(.+)", text)
+    h["supplier"] = "MAERSK LOGISTICS & SERVICES VIETNAM COMPANY LIMITED"   # 英文名 (使用者確認)
+    h["consignee"] = _vn_full_consignee(_search(r"S[ốo] \(Invoice No\.\):[^\n]*\n(.+)", text))
     h["port_of_discharge"] = _search(r"\(POD\):\s*(\S+)", text)
     h["port_of_loading"] = _search(r"\(POL\):\s*(\S+)", text)
     h["order_no"] = _search(r"\(Ref No\):\s*(\S+)", text)
@@ -10895,8 +10913,10 @@ def parse_maersk_vn(text: str) -> Dict:
     vat = _search(r"\(Total VAT amount\):\s*([\d,.]+)", text)
     rate = _search(r"\s(\d+)%\s+[\d,.]+$", text)
     if vat:
+        # 整張 VAT 列：抬頭的單號、港口、材積填 N/A (樣本答案 VN07 PDF，2026-11-05)
         items.append({"description": f"VAT {rate}%" if rate else "VAT", "amount": None,
-                      "vat": _vn_pdf_num(vat)})
+                      "vat": _vn_pdf_num(vat), "order_no": "N/A", "bl_no": "N/A", "mbl_no": "N/A",
+                      "port_of_loading": "N/A", "port_of_discharge": "N/A", "volume": "N/A"})
     return {"header": h, "items": items or [{"description": None, "amount": None, "vat": None}]}
 
 
@@ -10908,14 +10928,21 @@ def _maersk_vn_grand(text: str):
     return _vn_pdf_num(_search(r"\(Total amount\):\s*([\d,.]+)", text))
 
 
+# 每列的 VAT 寫在費用同一列 (vat_same_row)；日期用每列 INVOICE DATE 欄 (只有日月時年份取工作表標題)
+# 供應商名稱用英文 (2026-11-05 使用者確認 VN07 Excel 用英文名)
 _MAERSK_VN_SHEET = [
     (r".", {"header": "BILL NO", "key": ["=INVOICE NO.", "BILL NO"],
-            "fees": [("AMOUNT (NOT VAT)", "@REMARK")], "vat": "=VAT", "vat_desc": "VAT 8%",
+            "fees": [("AMOUNT (NOT VAT)", "@REMARK")], "vat": "=VAT", "vat_desc": "VAT 8%", "vat_same_row": True,
+            "desc_usd": "USD",
+            # 檔案沒有客戶名稱；使用者指定依地點 Đồng Tháp 為 YUE DE (2026-11-05)
+            "const": {"consignee": "YUE DE VIETNAM COMPANY LIMITED"},
             "total": "AMOUNT (NOT VAT)", "grand": "TOTAL (VND)", "cbm": "=CBM", "two_rows": False,
-            "fields": {"bl_no": "BILL NO", "order_no": "SO BOOKING", "onboard_date": "NGAY XUAT"}}),
+            "date": "INVOICE DATE",
+            "fields": {"bl_no": "BILL NO", "order_no": "SO BOOKING", "onboard_date": "NGAY XUAT",
+                       "mbl_no": "SO TO KHAI"}}),
 ]
 _maersk_vn_sheet_parse, _maersk_vn_sheet_totals = _vt_make(
-    "CÔNG TY TNHH MAERSK LOGISTICS & SERVICES VIỆT NAM", _MAERSK_VN_SHEET)
+    "MAERSK LOGISTICS & SERVICES VIETNAM COMPANY LIMITED", _MAERSK_VN_SHEET)
 
 register_supplier(
     # 月結 PDF (LOCAL CHARGES) 是好幾張電子發票合在一起：每頁一張 (2026-10-28 抽樣)
