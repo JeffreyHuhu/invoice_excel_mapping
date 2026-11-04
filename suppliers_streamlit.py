@@ -3911,8 +3911,17 @@ def _dhl_common_header(text: str) -> Dict[str, Optional[str]]:
     # CREDIT NOTE 的號碼照帳單印的字母 O 保留 (使用者 2026-11-03 確認 BDOIR...)，不換成 0
     fix_zero = (lambda v: v) if _dhl_is_credit_note(text) else _dhl_fix_ocr_zero
     # Credit Note 的抬頭標籤是 "Credit Number:" (2026-11-03 DHL CREDIT NOTE BDOIR00043483)
-    m = re.search(r"^([^\n]+?)[ \t]+(?:Invoice|Credit)[ \t]+Number[ \t]*:", text, re.MULTILINE)
-    header["consignee"] = m.group(1).strip() if m else (first_line or None)
+    # 標籤 OCR 常讀成 "Inveice"，用 Inv\w{2,5} 容許 (sample16/20 收件人 = Invoice Number 同一行左側文字)
+    m = re.search(r"^([^\n]+?)[ \t]+(?:Inv\w{2,5}|Credit)[ \t]+Number[ \t]*:", text, re.MULTILINE)
+    # 抬頭標籤 OCR 常讀成 "Inveice Number" 而對不上，改用第一行；第一行後面常黏 OCR 雜訊
+    # (2026-11-04 DHL sample20："PT. BIROTIKA SEMESTA (ielanal ;")，只取公司全名
+    birotika = re.match(r"(PT\.?\s*BIROTIKA\s+SEMESTA)\b", first_line, re.IGNORECASE)
+    if m:
+        header["consignee"] = m.group(1).strip()
+    elif birotika:
+        header["consignee"] = birotika.group(1)
+    else:
+        header["consignee"] = first_line or None
     header["supplier"] = _search(r"(PT\s+BIROTIKA\s+SEMESTA)\s*/\s*DHL\s+EXPRESS", text)
     if header["supplier"]:
         header["supplier"] = f"{header['supplier']} / DHL EXPRESS"
@@ -4481,20 +4490,53 @@ def _dhl_is_unreadable(text: str) -> bool:
 # 費用在第 1 頁 "Billing Details" 區塊，每一行 "<費用名稱> <未稅> <VAT> <含稅>"。
 # HWB Number 就是 B/L NO. (每張帳單一個，套用到每一列)。
 
-_DHL_IC_BLOCK_RE = re.compile(r"Billing Details(?P<block>.*?)Payment Terms", re.DOTALL)
+# 掃描版的 "Payment Terms" 常被 OCR 讀成 "Payment Tons"，所以結束標記多放幾種 (2026-11-03 D000794106)
+_DHL_IC_BLOCK_RE = re.compile(r"Billing Details(?P<block>.*?)(?:Payment\s+T|Sub-?\s*Total|Please Pay)", re.DOTALL)
 _DHL_IC_ITEM_RE = re.compile(
     # 名稱可能有括號 "Bonded Storage (1 day(s))" (2026-11-03 D000811556)
     r"^(?P<desc>[A-Za-z][A-Za-z0-9 \-()/.]*?)\s+(?P<amount>[\d,]+)\s+(?P<vat>[\d,]+)\s+(?P<total>[\d,]+)\s*$",
     re.MULTILINE)
 
 
+def _dhl_is_scan_reimburse(text: str) -> bool:
+    """掃描版 INBOUND 代墊費用 (2026-11-03 D000794106)：版面跟 INBOUND CHARGES 相同，
+    但預設 OCR 常漏讀 "INBOUND CHARGES INVOICE" 抬頭 (抬頭印在框內)，所以改認 "Reimburse"
+    收款句 + "Billing Details" 費用表。psm 6 會把 Please 讀成 Piease，所以只認 REIMBURS。"""
+    upper = text.upper()
+    return "REIMBURS" in upper and "BILLING DETAILS" in upper
+
+
 def _dhl_is_inbound_charges(text: str) -> bool:
-    return "INBOUND CHARGES INVOICE" in text.upper()
+    return "INBOUND CHARGES INVOICE" in text.upper() or _dhl_is_scan_reimburse(text)
+
+
+# 機場代碼只有英文字母，OCR 常把 S 讀成 5 (SGN → 5GN)
+_DHL_AIRPORT_OCR_FIX = str.maketrans("0158", "OISB")
+
+
+def _dhl_fill_shipment_details(text: str, header: Dict) -> None:
+    """INBOUND 帳單的 Shipment Details 區塊 (起運地、目的地、到達日、重量)，有印才填。
+    標籤用寬鬆寫法因為 OCR 會讀壞 ("Deslinallan"、"Data")。發票號碼 OCR 常丟掉字首 D
+    (6000794106)，所以只取 9 碼數字，前面補 D。"""
+    m = re.search(r"Inv\w{2,5}\s+Number\s*[:;]\s*\S*?(\d{9})\b", text)
+    if m:
+        header["invoice_no"] = "D" + m.group(1)
+    origin = _search(r"Origin:\s*([A-Z0-9]{3})\b", text)
+    dest = _search(r"Des\w*:\s*([A-Z0-9]{3})\b", text)
+    header["port_of_loading"] = origin.translate(_DHL_AIRPORT_OCR_FIX) if origin else None
+    header["port_of_discharge"] = dest.translate(_DHL_AIRPORT_OCR_FIX) if dest else None
+    arrival = _search(r"Arriv\w*\s+Da\w*:\s*(\d{1,2}/\d{1,2}/\d{4})", text)
+    header["arrive_date"] = _dhl_parse_date(arrival.replace("/", "-")) if arrival else None
+    # 體積欄照 Shipment Details 的 Weight 印 "3.5 KG" (只有重量 → 材積規則)
+    weight = _search(r"Weight:\s*(\d+(?:\.\d+)?)", text)
+    header["volume"] = f"{float(weight):g} KG" if weight else None
 
 
 def _parse_dhl_inbound_charges(text: str) -> Dict:
     header = _dhl_common_header(text)
-    header["bl_no"] = _search(r"HWB Number\s*:\s*(\d+)", text)
+    # 掃描版 psm 6 會把 ":" 讀成 ">" (2026-11-03 D000794106)
+    header["bl_no"] = _search(r"HWB Number\s*[:>]\s*(\d+)", text)
+    _dhl_fill_shipment_details(text, header)
     block = _DHL_IC_BLOCK_RE.search(text)
     items = [{"description": m.group("desc").strip(),
               "amount": _dhl_clean_amount(m.group("amount")),
@@ -4672,6 +4714,9 @@ register_supplier(
     "DHL", "PT BIROTIKA SEMESTA / DHL EXPRESS",
     detect_dhl, parse_dhl,
     extract_total=_dhl_extract_total, extract_grand_total=_dhl_extract_grand_total,
+    # 掃描版 INBOUND 的 Billing Details 金額欄、Destination 預設 OCR 讀錯 (302,432 → 402,442、JKT → JIT)，
+    # psm 6 (整頁當成一個文字區塊) 讀得對；只對掃描版 INBOUND 頁換 OCR 模式 (2026-11-03 D000794106)
+    ocr_psm=6, ocr_psm_if=_dhl_is_scan_reimburse,
 )
 
 
@@ -6120,14 +6165,26 @@ _HANDAL_SINGLE_NUM_RE = re.compile(
 )
 
 
+def _handal_clean_vessel_tokens(tokens: List[str]) -> List[str]:
+    """船名前面的 OCR 雜訊字詞去掉 (使用者 2026-11 樣本 NIKO-AGUST 2025 確認正確船名 "STARSHIP VENUS 2506S")：
+    開頭的字詞若是「沒有母音」「含數字」「只有 1～2 字」或是 "MESS…" 標籤殘字，就去掉；遇到第一個正常字詞就停。"""
+    out = list(tokens)
+    while len(out) > 2:
+        tok = out[0]
+        noise = (len(tok) <= 2 or re.search(r'\d', tok) or not re.search(r'[AEIOU]', tok)
+                 or tok.startswith("MESS"))
+        if not noise:
+            break
+        out.pop(0)
+    return out
+
+
 def _handal_extract_vessel(text: str, order_no):
     if order_no:
         for line in text.splitlines():
             if order_no in line:
                 before = line.split(order_no)[0]
-                # 掃描檔船名前面常有 OCR 雜訊 ("NWi=ists]=a] STARSHIP VENUS 2506S"，使用者 2026-11 樣本 NIKO-AGUST 2025)：取 "]" 後面
-                before = before.rsplit("]", 1)[-1]
-                words = re.findall(r'[A-Z0-9]+', before)
+                words = _handal_clean_vessel_tokens(re.findall(r'[A-Z0-9]+', before))
                 if words:
                     candidate = ' '.join(words)
                     if len(candidate) >= 3:
@@ -6265,11 +6322,12 @@ _HANDAL_OCR_AMOUNT_TOKEN_RE = re.compile(r'(?<![A-Za-z])(?=[0-9gGoOAlIS,]*,)[0-9
 
 
 def _handal_fix_custom_word(m) -> str:
-    """只改『看起來像 CUSTOM』的字 (相似度 >= 0.6)；CUSTOMS 與正確的 CUSTOM 原樣保留。"""
+    """只改『看起來像 CUSTOM』的字 (相似度 >= 0.6)，CUSTOMS 也統一寫 CUSTOM (使用者答案一律 CUSTOM，2026-11 樣本 251104 / NIKO-AGUST 2025)；
+    正確的 CUSTOM 原樣保留。"""
     word = m.group(1)
-    if word.upper() in ("CUSTOM", "CUSTOMS"):
+    if word.upper() == "CUSTOM":
         return word
-    if difflib.SequenceMatcher(None, word.upper(), "CUSTOM").ratio() >= 0.6:
+    if word.upper() == "CUSTOMS" or difflib.SequenceMatcher(None, word.upper(), "CUSTOM").ratio() >= 0.6:
         return "CUSTOM"
     return word
 
