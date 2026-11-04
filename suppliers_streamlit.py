@@ -11029,7 +11029,7 @@ def _dhl_vn_sheets(book):
         c_date, c_awb, c_country = cols.get("SHIPMENT DATE"), cols.get("AIRWAYBILL"), cols.get("COUNTRY")
         c_weight, c_charge = cols.get("WEIGHT"), cols.get("CHARGE")
         inv = _vn_text(info.get("NOTIFICATION NUMBER")) or name.strip()
-        common = {"invoice_no": inv, "supplier": "CÔNG TY TNHH CHUYỂN PHÁT NHANH DHL - VNPT",
+        common = {"invoice_no": inv, "supplier": "DHL - VNPT EXPRESS LTD.",
                   "consignee": _vn_text(info.get("CONSIGNEE")) or None,
                   "invoice_date": _dhl_vn_dot_date(info.get("NOTIFICATION DATE"), month_first=False),
                   "order_no": _vn_text(info.get("SHIPPER REFERENT")) or None, "port_of_loading": "VIET NAM"}
@@ -11072,12 +11072,12 @@ def _dhl_vn_clean(text: str) -> str:
 def parse_dhl_express_vn(text: str) -> Dict:
     text = _dhl_vn_clean(text)
     h: Dict[str, Optional[str]] = {
-        "supplier": "CÔNG TY TNHH CHUYỂN PHÁT NHANH DHL - VNPT",
+        "supplier": "DHL - VNPT EXPRESS LTD.",
         "invoice_no": _dhl_vn_invoice_no(text),
         "invoice_date": _vn_pdf_date(_search(r"^Date\s+(\S+)", text)),
         # 掃描字型會把 "DHL contact" 讀成 "DEL contact"
         "consignee": _search(r"^(C[OÔ]NG TY .+?)\s+D[HE]L contact", text)}
-    items, current, start = [], None, False
+    items, current, start, main_item = [], None, False, None
     for line in text.splitlines():
         line = line.strip()
         if line.startswith("DATE ORG HAWB"):
@@ -11095,17 +11095,31 @@ def parse_dhl_express_vn(text: str) -> Dict:
             current = {"bl_no": m.group("hawb"), "onboard_date": _vn_pdf_date(m.group("date")),
                        "port_of_loading": m.group("org").upper(), "port_of_discharge": m.group("dest").upper(),
                        "volume": _fmt_volume(kg=m.group("kg"))}
-            # 使用者 2026-10-27：ORG 這一行的運費名稱固定 "FREIGHT CHARGE" (不用產品代碼)
+            # 運費名稱 (REGULAR CHARGE) 要等同一票的 PROD CODE 行出現才會填入 (見下方)
             items.append({"description": "FREIGHT CHARGE", "amount": _vn_pdf_num(m.group("net")),
                           "vat": None, **current})
+            main_item = items[-1]
             continue
-        if current is None or line.startswith("PROD CODE"):
+        if current is None:
+            continue
+        # 使用者 2026-11-04 規則 (樣本答案提示列)：REGULAR CHARGE 填 "PROD CODE (Regular Charge)"
+        m = re.match(r"PROD CODE\s+(.+)$", line)
+        if m:
+            if main_item is not None:
+                main_item["description"] = f"{m.group(1).strip()} (Regular Charge)"
             continue
         m = re.match(r"Sender:\s*(.+?)\s+Receiver:", line)
         if m:
             for it in items:
                 if it.get("bl_no") == current["bl_no"]:
                     it["shipper"] = m.group(1).strip()
+            continue
+        # Order No. = Shipper ref.，空白填 N/A (樣本答案提示列)；同一票的每一列都帶同一個值
+        m = re.match(r"Shipper ref\.\s*(.*)$", line)
+        if m:
+            for it in items:
+                if it.get("bl_no") == current["bl_no"]:
+                    it["order_no"] = m.group(1).strip() or None
             continue
         m = _DHL_VN_SUR_RE.match(line)
         net = _vn_pdf_num(m.group("net") or m.group("net1")) if m else None
@@ -11142,7 +11156,7 @@ def _is_dhl_ib_tariff(text: str) -> bool:
 def _parse_dhl_ib_tariff(text: str) -> Dict:
     date = re.search(r"\bDATE\s+(\d{1,2})/(\d{1,2})/(\d{4})", text)
     year = date.group(3) if date else None
-    h = {"supplier": "CÔNG TY TNHH CHUYỂN PHÁT NHANH DHL - VNPT",
+    h = {"supplier": "DHL - VNPT EXPRESS LTD.",
          "invoice_no": _search(r"INVOICE NO\s+(\S+)", text),
          "invoice_date": _format_date_en(*date.groups()) if date else None,
          # "CONG TY TNHH POUHUNG VIET NAM DHL CONTACT INVOICING HOTLINE" (左右兩欄同一行)
