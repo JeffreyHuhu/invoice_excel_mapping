@@ -9371,7 +9371,7 @@ def _vt_parse_sheet(name: str, rows: List[list], cfg: Dict, supplier: str,
                 key = last_key
             else:
                 continue
-        if cfg.get("einv_key"):
+        if cfg.get("einv_key") and not cfg.get("keep_einv_prefix"):
             # 電子發票只用號碼 ("1C26TYY-4484" -> "4484"，使用者 2026-10-27)
             # "1-C26TOD-28667" (VN14) 前面多一個 "1-"
             # "C26TOD/17995" 用斜線
@@ -9761,7 +9761,9 @@ _VT_TRANS_WAGON = [
                "boxes": {"20": "MEASUREMENT 20'", "40": "MEASUREMENT 40'"}, "cbm": "MEASUREMENT CMB",
                "fields": {"bl_no": "BOOKING NO"}}),
     # (d) 紅色發票清單：每列一張發票 (Red inv no，只用號碼)，金額已含稅 (沒有另列 VAT)
+    # POU SUNG 版 (2026-11-04 答案)：發票號碼保留完整 "1C25TYY-3700" (不去前綴)
     (r"(?!)", {"header": "RED INV NO", "two_rows": False, "key": ["RED INV NO"], "einv_key": True,
+               "keep_einv_prefix": True,
                "fees": [("FREIGHT AIR", "Freight AIR"), ("FREIGHT SEA", "Freight SEA"),
                         ("MISCELLANEOUS", "Miscellaneous")],
                "total": "AMOUNT (VND)", "date": "=DATE", "fields": {"bl_no": "BILL NO"}}),
@@ -9976,7 +9978,13 @@ def _tw_sheet_parse(book) -> List[Dict]:
     if _tw_is_cong_no(book):
         items, _ = _tw_cong_no_sheets(book)
         return [{"header": {}, "items": items or [{"description": None, "amount": None}]}]
-    return _tw_vt_parse(book)
+    docs = _tw_vt_parse(book)
+    # Excel 版的供應商一律用英文帳單抬頭名稱 (使用者 2026-11-04 規定：輸出英文公司名稱)
+    for doc in docs:
+        for it in doc["items"]:
+            if it.get("supplier"):
+                it["supplier"] = _TW_EXCEL_SUPPLIER
+    return docs
 
 
 def _tw_sheet_totals(book) -> List[Dict]:
