@@ -31,7 +31,7 @@ from typing import Dict, List, Optional, Tuple
 
 from extract_utils_streamlit import (
     _ocr_page_with_psm, _scanned_page_indexes, extract_pages_from_pdf,
-    limited_pages, register_supplier, set_supplier_number,
+    limited_pages, register_supplier, set_supplier_number, SUPPLIER_REGISTRY,
 )
 
 # 印尼文月份對照表 (DWIHARTA 帳單用印尼文寫月份)
@@ -11311,3 +11311,30 @@ SUPPLIER_NUMBERS = {
 
 for _key, (_number, _vendor_code, _name) in SUPPLIER_NUMBERS.items():
     set_supplier_number(_key, _number, _vendor_code, _name)
+
+# 越南 TOP20 的英文公司名稱 (使用者附件 "Vietnam company English name.xlsx"，2026-11-04)。
+# 輸出 Excel 的「供應商」欄改用英文名稱 (見 extract_utils_streamlit.supplier_label())。
+VN_ENGLISH_NAMES = {
+    "TRANS_WAGON": "TRANS WAGON INTERNATIONAL CO., LTD",
+    "VINH_HUNG_LONG": "VINH HUNG LONG CO., LTD",
+    "RONG_A_CHAU": "Asia Dragon Forwarding Trading Company Limited",
+    "DHL_EXPRESS_VN": "DHL - VNPT EXPRESS LTD.",
+    "CONG_THANH": "CONG THANH COMPANY LTD.",
+    "BINH_TAN": "HOP TAC XA VAN TAI DICH VU DU LICH BINH TAN",
+    "MAERSK_VN": "MAERSK LOGISTICS & SERVICES VIETNAM COMPANY LIMITED",
+    "DSV_VN": "DSV AIR & SEA COMPANY LIMITED",
+    "MOL": "MOL LOGISTICS TRANSPORTATION VIETNAM INC",
+    "KN_VN": "Kuehne + Nagel Co., Ltd",
+    "APL_VN": "APL Logistics Vietnam Co., Ltd",
+    "NGUYEN_HUONG": "NGUYEN HUONG COMPANY LTD.",
+    "DHL_VN": "DHL GLOBAL FORWARDING (VIETNAM) CORPORATION",
+    "ORIENTAL_MULTIMODAL": "ORIENTAL LOGISTICS MULTIMODAL TRANSPORT COMPANY LIMITED",
+    "EXPEDITORS": "EXPEDITORS VIETNAM COMPANY LIMITED",
+    "SONG_TRIEU": "SONG TRIEU COMPANY LIMITED",
+    "TIMES_CARGO": "Times Cargo Logistic Co., Ltd - TCL",
+    "SAIGON_TRANSPORT": "SAI GON AIR & OCEAN FREIGHT SCE.CO.LTD",
+    "IMX": "IMX EXPRESS SERVICE COMPANY LIMITED",
+    "YUSEN": "YUSEN LOGISTICS (VIETNAM) CO., LTD - HO CHI MINH BRANCH",
+}
+for _key, _english in VN_ENGLISH_NAMES.items():
+    SUPPLIER_REGISTRY[_key]["english_name"] = _english

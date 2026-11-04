@@ -1158,8 +1158,9 @@ def detect_supplier(text: str) -> Optional[str]:
 
 
 def supplier_label(key: Optional[str]) -> str:
+    # 有英文名稱 (越南 TOP20，見 suppliers_streamlit.VN_ENGLISH_NAMES) 就用英文，輸出 Excel 的「供應商」欄也用它
     if key and key in SUPPLIER_REGISTRY:
-        return SUPPLIER_REGISTRY[key]["label"]
+        return SUPPLIER_REGISTRY[key].get("english_name") or SUPPLIER_REGISTRY[key]["label"]
     return "未知供應商 (無法辨識)"
 
 
@@ -1874,15 +1875,18 @@ def quality_score(rows: List[Dict]) -> float:
 # 印尼供應商金額稽核的容許誤差 (IDR)：100 以內都不算錯誤 (使用者 2026-11-03 規定，
 # 所有印尼供應商適用)。美元帳單不適用 (100 USD 不是小數點誤差)，列在這裡排除。
 INDO_AUDIT_TOLERANCE = 100
+VN_AUDIT_TOLERANCE = 100  # 越南帳單以 VND 計，容許誤差 VND 100 (使用者 2026-11-04 原則)
 NON_IDR_SUPPLIERS = {"OPL_USD"}
 
 
 def audit_tolerance(supplier_key: Optional[str]) -> float:
     """金額稽核的容許誤差：印尼供應商 (供應商編號 ID 開頭、非美元帳單) 為 100，
-    其他為 ±1 (四捨五入誤差)。"""
+    越南供應商 (VN 開頭) 為 VND 100，其他為 ±1 (四捨五入誤差)。"""
     if supplier_key and supplier_number(supplier_key).startswith("ID") \
             and supplier_key not in NON_IDR_SUPPLIERS:
         return INDO_AUDIT_TOLERANCE
+    if supplier_key and supplier_number(supplier_key).startswith("VN"):
+        return VN_AUDIT_TOLERANCE
     return 1
 
 
