@@ -120,5 +120,13 @@
   "TRANS_WAGON": {
     "config": {},
     "score": 1.0
+  },
+  "DHL_EXPRESS_VN": {
+    "config": {},
+    "score": 1.0
+  },
+  "BINH_TAN": {
+    "config": {},
+    "score": 1.0
   }
 }

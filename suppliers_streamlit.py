@@ -9221,6 +9221,8 @@ def _vt_parse_sheet(name: str, rows: List[list], cfg: Dict, supplier: str,
     col = {k: find(v) for k, v in cfg.items()
            if k in ("total", "total_add", "grand", "vat", "date", "cbm", "kg", "port", "group_col", "base_key")}
     keys = [_vt_col(labels, k) for k in cfg["key"]]
+    # volume_raw：材積直接照表上的數字 (樣本答案 VN06 IMP/EXP，2026-11-04)，依序取第一個有值的欄
+    raw_vol_cols = [_vt_col(labels, k) for k in cfg.get("volume_raw", ())]
     # 發票號碼由好幾欄用逗號連起來 (VN02 代墊吊櫃費：SỐ HĐ NÂNG, SỐ HĐ HẠ，使用者 2026-10-27)
     join_keys = [_vt_col(labels, k) for k in cfg.get("key_join", ())]
     fees = [(find(f[0]), f[1]) for f in cfg["fees"]]
@@ -9327,6 +9329,12 @@ def _vt_parse_sheet(name: str, rows: List[list], cfg: Dict, supplier: str,
             if nums:
                 items.append({"description": _vn_text(cells[0]), "amount": None, "vat": nums[0],
                               **common, "invoice_no": doc_key or f"{name.strip()} VAT"})
+                # vat_no_date：整張 VAT 列沒有日期 (樣本答案 VN06 IMP/EXP，2026-11-04)
+                # 其他欄位也填 N/A，避免表頭層的共用欄位 (提單、材積) 被補進 VAT 列
+                if cfg.get("vat_no_date"):
+                    items[-1].update({k: "N/A" for k in (
+                        "invoice_no", "invoice_date", "bl_no", "order_no", "volume", "port_of_loading", "port_of_discharge",
+                        "vessel", "container_no", "shipper", "onboard_date", "arrive_date")})
             break
     if cfg.get("vat_total"):
         # 表尾的整張 VAT ("Total VAT amount | 2590843.48")，取該列最後一個數字
@@ -9416,6 +9424,13 @@ def _vt_parse_sheet(name: str, rows: List[list], cfg: Dict, supplier: str,
         head["volume"] = _fmt_volume(
             containers=[(_vn_num(_vn_cell(row, c)), size) for size, c in boxes.items() if c is not None],
             cbm=measure("cbm"), kg=measure("kg"))
+        raw_vol = next((_vn_cell(row, c) for c in raw_vol_cols if c is not None and _vn_text(_vn_cell(row, c))), None)
+        if raw_vol is not None:
+            # 數字照原樣 (1.129、20)，文字照原文 ("40HC")
+            if isinstance(raw_vol, (int, float)):
+                head["volume"] = int(raw_vol) if float(raw_vol).is_integer() else round(raw_vol, 3)
+            else:
+                head["volume"] = _vn_text(raw_vol)
         # 費用名稱 "@欄位" 代表取該欄的文字 (例如 VN07 Remark 欄 "Late come charge")
         row_items = [{"description": (_vn_text(_vn_cell(row, find(desc[1:]))) or desc[1:])
                       if desc.startswith("@") else desc,
@@ -9471,6 +9486,10 @@ def _vt_parse_sheet(name: str, rows: List[list], cfg: Dict, supplier: str,
     for it in items:
         if not it.get("invoice_date") and it.get("amount") is None and dated:
             it["invoice_date"] = max(dated).strftime("%d %b %Y")
+    if cfg.get("vat_last"):
+        # 整張 VAT 列放在最後一列 (樣本答案 VN06 IMP/EXP，2026-11-04)
+        items = [it for it in items if it.get("amount") is not None] + \
+                [it for it in items if it.get("amount") is None]
     if cfg.get("sum_row"):
         # 沒有逐列合計的表：用表尾 TOTAL 列各費用欄的合計，跟整張表的費用加總勾稽
         # (invoice_no=None 代表整份檔案；VN05 POU CHEN 運費對帳表，使用者規定運費表核對整份合計)
@@ -9804,7 +9823,8 @@ def detect_trans_wagon_pdf(text: str) -> bool:
 
 
 def parse_trans_wagon_pdf(text: str) -> Dict:
-    h: Dict[str, Optional[str]] = {"supplier": "CÔNG TY TNHH LIÊN VẬN QUỐC TẾ"}
+    # 供應商名稱用英文帳單抬頭 (使用者 2026-11-04 規定，與 Excel 版一致)
+    h: Dict[str, Optional[str]] = {"supplier": _TW_EXCEL_SUPPLIER}
     # 號碼印在「Số(No.):」標籤上一行；越南發票號碼只用號碼 (使用者 2026-10-27)
     h["invoice_no"] = (_search(r"^(\d{3,})\s*\n\s*S[ốo]\(No\.\)", text)
                        or _search(r"S[ốo]\(No\.\):\s*(\d+)", text))
@@ -10116,11 +10136,15 @@ _VT_BINH_TAN = [
                "date_sheet_mmdd": True,
                "const": {"port_of_loading": "VIETNAM", "port_of_discharge": "VIETNAM"}}),
     # 舊版 (有 PRICE 欄)；沒有 PRICE 欄的 IMP/EXP 表改用上面的新版設定
-    (r"^(IMP|EXP)$", {"header": "PAY NO", "two_rows": False, "key": ["LOT NO", "DEC NO"], "name_require": "=PRICE",
+    # 2026-11-04 樣本答案 (IMP/EXP 兩張表)：發票號碼 = PAY NO (PFQ-…)，提單 = LOT NO / DEC NO，
+    # 費用名稱照表頭 (Price、2%)，VAT 列也用同一個 PAY NO
+    (r"^(IMP|EXP)$", {"header": "PAY NO", "two_rows": False, "key": ["PAY NO"], "name_require": "=PRICE",
                       "fees": [("MISCELL", None), ("=OT.", None), ("=OTHER", None),
-                               ("=PRICE", "Miscellaneous Fee"), ("=2%", "2%")], "rest_fee": "2%",
-                      "total": "=TOTAL", "vat_row": True, "date": "DEC DATE",
-                      "fields": {"order_no": "=INV"}, "cbm": "TOTAL CFS/AIR"}),
+                               ("=PRICE", None), ("=2%", "2%")], "rest_fee": "2%",
+                      "total": "=TOTAL", "vat_row": True, "vat_last": True, "vat_no_date": True,
+                      "date": "DEC DATE",
+                      "fields": {"order_no": "=INV", "bl_no": ("LOT NO", "DEC NO")}, "cbm": "TOTAL CFS/AIR",
+                      "volume_raw": ("TOTAL CON", "TOTAL CFS/AIR")}),
     (r"^(NB|PHV)$", {"header": "SO LO", "key": ["=SO LO"],
                      "fees": [("CUOC VC CHUA VAT", None), ("SO TIEN PHU THU", None)],
                      "total": "TONG TIEN THANH TOAN", "vat_row": True, "date": "=NGAY",
@@ -10211,7 +10235,8 @@ def detect_binh_tan(text: str) -> bool:
 
 
 _vt_register("BINH_TAN", "HỢP TÁC XÃ VẬN TẢI DỊCH VỤ DU LỊCH BÌNH TÂN", detect_binh_tan,
-             "HỢP TÁC XÃ VẬN TẢI DỊCH VỤ DU LỊCH BÌNH TÂN", _VT_BINH_TAN)
+             # 供應商欄用英文名稱 (樣本答案，2026-11-04)
+             "HOP TAC XA VAN TAI DICH VU DU LICH BINH TAN", _VT_BINH_TAN)
 
 
 # --- VN12 NGUYÊN HƯỞNG (空運請款) ---------------------------------------------
