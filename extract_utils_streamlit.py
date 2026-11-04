@@ -826,9 +826,9 @@ TEXT_NOTE_FIELDS = ("supplier", "description", "port_of_loading",
 # 整句對照 (公司名稱等)
 _EN_FULL = {
     "CONG TY TNHH GIAO NHAN THUONG MAI RONG A CHAU":
-        "Rong A Chau Trading Forwarding Co., Ltd. / Asia Dragon Cargo",
+        "Asia Dragon Forwarding Trading Company Limited",
     "CONG TY TNHH DICH VU GIAO NHAN VAN TAI VA THUONG MAI CONG THANH":
-        "Cong Thanh Forwarding, Transport and Trading Service Co., Ltd.",
+        "CONG THANH COMPANY LTD.",
     "CONG TY TRACH NHIEM HUU HAN POU SUNG VIET NAM": "POU SUNG VIETNAM COMPANY LIMITED",
     # CONG THANH 對帳單的額外費用說明 (DEC 欄)
     "10 KIEN HANG BI UOT HU HET GIAY, POUSUNG KHAC PHUC HAU QUA TOI DA CON PHAT SINH THEM "
