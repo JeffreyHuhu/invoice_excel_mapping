@@ -1032,6 +1032,7 @@ def register_supplier(key: str, label: str,
                        extract_vat_total: Optional[Callable[[str], Optional[float]]] = None,
                        invoice_page: Optional[Callable[[str], bool]] = None,
                        ocr_psm: Optional[int] = None,
+                       ocr_psm_if: Optional[Callable[[str], bool]] = None,
                        page_text: Optional[Callable[[str], List[str]]] = None,
                        ocr_attachments: bool = True,
                        audit_tolerance_fn: Optional[Callable[[str], float]] = None) -> None:
@@ -1049,6 +1050,8 @@ def register_supplier(key: str, label: str,
 
     ocr_psm (可選，非 multi_page 供應商用)：這家的掃描帳單頁改用指定的
     tesseract 版面分析模式重新 OCR (例如 GALUH 用 6，預設模式會漏掉金額欄)。
+    ocr_psm_if (可選，要搭配 ocr_psm)：只有預設 OCR 的頁面文字通過這個判斷式時
+    才改用 ocr_psm，同一家供應商的其他版型不受影響 (DHL 掃描版 D000794106)。
 
     invoice_page (可選，非 multi_page 供應商用)：判斷某一頁是不是這家的帳單
     頁。有給時只擷取/勾稽帳單頁，其他頁 (提單、條款、其他公司的發票等雜訊)
@@ -1125,7 +1128,7 @@ def register_supplier(key: str, label: str,
         "audit_exclude": audit_exclude, "force_ocr": force_ocr,
         "sheet_parse": sheet_parse, "sheet_totals": sheet_totals,
         "extract_vat_total": extract_vat_total, "invoice_page": invoice_page,
-        "ocr_psm": ocr_psm, "page_text": page_text, "multi_page_pdf": multi_page,
+        "ocr_psm": ocr_psm, "ocr_psm_if": ocr_psm_if, "page_text": page_text, "multi_page_pdf": multi_page,
         "ocr_attachments": ocr_attachments, "audit_tolerance_fn": audit_tolerance_fn,
         # Excel 供應商一份檔案可能有好幾張對帳單，比對時跟 multi_page 一樣用
         # invoice_no 分組
@@ -1438,7 +1441,8 @@ def invoice_text(pdf_path: str, key: Optional[str],
         # 這家供應商的掃描頁要用指定的 OCR 模式 (只重做認得出供應商的頁)
         pages = list(pages)
         for i in _scanned_page_indexes(pdf_path):
-            if detect_supplier(pages[i]) == key:
+            gate = entry.get("ocr_psm_if")
+            if detect_supplier(pages[i]) == key and (gate is None or gate(pages[i])):
                 pages[i] = _ocr_page_with_psm(pdf_path, i, psm)
                 # 自我檢查：這一頁的明細加總對不上帳單總額時，改用灰階 + 自動對比
                 # 再 OCR 一次，對得上才採用 (GALUH 抽樣 0500047、0500071、0500086：
