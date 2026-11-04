@@ -829,7 +829,7 @@ _EN_FULL = {
         "Rong A Chau Trading Forwarding Co., Ltd. / Asia Dragon Cargo",
     "CONG TY TNHH DICH VU GIAO NHAN VAN TAI VA THUONG MAI CONG THANH":
         "Cong Thanh Forwarding, Transport and Trading Service Co., Ltd.",
-    "CONG TY TRACH NHIEM HUU HAN POU SUNG VIET NAM": "Pou Sung Vietnam Co., Ltd.",
+    "CONG TY TRACH NHIEM HUU HAN POU SUNG VIET NAM": "POU SUNG VIETNAM COMPANY LIMITED",
     # CONG THANH 對帳單的額外費用說明 (DEC 欄)
     "10 KIEN HANG BI UOT HU HET GIAY, POUSUNG KHAC PHUC HAU QUA TOI DA CON PHAT SINH THEM "
     "63.5USD (TY GIA: 26.241 NGAY 15/1/2026). CONG THANH TRA PHI PHAT SINH NAY (SU DUNG "
