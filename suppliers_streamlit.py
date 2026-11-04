@@ -9844,7 +9844,144 @@ def _tw_pdf_totals(text: str):
     return tuple(_tw_num(g) for g in m.groups()) if m else (None, None, None)
 
 
-_tw_sheet_parse, _tw_sheet_totals = _vt_make("CÔNG TY TNHH LIÊN VẬN QUỐC TẾ", _VT_TRANS_WAGON)
+# --- VN01 TRANS WAGON：CONG NO 對帳表 (POU CHEN 版，2026-11-04 使用者答案) -------
+# 單一工作表 (例 "POU CHEN")，每列一張發票 (INVOICE NO 在 T 欄)。費用欄 DO / CFS/THC /
+# OTHER (DRA/LOAD/HD/CIC) / O/FRT / EXW/FCA/OTHER 是 USD，匯率在 "Tel:" 那一列的數字欄
+# (J7 = 25,549)；每個費用 × 匯率 四捨五入成 VND (答案檔每項費用各一列)。
+# 每張發票最後一列 VAT (W 欄，本檔為 0)。BOOKING NO 與材積只寫在一票的第一列，往下沿用。
+# 材積：有櫃數 (D/E 欄) 寫 "1 x 20' + 1 x 40'"；只有 CBM (F 欄) 寫 "8.001 CBM"。
+# 供應商名稱照答案檔的帳單抬頭 "TRANS WAGON INTERNATIONAL CO.,LTD"。
+_TW_EXCEL_SUPPLIER = "TRANS WAGON INTERNATIONAL CO.,LTD"
+_TW_CONG_NO_FEES = ["DO", "CFS/THC", "OTHER (DRA/LOAD/HD/CIC)", "O/FRT", "EXW/FCA/OTHER"]
+
+
+def _tw_key(value) -> str:
+    """表頭比對用：轉大寫並去掉所有空白 (含換行)。"""
+    return re.sub(r"\s", "", _vn_label(value))
+
+
+def _tw_cong_no_head(rows: List[list]) -> Tuple[Optional[int], List[str]]:
+    """找 CONG NO 版的表頭列：回傳 (列索引, 去空白的欄位標籤)；不是這版回傳 (None, [])。"""
+    for i, row in enumerate(rows[:20]):
+        labels = [_tw_key(c) for c in row]
+        if {"INVOICENO", "BOOKINGNO", "AMOUNT(NOTVAT)", "INVOICEDATE", "CFS/THC", "O/FRT",
+            "EXW/FCA/OTHER"} <= set(labels):
+            return i, labels
+    return None, []
+
+
+def _tw_cong_no_rate(rows: List[list]) -> Optional[float]:
+    """匯率：「Tel:」那一列的第一個數字欄 (J7)。"""
+    for row in rows[:12]:
+        if _vn_text(_vn_cell(row, 0)).upper().startswith("TEL"):
+            return next((v for v in (_vn_num(c) for c in row[1:]) if v), None)
+    return None
+
+
+def _tw_cong_no_date(value) -> Optional[str]:
+    """發票日期 "16/01/2025" 或 Excel 日期 -> "16 Jan 2025" (同其他 VN 規則的格式)。"""
+    if isinstance(value, (datetime.date, datetime.datetime)):
+        return value.strftime("%d %b %Y")
+    m = re.fullmatch(r"\s*(\d{1,2})/(\d{1,2})/(\d{4})\s*", _vn_text(value))
+    return datetime.date(int(m.group(3)), int(m.group(2)), int(m.group(1))).strftime("%d %b %Y") if m else None
+
+
+_TW_CONST_FORMULA = re.compile(r"^=[\d.+\-*/() ]+$")
+
+
+def _tw_const_formulas(path: str, sheet: str) -> Dict[Tuple[int, int], float]:
+    """純數字算式儲存格 (例如 =220+370、=350+650) 若檔案沒存計算結果，calamine 讀成空白。
+    這裡直接算出 Excel 會顯示的值。只接受數字與 + - * / ( ) 的算式。
+    回傳 {(列索引, 欄索引): 值}，索引從 0 起算，與 read_spreadsheet() 的列欄一致。"""
+    import openpyxl
+    out: Dict[Tuple[int, int], float] = {}
+    if not str(path).lower().endswith((".xlsx", ".xlsm")):
+        return out
+    wb = openpyxl.load_workbook(path, read_only=True)
+    try:
+        if sheet not in wb.sheetnames:
+            return out
+        for r_i, row in enumerate(wb[sheet].iter_rows(min_row=1, min_col=1)):
+            for c_i, cell in enumerate(row):
+                if isinstance(cell.value, str) and _TW_CONST_FORMULA.match(cell.value):
+                    out[(r_i, c_i)] = float(eval(cell.value[1:], {"__builtins__": {}}))
+    finally:
+        wb.close()
+    return out
+
+
+def _tw_cong_no_sheets(book) -> Tuple[List[Dict], List[Dict]]:
+    """CONG NO 版：回傳 (明細 items, 每張發票的合計 totals)。沒有這版表頭時回傳空值。"""
+    items: List[Dict] = []
+    totals: List[Dict] = []
+    for name, rows in book.sheets:
+        head, labels = _tw_cong_no_head(rows)
+        rate = _tw_cong_no_rate(rows) if head is not None else None
+        if head is None or rate is None:
+            continue
+        col = {k: labels.index(k) for k in ("BOOKINGNO", "INVOICENO", "INVOICEDATE", "AMOUNT(NOTVAT)", "VAT",
+                                             "TOTALAMOUNT")
+               if k in labels}
+        fees = [(name, labels.index(_tw_key(name))) for name in _TW_CONG_NO_FEES if _tw_key(name) in labels]
+        sub = [_tw_key(c) for c in rows[head + 1]] if head + 1 < len(rows) else []   # 第二列：20' / 40' / CMB
+        c20, c40, ccbm = (sub.index(k) if k in sub else None for k in ("20'", "40'", "CMB"))
+        consignee = _vt_consignee(rows)
+        booking = None
+        consts = _tw_const_formulas(book.path, name)
+        for ridx in range(head + 2, len(rows)):
+            row = rows[ridx]
+            if _vn_text(_vn_cell(row, 0)).upper().startswith("TOTAL"):
+                break
+            invoice = _vn_text(_vn_cell(row, col["INVOICENO"]))
+            if not invoice:
+                continue                                  # 空白列或費用續行 (沒有發票號碼)
+            bk = _vn_text(_vn_cell(row, col["BOOKINGNO"]))
+            if bk:                                        # 新的一票：材積跟著這一列重讀
+                booking = bk
+                n20, n40 = _vn_num(_vn_cell(row, c20)), _vn_num(_vn_cell(row, c40))
+                cbm = _vn_num(_vn_cell(row, ccbm))
+                boxes = [f"{int(n)} x {size}" for n, size in ((n20, "20'"), (n40, "40'")) if n]
+                volume = " + ".join(boxes) if boxes else (f"{cbm:g} CBM" if cbm else None)
+            base = {"supplier": _TW_EXCEL_SUPPLIER, "consignee": consignee, "invoice_no": invoice,
+                    "invoice_date": _tw_cong_no_date(_vn_cell(row, col["INVOICEDATE"])),
+                    "bl_no": booking, "volume": volume}
+            for name, c in fees:
+                usd = _vn_num(_vn_cell(row, c))
+                if usd is None:                           # 沒存計算結果的算式 (例如 =220+370)
+                    usd = consts.get((ridx, c))
+                if usd:                                   # 0 或空白不列
+                    # Excel ROUND 是四捨五入 (金額皆為正數)
+                    items.append({**base, "description": name, "amount": int(usd * rate + 0.5),
+                                  "vat": None})
+            # 每張發票最後一列 VAT (本檔為 0)
+            items.append({**base, "description": "VAT", "amount": None,
+                          "vat": _vn_num(_vn_cell(row, col.get("VAT"))) or 0})
+            totals.append({"invoice_no": invoice, "total": _vn_num(_vn_cell(row, col["AMOUNT(NOTVAT)"])),
+                           "grand_total": _vn_num(_vn_cell(row, col.get("TOTALAMOUNT")))})
+    return items, totals
+
+
+def _tw_is_cong_no(book) -> bool:
+    return any(_tw_cong_no_head(rows)[0] is not None for _, rows in book.sheets)
+
+
+_tw_vt_parse, _tw_vt_totals = _vt_make("CÔNG TY TNHH LIÊN VẬN QUỐC TẾ", _VT_TRANS_WAGON)
+
+
+def _tw_sheet_parse(book) -> List[Dict]:
+    # CONG NO 版另外處理；其餘版型 (S1 / FREIGHT STATEMENT / TỔNG) 照原規則
+    if _tw_is_cong_no(book):
+        items, _ = _tw_cong_no_sheets(book)
+        return [{"header": {}, "items": items or [{"description": None, "amount": None}]}]
+    return _tw_vt_parse(book)
+
+
+def _tw_sheet_totals(book) -> List[Dict]:
+    if _tw_is_cong_no(book):
+        return _tw_cong_no_sheets(book)[1]
+    return _tw_vt_totals(book)
+
+
 register_supplier(
     "TRANS_WAGON", "CÔNG TY TNHH LIÊN VẬN QUỐC TẾ (TRANS WAGON)",
     lambda text: detect_trans_wagon(text) or detect_trans_wagon_pdf(text), parse_trans_wagon_pdf,

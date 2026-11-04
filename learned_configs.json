@@ -116,5 +116,9 @@
   "INDOPROSTIME_TRANSPORT": {
     "config": {},
     "score": 1.0
+  },
+  "TRANS_WAGON": {
+    "config": {},
+    "score": 1.0
   }
 }
