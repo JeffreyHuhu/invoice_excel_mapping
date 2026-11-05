@@ -9232,6 +9232,11 @@ def _vt_parse_sheet(name: str, rows: List[list], cfg: Dict, supplier: str,
     pct_col = _vt_col(labels, cfg["pct_col"]) if cfg.get("pct_col") else None
 
     def _fee_desc(desc, row, col=None):
+        if "{days}" in desc and cfg.get("days_label"):
+            # days_label：費用名稱裡的 {days} 代入天數欄 (VN02 NEO-DD：PHÍ NEO XE x 天數 ngày)
+            dc = find(cfg["days_label"])
+            days = _vn_num(_vn_cell(row, dc)) if dc is not None else None
+            desc = desc.replace("{days}", str(int(days or 0)))
         if "{shd}" in desc and col:
             # {shd}：費用欄左邊一欄的 SHĐ 憑證號碼 (VN16 Cont 表 NÂNG/HẠ/CÂN)，空白時整段括號不要
             shd = _vn_text(_vn_cell(row, col - 1))
@@ -9332,6 +9337,9 @@ def _vt_parse_sheet(name: str, rows: List[list], cfg: Dict, supplier: str,
         all_text = " ".join(_vn_text(c) for r in rows for c in r if c not in (None, ""))
         m_doc = re.search(cfg["doc_key"], all_text)
         doc_key = m_doc.group(1) if m_doc else None
+    if "doc_const" in cfg:
+        # doc_const：整張工作表固定的發票號碼 (VN02 CHI HỘ 工作表沒有字軌，填 N/A)
+        doc_key = cfg["doc_const"]
     if cfg.get("doc_date"):
         for r in rows:
             cells = [c for c in r if c not in (None, "")]
@@ -9468,6 +9476,9 @@ def _vt_parse_sheet(name: str, rows: List[list], cfg: Dict, supplier: str,
         head["volume"] = _fmt_volume(
             containers=[(_vn_num(_vn_cell(row, c)), size) for size, c in boxes.items() if c is not None],
             cbm=measure("cbm"), kg=measure("kg"))
+        if cfg.get("box_x_space") and head.get("volume"):
+            # box_x_space：櫃型寫成 "1 x 40'" (VN02 YUEDE 新答案，2026-11-05)
+            head["volume"] = re.sub(r"(\d+)X(\d+)", r"\1 x \2'", head["volume"])
         raw_vol = next((_vn_cell(row, c) for c in raw_vol_cols if c is not None and _vn_text(_vn_cell(row, c))), None)
         if raw_vol is not None:
             # 數字照原樣 (1.129、20)，文字照原文 ("40HC")
@@ -9504,6 +9515,10 @@ def _vt_parse_sheet(name: str, rows: List[list], cfg: Dict, supplier: str,
                 gross = it["amount"]
                 net = math.floor(gross / 1.08 + 0.5)
                 it["amount"], it["vat"] = net, gross - net
+        if cfg.get("vat_of_amount"):
+            # vat_of_amount：未稅金額 × 8% 寫在同一列 (VN02 NEO-DD 答案)
+            for it in row_items:
+                it["vat"] = round(it["amount"] * 0.08)
         for it in row_items:
             if isinstance(it["description"], str) and it["description"].startswith("-") and it["amount"]:
                 # 減項 (費用名稱前加 "-")：金額取負號
@@ -9723,6 +9738,9 @@ def _vn_full_consignee(name: Optional[str]) -> Optional[str]:
     full = next((full for key, full in _VN_CONSIGNEES.items() if key.replace(" ", "") == flat), None)
     if full:
         return full
+    # VN02 YUEDE 客戶 (DỤ ĐỨC)：答案用英文名稱 (2026-11-05 新答案)
+    if re.search(r"\bDU\s*DUC\b", _vt_norm(name or "")) and "VIET" in _vt_norm(name or ""):
+        return "YUE DE VIETNAM COMPANY LIMITED"
     # 整句越南公司名 ("CÔNG TY TNHH POU HUNG VIỆT NAM"，樣本答案 VN06 NB 表)：含 "POU 寶成廠別" 且是公司名才換
     norm = _vt_norm(name or "")
     m = re.search(r"\bPOU\s*(SUNG|CHEN|YUEN|LI|HUNG)\b", norm)
@@ -10137,6 +10155,7 @@ _VT_VHL_COMMON = {
     # 發票號碼 = 表頭「Đính kèm hóa đơn số」下方的字軌 (1C26TYY 這種，只取字軌)，2026-11-05 依新答案
     "doc_key": r"\b(\d[A-Z]\d{2}[A-Z]{3})\b",
     "gross_vat": True,
+    "box_x_space": True,
     "date": "NGAY HOAN THANH", "boxes": {"20": "LOAI CONT 20'", "40": "LOAI CONT 40'", "45": "LOAI CONT 45'"},
     "fields": {"container_no": "SO CONTAINER", "port_of_loading": ("CANG LAY", "=CANG"),
                "port_of_discharge": ("CANG HA", "CANG TRA")},
@@ -10223,7 +10242,12 @@ _VT_VHL_ANSWER = [
     (r"CAN CONT", {**_VT_VHL_COMMON, "key": ["SO LO"], "date": "NGAY",
                    "fields": {**_VT_VHL_COMMON["fields"], "bl_no": "SO LO"},
                    "fees": [("=PTCC", "PTCC"), ("=CAN", "CÂN")], "grand": "=TONG"}),
-    (r"CHI HO", {**_VT_VHL_COMMON, "date": "NGAY LAY", "doc_key": None,
+    (r"NEO-?DD", {**_VT_VHL_COMMON, "gross_vat": False, "vat_of_amount": True, "date": None,
+                  "const": {"invoice_date": "N/A"},  # 工作表沒有提櫃日，填 N/A (答案提示列)
+                  "fields": {**_VT_VHL_COMMON["fields"], "bl_no": "SO LO"},
+                  "fees": [("=TONG CONG", "PHÍ NEO XE x {days} ngày")], "days_label": "NGAY NEO",
+                  "grand": "=TONG CONG"}),
+    (r"CHI HO", {**_VT_VHL_COMMON, "date": "NGAY LAY", "doc_const": "N/A",
                  "fees": [("CUOC VC", "CƯỚC VC")], "grand": None}),
 ]
 _VT_VINH_HUNG_LONG[0:0] = _VT_VHL_ANSWER
@@ -10231,7 +10255,7 @@ _VT_VINH_HUNG_LONG.insert(0, (r"(?!)", {
     **_VT_VINH_HUNG_LONG[0][1], "require_all": ("TONG CONG HD NANG HA", "=TONG CONG", "=CAN CONT"),
     "fees": _VT_VINH_HUNG_LONG[0][1]["fees"] + [("=CAN CONT", None)]}))
 _vt_register("VINH_HUNG_LONG", "CÔNG TY TNHH VĨNH HƯNG LONG", detect_vinh_hung_long,
-             "CÔNG TY TNHH VĨNH HƯNG LONG", _VT_VINH_HUNG_LONG)
+             "VINH HUNG LONG CO., LTD", _VT_VINH_HUNG_LONG)
 
 
 # --- VN06 BÌNH TÂN (HỢP TÁC XÃ VẬN TẢI DỊCH VỤ DU LỊCH BÌNH TÂN，MST 0303140905) --
