@@ -9230,10 +9230,18 @@ def _vt_parse_sheet(name: str, rows: List[list], cfg: Dict, supplier: str,
     # pct_col：費用名稱裡 "{pct}" 代入的百分比欄 (樣本答案 VN06 NB 的 FUEL SURCHARGE 16%，2026-11-05)
     pct_col = _vt_col(labels, cfg["pct_col"]) if cfg.get("pct_col") else None
 
-    def _fee_desc(desc, row):
+    def _fee_desc(desc, row, col=None):
+        if "{shd}" in desc and col:
+            # {shd}：費用欄左邊一欄的 SHĐ 憑證號碼 (VN16 Cont 表 NÂNG/HẠ/CÂN)，空白時整段括號不要
+            shd = _vn_text(_vn_cell(row, col - 1))
+            return desc.replace(" (SHĐ {shd})", f" (SHĐ {shd})" if shd else "").replace("{shd}", shd)
         if "{pct}" not in desc:
             return desc
         v = _vn_num(_vn_cell(row, pct_col)) if pct_col is not None else None
+        if v is None and pct_col is not None:
+            # 百分比是文字 "19%" (VN16 SONG TRIỀU 表)：_vn_num() 不認百分號，這裡另外讀
+            m_pct = re.fullmatch(r"\s*(\d+(?:\.\d+)?)\s*%\s*", _vn_text(_vn_cell(row, pct_col)))
+            v = float(m_pct.group(1)) if m_pct else None
         pct = (round(v * 100) if v is not None and v <= 1 else round(v or 0))
         return desc.replace("{pct}", str(pct))
     # 發票號碼由好幾欄用逗號連起來 (VN02 代墊吊櫃費：SỐ HĐ NÂNG, SỐ HĐ HẠ，使用者 2026-10-27)
@@ -9340,7 +9348,9 @@ def _vt_parse_sheet(name: str, rows: List[list], cfg: Dict, supplier: str,
         if cells and re.match(r"^(V\.?A\.?T\b|THUE)", _vt_norm(cells[0])) and cfg.get("vat_row"):
             nums = [_vn_amount(c) for c in cells[1:] if _vn_amount(c)]
             if nums:
-                items.append({"description": cfg.get("vat_label") or _vn_text(cells[0]), "amount": None, "vat": nums[0],
+                # vat_amount_last：VAT 列有好幾個金額時取最右邊的合計欄 (VN16 SONG TRIỀU，2026-11-05)
+                vat_amt = nums[-1] if cfg.get("vat_amount_last") else nums[0]
+                items.append({"description": cfg.get("vat_label") or _vn_text(cells[0]), "amount": None, "vat": vat_amt,
                               **common, "invoice_no": doc_key or f"{name.strip()} VAT"})
                 # vat_no_date：整張 VAT 列沒有日期 (樣本答案 VN06 IMP/EXP，2026-11-04)
                 # 其他欄位也填 N/A，避免表頭層的共用欄位 (提單、材積) 被補進 VAT 列
@@ -9370,6 +9380,11 @@ def _vt_parse_sheet(name: str, rows: List[list], cfg: Dict, supplier: str,
         sheet_year = years.most_common(1)[0][0] if years else (common["invoice_date"] or "")[-4:] or None
     for row in rows[start:end]:
         key = next((_vn_text(_vn_cell(row, k)) for k in keys if _vn_text(_vn_cell(row, k))), "")
+        if cfg.get("key_comma") and key:
+            # key_comma：一格裡換行的多個號碼用 ", " 連接 (VN16 SONG TRIỀU 答案，2026-11-05)
+            raw_key = next(str(_vn_cell(row, k)) for k in keys if _vn_text(_vn_cell(row, k)))
+            lines = [ln.strip() for ln in raw_key.split("\n") if ln.strip()]
+            key = ", ".join(lines) if lines else key
         # 一格裡換行的好幾個號碼 ("102001\n270960") 也拆開
         joined = list(dict.fromkeys(
             v for k in join_keys if k is not None
@@ -9408,6 +9423,11 @@ def _vt_parse_sheet(name: str, rows: List[list], cfg: Dict, supplier: str,
             if c is not None and _vn_text(_vn_cell(row, c)):
                 value = _vn_cell(row, c)
                 head[code] = (_vn_date(value) or _vn_text(value)) if code.endswith("_date") else _vn_text(value)
+        # order_is_key / bl_is_key：發票號碼同時當 Order No. 或 B/L NO. (VN16 SONG TRIỀU 答案，2026-11-05)
+        if cfg.get("order_is_key"):
+            head["order_no"] = key or None
+        if cfg.get("bl_is_key"):
+            head["bl_no"] = key or None
         for code in cfg.get("carry_fields", ()):
             # 續行沿用同一票上一列的欄位 (提單號、港口)
             if head.get(code):
@@ -9466,7 +9486,7 @@ def _vt_parse_sheet(name: str, rows: List[list], cfg: Dict, supplier: str,
             head["_grp"] = cur_grp
         # 費用名稱 "@欄位" 代表取該欄的文字 (例如 VN07 Remark 欄 "Late come charge")
         row_items = [{"description": (_vn_text(_vn_cell(row, find(desc[1:]))) or desc[1:])
-                      if desc.startswith("@") else _fee_desc(desc, row),
+                      if desc.startswith("@") else _fee_desc(desc, row, c),
                       "amount": _vn_amount(_vn_cell(row, c)), "vat": None, **head}
                      for c, desc in fees if _vn_amount(_vn_cell(row, c))]
         for it in row_items:
@@ -10532,21 +10552,22 @@ register_supplier(
 # 金額；另有裝卸、壓車、吊櫃上下、過磅等費用。發票號碼 = 批號 SỐ LÔ / SỐ INV。
 _VT_ST_COMMON = {"date": "=NGAY", "port": None, "cbm": "SO LUONG CBM",
                  "boxes": {"20": "LOAI CONT 20'", "40": "LOAI CONT 40'", "45": "LOAI CONT 45'"},
-                 "total": "=TONG", "vat_row": True,
+                 "total": "=TONG", "vat_row": True, "vat_last": True, "vat_amount_last": True, "pct_col": "% TANG", "key_comma": True,
                  "fields": {"vessel": "SO XE", "container_no": ("SO CONTAINER", "SO XE"),
                             "port_of_loading": ("DIEM DI", "DIEM DI"), "port_of_discharge": "DIEM DEN"}}
 _VT_SONG_TRIEU = [
-    (r"XE TAI", {**_VT_ST_COMMON, "header": "SO XE", "key": ["SO INV"],
+    (r"XE TAI", {**_VT_ST_COMMON, "header": "SO XE", "key": ["SO INV"], "order_is_key": True,
                  "fees": [("PHI BOC", None), ("NEO XE", None), ("PHAT SINH", None),
-                          ("CUOC VAN CHUYEN CHUA TANG", None), ("SO TIEN % TANG", None)]}),
-    (r"CHUYEN KHO", {**_VT_ST_COMMON, "header": "SO CONTAINER", "key": ["SO INV", "SO CONTAINER"],
+                          ("CUOC VAN CHUYEN CHUA TANG", None), ("SO TIEN % TANG", "SỐ TIỀN % TĂNG {pct}%")]}),
+    (r"CHUYEN KHO", {**_VT_ST_COMMON, "header": "SO CONTAINER", "key": ["SO INV", "SO CONTAINER"], "order_is_key": True,
                      "fees": [("TROUBLE", None), ("=NEO", None), ("CUOC VAN CHUYEN CHUA TANG", None),
-                              ("SO TIEN % TANG", None)]}),
-    (r"CONT (XUAT|NHAP)", {**_VT_ST_COMMON, "header": "SO CONTAINER", "key": ["=SO LO", "SO CONTAINER"],
-                           "fees": [("CUOC VC CHUA TANG", None), ("SO TIEN % TANG", None),
+                              ("SO TIEN % TANG", "SỐ TIỀN % TĂNG {pct}%")]}),
+    (r"CONT (XUAT|NHAP)", {**_VT_ST_COMMON, "header": "SO CONTAINER", "key": ["=SO LO", "SO CONTAINER"], "bl_is_key": True,
+                           "fees": [("CUOC VC CHUA TANG", None), ("SO TIEN % TANG", "SỐ TIỀN % TĂNG {pct}%"),
                                     ("BD NANG", None), (("PHI KHAC PHI", "PHI KHAC SO TIEN"), None),
-                                    (("PHI NANG/HA NANG", "PHI NANG / HA NANG"), None),
-                                    (("PHI NANG/HA HA", "PHI NANG / HA HA"), None), ("PHI CAN CAN", None),
+                                    (("PHI NANG/HA NANG", "PHI NANG / HA NANG"), "PHÍ NÂNG (SHĐ {shd})"),
+                                    (("PHI NANG/HA HA", "PHI NANG / HA HA"), "PHÍ HẠ (SHĐ {shd})"),
+                                    ("PHI CAN CAN", "PHÍ CÂN (SHĐ {shd})"),
                                     # 沖銷 (TỔNG 要減掉，2026-10-28 抽樣 T7.2026)；名稱前的 "-" 代表減項
                                     ("CAN TRU", "-Cấn trừ phí phát sinh")]}),
 ]
@@ -10558,7 +10579,7 @@ def detect_song_trieu(text: str) -> bool:
 
 
 _vt_register("SONG_TRIEU", "CÔNG TY TNHH SONG TRIỀU", detect_song_trieu,
-             "CÔNG TY TNHH SONG TRIỀU", _VT_SONG_TRIEU)
+             "SONG TRIEU COMPANY LIMITED", _VT_SONG_TRIEU)
 
 
 # --- VN17 TIMES CARGO LOGISTIC (CÔNG TY TNHH DỊCH VỤ GIAO NHẬN HÀNG HÓA) ------
