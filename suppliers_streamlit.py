@@ -9232,6 +9232,10 @@ def _vt_parse_sheet(name: str, rows: List[list], cfg: Dict, supplier: str,
     pct_col = _vt_col(labels, cfg["pct_col"]) if cfg.get("pct_col") else None
 
     def _fee_desc(desc, row, col=None):
+        if "{desc_col}" in desc and cfg.get("desc_col"):
+            # desc_col：費用名稱接上另一欄的文字 (VN APL：DET - 備註欄)
+            dc = find(cfg["desc_col"])
+            desc = desc.replace("{desc_col}", _vn_text(_vn_cell(row, dc)) if dc is not None else "")
         if "{days}" in desc and cfg.get("days_label"):
             # days_label：費用名稱裡的 {days} 代入天數欄 (VN02 NEO-DD：PHÍ NEO XE x 天數 ngày)
             dc = find(cfg["days_label"])
@@ -9338,6 +9342,10 @@ def _vt_parse_sheet(name: str, rows: List[list], cfg: Dict, supplier: str,
         all_text = " ".join(_vn_text(c) for r in rows for c in r if c not in (None, ""))
         m_doc = re.search(cfg["doc_key"], all_text)
         doc_key = m_doc.group(1) if m_doc else None
+    if cfg.get("order_doc"):
+        # order_doc：整張工作表一個 Order No. (VN APL 答案：Local invoice No.，2026-11-06)
+        m_order = re.search(cfg["order_doc"], " ".join(_vn_text(c) for r in rows for c in r if c not in (None, "")))
+        common["order_no"] = m_order.group(1) if m_order else None
     if "doc_const" in cfg:
         # doc_const：整張工作表固定的發票號碼 (VN02 CHI HỘ 工作表沒有字軌，填 N/A)
         doc_key = cfg["doc_const"]
@@ -9384,7 +9392,10 @@ def _vt_parse_sheet(name: str, rows: List[list], cfg: Dict, supplier: str,
                 if nums:
                     items.append({"description": cfg.get("vat_desc", "VAT"), "amount": None,
                                   "vat": nums[-1], **common, "invoice_no": doc_key or f"{name.strip()} VAT"})
-                    if cfg.get("vat_no_date"):
+                    if cfg.get("vat_na_fields"):
+                        # vat_na_fields：整張 VAT 列指定欄位填 N/A (VN APL 答案)
+                        items[-1].update({k: "N/A" for k in cfg["vat_na_fields"]})
+                    elif cfg.get("vat_no_date"):
                         # 整張 VAT 列只有發票號碼與金額 (VN12 NGUYÊN HƯỞNG 答案)：其他欄填 N/A
                         items[-1].update({k: "N/A" for k in (
                             "invoice_date", "bl_no", "order_no", "volume", "port_of_loading", "port_of_discharge",
@@ -9454,6 +9465,9 @@ def _vt_parse_sheet(name: str, rows: List[list], cfg: Dict, supplier: str,
             head["order_no"] = key or None
         if cfg.get("bl_is_key"):
             head["bl_no"] = key or None
+        if cfg.get("volume_prefix") and head.get("volume"):
+            # volume_prefix：櫃型前面加字，例如 "1 x " + 40HC (VN APL 答案)
+            head["volume"] = cfg["volume_prefix"] + str(head["volume"])
         for code in cfg.get("carry_fields", ()):
             # 續行沿用同一票上一列的欄位 (提單號、港口)
             if head.get(code):
@@ -9488,6 +9502,11 @@ def _vt_parse_sheet(name: str, rows: List[list], cfg: Dict, supplier: str,
         head["volume"] = _fmt_volume(
             containers=[(_vn_num(_vn_cell(row, c)), size) for size, c in boxes.items() if c is not None],
             cbm=measure("cbm"), kg=measure("kg"))
+        if cfg.get("volume_col") is not None:
+            # volume_col：材積直接取一欄的櫃型文字，前面加 volume_prefix (VN APL：1 x 40HC)
+            vraw = _vn_text(_vn_cell(row, cfg["volume_col"]))
+            if vraw:
+                head["volume"] = (cfg.get("volume_prefix") or "") + vraw
         if cfg.get("box_x_space") and head.get("volume"):
             # box_x_space：櫃型寫成 "1 x 40'" (VN02 YUEDE 新答案，2026-11-05)
             head["volume"] = re.sub(r"(\d+)X(\d+)", r"\1 x \2'", head["volume"])
@@ -11488,32 +11507,96 @@ def detect_apl_vn(text: str) -> bool:
 
 
 def parse_apl_vn(text: str) -> Dict:
-    h: Dict[str, Optional[str]] = {"supplier": "CÔNG TY TNHH APL LOGISTICS VIỆT NAM"}
+    h: Dict[str, Optional[str]] = {"supplier": "APL Logistics Vietnam Co., Ltd"}
     series = _search(r"\(Serial\):\s*(\S+)", text)
     number = _search(r"S[ốo] \(No\.\):\s*(\d+)", text)
-    h["invoice_no"] = number   # 只用號碼 (發票符號 series 待使用者確認要不要加)
+    # 發票符號 + "-" + 號碼 (例如 1C26TAT-26716，2026-11-06 新答案)
+    h["invoice_no"] = f"{series}-{number}" if series and number else number
     m = re.search(r"Ngày \(date\)\s*(\d{1,2})\s*tháng \(month\)\s*(\d{1,2})\s*năm \(year\)\s*(\d{4})", text)
     h["invoice_date"] = _format_date_en(*m.groups()) if m else None
     h["consignee"] = _search(r"\(Company name\):\s*(.+)", text)
-    h["order_no"] = _search(r"Chứng từ số:\s*(\d+)", text)
-    # 第二個 "Chứng từ số: N, …" 到第一筆費用之間是船名 - 啟運港 - 目的港
-    m = re.search(r"Chứng từ số:\s*\d+,\s*(.*?)\n\s*1\s", text, re.DOTALL)
-    route = re.sub(r"\s+", " ", m.group(1)).strip() if m else ""
-    parts = [p.strip() for p in route.split(" - ")]
-    if len(parts) == 3:
-        h["vessel"], h["port_of_loading"], h["port_of_discharge"] = parts
-    items, cbm, boxes = [], None, []
-    for im in _APL_VN_ITEM_RE.finditer(text):
-        desc = im.group("desc").strip()
-        qty = im.group("qty").replace(".", "").replace(",", ".")
-        if im.group("unit") == "CBM":
-            cbm = qty
-        box = re.search(r"công-tơ-nơ\s+(\d{2}\w*)$", desc)
-        if box and im.group("unit") == "CTR":
-            boxes.append((qty, box.group(1)))
-        items.append({"description": desc, "amount": _dsv_vn_dot_amount(im.group("amount")),
-                      "vat": _dsv_vn_dot_amount(im.group("tax"))})
-    h["volume"] = _fmt_volume(containers=boxes, cbm=cbm)
+    if h["consignee"] and "POUYUEN" in h["consignee"].upper():
+        h["consignee"] = "POUYUEN VIETNAM COMPANY LIMITED"   # 答案用英文 (2026-11-06)
+    if h["consignee"] and "POU HUNG" in h["consignee"].upper():
+        h["consignee"] = "POU HUNG VIETNAM COMPANY LIMITED"
+    if h["consignee"] and "POU LI" in h["consignee"].upper():
+        h["consignee"] = "POU LI VIETNAM COMPANY LIMITED"
+    if h["consignee"] and "POU SUNG" in h["consignee"].upper():
+        h["consignee"] = "POU SUNG VIETNAM COMPANY LIMITED"
+    if h["consignee"] and "POU CHEN" in h["consignee"].upper():
+        h["consignee"] = "POU CHEN VIETNAM ENTERPRISE LTD."
+    air = "HAWB" in text
+    hawb = _search(r"HAWB:\s*(\d+)", text)
+    # 一張發票可能有好幾個運送單 ("Chứng từ số: 956057, BINH DUONG - …")，每個運送單各自的
+    # 單號、船名、港口、櫃號、材積，寫在該運送單的每一列費用上 (2026-11-06 新答案)
+    # 運送單標題：「Chứng từ số: N, 船名…」或單行「Chứng từ số: N」(接著是費用)；列表標題 (N; N;) 不算
+    starts = list(re.finditer(r"Chứng từ số:\s*(\S+?)(?:,\s*|\s*\n)", text))
+    items = []
+    for i, sm in enumerate(starts or [None]):
+        if sm is None:
+            order, rest = None, text
+        else:
+            order = sm.group(1)
+            end = starts[i + 1].start() if i + 1 < len(starts) else len(text)
+            rest = text[sm.end():end]
+        item_m = re.search(r"\n\s*\d+\s+[^\W\d]", rest)
+        route_txt = rest[:item_m.start()] if item_m else rest
+        route = " ".join(route_txt.split())
+        container = None
+        cm = re.search(r"\b(\d{2}[A-Z])\s*-\s*(\d{5})\b", route) or re.search(r"\b(\d{2}[A-Z]\d{5,6})\b", route)
+        if cm:
+            container = f"{cm.group(1)}-{cm.group(2)}" if cm.lastindex == 2 else cm.group(1)
+            route = route[:cm.start()] + route[cm.end():]
+        parts = [re.sub(r"^[\s\-.]+|[\s\-.]+$", "", p) for p in route.split(" - ")]
+        parts = [p for p in parts if p]
+        vessel = pol = pod = None
+        if len(parts) >= 3:
+            vessel, pol, pod = parts[0], parts[1], parts[2]
+            if air:
+                vessel = f"{vessel} (Flight)"
+        elif len(parts) == 2:
+            pol, pod = parts[0], parts[1].split("-")[0].strip()
+            if not container:
+                pass
+        # 清理：港口前面的 "ROUTE:" 字樣、港口後面黏著的櫃號 (版面合併時會黏在一起)
+        def _clean_port(v):
+            if not v:
+                return v
+            v = v.split("ROUTE:")[-1]
+            v = re.sub(r"-?\s*\d{2}[A-Z]-?\d{5,6}.*$", "", v)
+            return v.strip(" -.") or None
+        pol, pod = _clean_port(pol), _clean_port(pod)
+        if pol and not container:
+            mc2 = re.search(r"\d{2}[A-Z]\d{5,6}", (route_txt or ""))
+            container = mc2.group(0) if mc2 else None
+        ship = {"order_no": order, "vessel": vessel, "port_of_loading": pol,
+                "port_of_discharge": pod, "container_no": container,
+                "bl_no": hawb if air else None}
+        cbm = kgs = None
+        sizes: List[str] = []
+        block_items = []
+        for im in _APL_VN_ITEM_RE.finditer(rest):
+            desc = im.group("desc").strip()
+            qty = im.group("qty").replace(".", "").replace(",", ".")
+            if im.group("unit") == "CBM":
+                cbm = qty
+            elif im.group("unit") == "KGS":
+                kgs = qty
+            box = re.search(r"công-tơ-nơ\s+(\d{2}\w*)$", desc)
+            if box and im.group("unit") == "CTR" and box.group(1) not in sizes:
+                sizes.append(box.group(1))
+            block_items.append({"description": desc, "amount": _dsv_vn_dot_amount(im.group("amount")),
+                                "vat": _dsv_vn_dot_amount(im.group("tax"))})
+        if cbm:
+            volume = f"{cbm} CBM"
+        elif kgs:
+            volume = f"{kgs} KG"
+        elif sizes:
+            volume = ", ".join(f"1 x {sz}" for sz in sizes)
+        else:
+            volume = None
+        for it in block_items:
+            items.append({**it, **ship, "volume": volume})
     return {"header": h, "items": items or [{"description": None, "amount": None, "vat": None}]}
 
 
@@ -11522,25 +11605,42 @@ def _apl_vn_totals(text: str):
     return (_dsv_vn_dot_amount(m.group(1)), _dsv_vn_dot_amount(m.group(3))) if m else (None, None)
 
 
+def _apl_vn_pages(pdf_path: str) -> List[str]:
+    """續頁 ("tiep theo trang truoc - Trang 2 /2") 併回前一頁：同一張發票的最後幾筆運送單
+    印在第二頁，沒有發票號碼，逐頁辨識會漏掉 (2026-11-06)。"""
+    merged: List[str] = []
+    for page in extract_pages_from_pdf(pdf_path):
+        if merged and re.search(r"tiep theo trang truoc", page, re.IGNORECASE):
+            merged[-1] = merged[-1] + "\n" + page
+        else:
+            merged.append(page)
+    return merged
+
+
 def apl_vn_invoice_page(page: str) -> bool:
     return "HÓA ĐƠN GIÁ TRỊ GIA TĂNG" in page.upper() and "APL" in page.upper()
 
 
 _APL_VN_SHEET = [
-    (r".", {"header": "BOOKING NO", "key": ["=INV#", "BOOKING NO"], "vat_doc_only": True,
-            "fees": [("CHASSIS CONTSEAL", None), ("DROP OFF", None), ("CHARGE DET", "DET"),
-                     ("CUSTOMS / OTHERS", None)],
-            "total": "TOTAL ( VND )", "doc_key": r"Invoice No\.:\s*(\d+)", "doc_date": "INVOICE DATE",
-            "vat_total": "TOTAL VAT AMOUNT", "vat_desc": "VAT 8%",
-            "fields": {"container_no": "CONTAINER NUMBER", "order_no": "BOOKING NO",
-                       "onboard_date": "PICK-UP MT DATE"}}),
+    # POU HUNG 對帳表 (VND 工作表，2026-11-06 新答案)：只取 DET 欄，費用名稱 = "DET - " + 備註；
+    # 發票號碼 = Invoice No. (整張)；Order No. = Local invoice No.；B/L = Booking No.；櫃型寫成 "1 x 40HC"
+    (r".", {"header": "BOOKING NO", "key": ["BOOKING NO"],
+            "fees": [("DET", "DET - {desc_col}")], "desc_col": "REMARKS",
+            "total": "TOTAL ( VND )", "doc_key": r"Invoice No\.:\s*(\d+)",
+            "order_doc": r"Local invoice No\.:\s*(\S+)", "doc_date": "INVOICE DATE",
+            "vat_total": "TOTAL VAT AMOUNT", "vat_desc": "TOTAL VAT AMOUNT IN VND",
+            "fields": {"container_no": "CONTAINER NUMBER", "bl_no": "BOOKING NO"},
+            "volume_col": 3, "volume_prefix": "1 x ", "vat_last": True,
+            "vat_na_fields": ("bl_no", "volume", "container_no", "port_of_loading", "port_of_discharge",
+                              "vessel", "shipper", "onboard_date", "arrive_date")}),
 ]
-_apl_vn_sheet_parse, _apl_vn_sheet_totals = _vt_make("CÔNG TY TNHH APL LOGISTICS VIỆT NAM", _APL_VN_SHEET)
+_apl_vn_sheet_parse, _apl_vn_sheet_totals = _vt_make("APL Logistics Vietnam Co., Ltd", _APL_VN_SHEET)
 
 register_supplier(
     "APL_VN", "CÔNG TY TNHH APL LOGISTICS VIỆT NAM", detect_apl_vn, parse_apl_vn, multi_page=True,
     extract_total=lambda t: _apl_vn_totals(t)[0], extract_grand_total=lambda t: _apl_vn_totals(t)[1],
     sheet_parse=_apl_vn_sheet_parse, sheet_totals=_apl_vn_sheet_totals,
+    page_text=lambda pdf_path: _apl_vn_pages(pdf_path),
 )
 
 
