@@ -871,6 +871,11 @@ _EN_PHRASES = (
     ("PHI XEP DO", "Terminal Handling / Loading-Unloading Fee"), ("PHI LAM HANG", "Handling Fee"),
     ("PHI SOI HANG", "X-ray Screening Fee"), ("PHI PHAT HANH VAN DON", "B/L Issuance Fee"),
     ("PHI VGM", "VGM Fee"), ("PHI CFS", "CFS Fee"), ("PHI THC", "Terminal Handling Charge"),
+    # 越南 MAERSK (VN07) 費用名稱 (使用者 2026-11-06 答案)
+    ("PHI XEP DO HANG HOA", "Cargo Handling Fee"), ("PHI NIEM CHI HANG TAU", "Carrier Seal Fee"),
+    ("PHI CHUNG TU - CANG DI", "Origin Documentation Fee"),
+    ("PHI DICH VU QUAN LY KHACH HANG", "Customer Service Management Fee"),
+    ("PHI XEP DO CONTAINER TAI CANG DI", "Origin Container Handling Fee"),
     ("THUE 8% VAT", "VAT 8%"), ("THUE 10% VAT", "VAT 10%"),
     # 印尼文
     ("TOTAL BIAYA EKSTERNAL", "Total external cost"), ("TOTAL BIAYA REIMBURSEMENT",
