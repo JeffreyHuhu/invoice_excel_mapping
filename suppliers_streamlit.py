@@ -9319,7 +9319,8 @@ def _vt_parse_sheet(name: str, rows: List[list], cfg: Dict, supplier: str,
     fees = [(c, f"{desc} ({cur})" if (cur := next((x for x in ("USD", "RMB") if re.search(
         rf"\b{x}\b", labels[c])), None if re.search(r"\bVND\b", labels[c]) else cfg.get("fee_cur")))
         and cur not in desc.upper() else desc) for c, desc in fees]
-    fields = {code: find(lab) for code, lab in cfg.get("fields", {}).items()}
+    # 欄位可以直接給欄號 (int)：表頭沒有標題的欄 (VN12 NGUYÊN HƯỞNG 的 SHENZHEN 欄，2026-11-06)
+    fields = {code: (lab if isinstance(lab, int) else find(lab)) for code, lab in cfg.get("fields", {}).items()}
     boxes = {size: _vt_col(labels, lab) for size, lab in cfg.get("boxes", {}).items()}
     # 表內沒有客戶名稱時，看工作表名稱的寶成廠別 ("FCL POU CHEN" -> POU CHEN)
     pou = re.search(r"(?<![A-Z])POU\s*-?\s*(YUEN|HUNG|CHEN|SUNG|LI|SHENG|YI)(?![A-Z])", _vt_norm(name))
@@ -9383,6 +9384,11 @@ def _vt_parse_sheet(name: str, rows: List[list], cfg: Dict, supplier: str,
                 if nums:
                     items.append({"description": cfg.get("vat_desc", "VAT"), "amount": None,
                                   "vat": nums[-1], **common, "invoice_no": doc_key or f"{name.strip()} VAT"})
+                    if cfg.get("vat_no_date"):
+                        # 整張 VAT 列只有發票號碼與金額 (VN12 NGUYÊN HƯỞNG 答案)：其他欄填 N/A
+                        items[-1].update({k: "N/A" for k in (
+                            "invoice_date", "bl_no", "order_no", "volume", "port_of_loading", "port_of_discharge",
+                            "vessel", "container_no", "shipper", "onboard_date", "arrive_date")})
                 break
     last_key = last_date = None
     cur_grp, grp_parts = None, []      # merge_no_fee 用：同一台車的列
@@ -9426,6 +9432,12 @@ def _vt_parse_sheet(name: str, rows: List[list], cfg: Dict, supplier: str,
                 continue
         # 電子發票保留完整發票符號 ("1C26TSG-7734"、"1-C26TOD-28667"、"C26TOD/17995")，
         # 不去掉符號 (使用者 2026-11-05 決定：所有供應商都保留完整符號，取代 2026-10-27 的「只用號碼」)
+        if cfg.get("inv_series") and str(key).isdigit():
+            # inv_series：Excel 只有流水號，發票符號 = 系列 1C + 年份 YY + TAA + "-" + 8 位流水號
+            # (VN17 TIMES CARGO 新答案，2026-11-06)；年份取發票日期
+            d_cell = _vn_cell(row, col["date"]) if col.get("date") is not None else None
+            yy = d_cell.year % 100 if isinstance(d_cell, (datetime.date, datetime.datetime)) else 0
+            key = cfg["inv_series"].format(yy=f"{yy:02d}") + "-" + str(key).zfill(8)
         last_key = key
         # vat_doc_only：對帳表號只給整張的 VAT 列用，費用列用自己的號碼 (VN11 Inv#)
         key = key if cfg.get("vat_doc_only") else (doc_key or key)
@@ -9515,6 +9527,11 @@ def _vt_parse_sheet(name: str, rows: List[list], cfg: Dict, supplier: str,
                 gross = it["amount"]
                 net = math.floor(gross / 1.08 + 0.5)
                 it["amount"], it["vat"] = net, gross - net
+        if cfg.get("vat_zero_desc"):
+            # vat_zero_desc：這些費用名稱的 VAT 寫 0 (VN12 空運費免稅，2026-11-06 新答案)
+            for it in row_items:
+                if str(it["description"]).upper() in cfg["vat_zero_desc"]:
+                    it["vat"] = 0
         if cfg.get("vat_of_amount"):
             # vat_of_amount：未稅金額 × 8% 寫在同一列 (VN02 NEO-DD 答案)
             for it in row_items:
@@ -10417,13 +10434,18 @@ _vt_register("BINH_TAN", "HỢP TÁC XÃ VẬN TẢI DỊCH VỤ DU LỊCH BÌNH
 # 每項費用都有 RMB 與 VND 兩欄，只取 VND；發票號碼 = Waybill number。
 _VT_NGUYEN_HUONG = [
     (r".", {"header": "WAYBILL", "key": ["WAYBILL"],
+            # 發票號碼 = 表頭「ĐÍNH KÈM HĐ SỐ」的字軌 (1C26TNH-，只取字軌) (VN12 新答案，2026-11-06)
+            "doc_key": r"(\d[A-Z]\d{2}[A-Z]{3})-",
+            "vat_zero_desc": ("AIR FREIGHT",),
+            # 表尾整張 VAT 8% 列：發票號碼 = 字軌，日期/提單等填 N/A (2026-11-06 新答案)
+            "vat_total": "VAT 8%", "vat_desc": "VAT 8%", "vat_no_date": True, "vat_last": True,
             "fees": [("AIR FREIGHT VND", "Air freight"), ("CUSTOMS FEES (BILL) VND", "Customs fees"),
                      ("BILL OF LADING FEE (BILL) VND", "Bill of lading fee"),
                      ("ADDITIONAL FEE (BILL) VND", "Additional fee"),
                      ("WAREHOUSING FEE (BILL) VND", "Warehousing fee"),
                      ("PAD EXPENSE VND", "Pad expense"), ("D/O (BILL) VND", "D/O")],
             "total": "TOTAL AMOUNT VND", "date": "PICKUP DATE", "kg": "WEIGHT",
-            "fields": {"bl_no": "WAYBILL", "shipper": "=SHIPPER"}}),
+            "fields": {"bl_no": "WAYBILL", "shipper": "=SHIPPER", "port_of_loading": 2}}),
 ]
 
 
@@ -10432,7 +10454,7 @@ def detect_nguyen_huong(text: str) -> bool:
 
 
 _vt_register("NGUYEN_HUONG", "CÔNG TY TNHH NGUYÊN HƯỞNG", detect_nguyen_huong,
-             "CÔNG TY TNHH NGUYÊN HƯỞNG", _VT_NGUYEN_HUONG)
+             "NGUYEN HUONG COMPANY LTD.", _VT_NGUYEN_HUONG)
 
 
 # --- VN14 ORIENTAL LOGISTICS MULTIMODAL (Công Ty TNHH Logistics Vận Tải Đa Phương Thức) --
@@ -10660,6 +10682,7 @@ _VT_TIMES_CARGO = [
                "grand": "$TOTAL", "date": "INVOICE DATE",
                "fields": {"bl_no": "=HBL", "arrive_date": "=ETA"}}),
     (r".", {"header": "HBL", "key": ["=INVOICE NO.", "=HBL"], "name_require": "RATE EXCHANGE",
+            "inv_series": "1C{yy}TAA",
             "fees": [(x, None) for x in (
                 "OCEAN FREIGHT", "DESCRIPTION EXW", "THC FEE", "DO FEE", "HANDLING FEE", "CIC FEE",
                 "LSS FEE", "CFS FEE", "LOADING FEE", "DESCRIPTION EBS", "DRAYAGE")],
@@ -10753,7 +10776,7 @@ def _tcl_pdf_grand(text: str):
     return _dsv_vn_dot_amount(_search(r"Tổng cộng tiền thanh toán:\s*([\d.]+)", text))
 
 
-_tcl_sheet_parse, _tcl_sheet_totals = _vt_make("TIMES CARGO LOGISTIC CO., LTD", _VT_TIMES_CARGO)
+_tcl_sheet_parse, _tcl_sheet_totals = _vt_make("Times Cargo Logistic Co., Ltd - TCL", _VT_TIMES_CARGO)
 register_supplier(
     "TIMES_CARGO", "CÔNG TY TNHH DỊCH VỤ GIAO NHẬN HÀNG HÓA (TIMES CARGO)", detect_times_cargo,
     parse_times_cargo_pdf, extract_total=_tcl_pdf_total, extract_grand_total=_tcl_pdf_grand,
@@ -11069,8 +11092,9 @@ _KN_VN_ITEM_NODESC_RE = re.compile(
     r"^\d+\s+(?P<qty>[\d,.]+)\s+(?P<unit>[A-Z0-9]{2,5})\s+(?P<price>[\d,.]+)\s+"
     r"(?P<amount>[\d,.]+)\s+(?P<rate>\d+%|KCT)\s+(?P<tax>[\d,.]+)\s+(?P<total>[\d,.]+)$")
 _KN_VN_LIST_FEES = (
-    "Phí biên nhận hàng đường biển", "CY monitoring", "Phí xếp dỡ tại cảng đi",
-    "Phí làm hàng lb", "Phí e-VGM", "Phí Cơ sở hạ tầng cảng xuất",
+    # 費用名稱後的代碼 "- 215" 等照答案寫 (2026-11-06)
+    "Phí biên nhận hàng đường biển - 215", "CY monitoring - 376", "Phí xếp dỡ tại cảng đi - 400",
+    "Phí làm hàng lẻ - 428", "Phí e-VGM - 347", "Phí Cơ sở hạ tầng cảng xuất",
     "Phí làm hàng ngoài giờ", "Phí sắp xếp hàng xuất", "Phí lưu kho hàng xuất",
     "Phí DEM/DET")
 _KN_VN_LIST_ROW_RE = re.compile(
@@ -11115,35 +11139,44 @@ def _kn_vn_list_rows(text: str):
 
 
 def parse_kn_vn(text: str) -> Dict:
-    h: Dict[str, Optional[str]] = {"supplier": "CÔNG TY TNHH KUEHNE + NAGEL"}
+    h: Dict[str, Optional[str]] = {"supplier": "Kuehne + Nagel Co., Ltd"}
     list_rows = _kn_vn_list_rows(text)
     if list_rows:
         h["invoice_date"] = _vn_pdf_date(_search(r"ĐƠN NGÀY\s*(\d{1,2}/\d{1,2}/\d{4})", text.upper()))
-        h["consignee"] = "CÔNG TY TNHH POUYUEN VIỆT NAM" if "POUYUEN" in text.upper() else None
+        h["consignee"] = "POUYUEN VIETNAM COMPANY LIMITED" if "POUYUEN" in text.upper() else None
         items = []
         # 第 10 欄在精簡版清單是 "Phí thị thực" (不是 DEM/DET)
         names = _KN_VN_LIST_FEES[:9] + (("Phí thị thực",) if "Phí thị thực" in text else _KN_VN_LIST_FEES[9:])
         for r in list_rows:
-            common = {"invoice_no": r["file"], "order_no": r["so"], "port_of_discharge": r["dest"] or None,
+            common = {"invoice_no": r["file"], "bl_no": r["file"], "order_no": r["so"], "port_of_discharge": r["dest"] or None,
                       "volume": _fmt_volume(cbm=r["cbm"], kg=r["kg"])}
             items += [{"description": name, "amount": amt, "vat": None, **common}
                       for name, amt in zip(names, r["fees"]) if amt]
-            items.append({"description": "VAT 8%", "amount": None, "vat": r["vat"], **common})
+            items.append({"description": "VAT amount (8%)", "amount": None, "vat": r["vat"], **common})
         return {"header": h, "items": items or [{"description": None, "amount": None, "vat": None}]}
     series = _search(r"\(Series\):\s*(\S+)", text)
     number = _search(r"\(Invoice No\.\):\s*(\S+)", text)
-    h["invoice_no"] = number   # 只用號碼 (發票符號 series 待使用者確認要不要加)
+    # 發票符號 + "-" + 號碼 (例如 1C26TKS-134757，2026-11-06 新答案)
+    h["invoice_no"] = f"{series}-{number}" if series and number else number
     h["invoice_date"] = _vn_pdf_date(_search(r"\(Invoice date\):\s*(\S+)", text))
     h["consignee"] = _search(r"\(Customer.s name\):\s*(.+)", text)
+    if h["consignee"] and "POUYUEN" in h["consignee"].upper():
+        h["consignee"] = "POUYUEN VIETNAM COMPANY LIMITED"   # 答案用英文名稱 (2026-11-06)
     h["onboard_date"] = _vn_pdf_date(_search(r"\(Departure date\):\s*(\S+)", text))
     h["arrive_date"] = _vn_pdf_date(_search(r"\(Arrival date\):\s*(\S+)", text))
     # 欄位空白時，同一行接著是下一個標籤 ("Số lô hàng (File number): Số chứng từ nội bộ…"、
     # "(AWB/SWB): Tiền tệ…")，不可當成值 (2026-10-28 抽樣 KEUHNE+NAGEL_JUL.2026_BY SHIPMENT 第 44 頁)
     blank = r"(?!Số\b|Tiền\b|Ngày\b)"
-    h["order_no"] = _search(r"\(File number\):[ \t]*" + blank + r"(\S+)", text)
+    # 答案 (2026-11-06)：Order No. = KN No. (內部單號)；B/L = 批號 File number；MBL = AWB 的 "/" 後半
+    h["order_no"] = _search(r"\(KN No\.\):[ \t]*" + blank + r"(\S+)", text)
     m = re.search(r"\(AWB/SWB\):[ \t]*" + blank + r"(\S+)[^\n]*\n(\d+)\s*$", text, re.MULTILINE)
-    h["bl_no"] = (m.group(1) + m.group(2)) if m and m.group(1).endswith("-") else _search(
+    awb = (m.group(1) + m.group(2)) if m and m.group(1).endswith("-") else _search(
         r"\(AWB/SWB\):[ \t]*" + blank + r"(\S+)", text)
+    h["bl_no"] = _search(r"\(File number\):[ \t]*" + blank + r"(\S+)", text)
+    if awb and "/" in awb:
+        h["mbl_no"] = awb.split("/", 1)[1]
+    elif awb and not h["bl_no"]:
+        h["bl_no"] = awb
     items, cw, cbm, boxes = [], None, None, {}
     lines = text.splitlines()
     for i, line in enumerate(lines):
@@ -11167,6 +11200,9 @@ def parse_kn_vn(text: str) -> Dict:
         items.append({"description": desc, "amount": _vn_pdf_num(m.group("amount")),
                       "vat": _vn_pdf_num(m.group("tax"))})
     h["volume"] = _fmt_volume(containers=[(q, u) for u, q in boxes.items()], cbm=cbm, kg=cw)
+    if cw and not boxes:
+        # 空運：照答案寫計費重 CW，千分位逗號 (例如 3,587.5 CW，2026-11-06 新答案)
+        h["volume"] = f"{float(cw):,g} CW"
     return {"header": h, "items": items or [{"description": None, "amount": None, "vat": None}]}
 
 
