@@ -501,6 +501,10 @@ def extract_pages_from_pdf(pdf_path: str, **pdfplumber_kwargs) -> List[str]:
                 scanned.append(i)
                 text = ""
             pages_text.append(text)
+            # 頁數多的 PDF (例如 388 頁) 不釋放快取會佔用數 GB 記憶體，讀完一頁就釋放
+            # (需要時 pdfplumber 會再解析；只有掃描頁之後的 OCR 會再用到頁面物件)
+            if not (i in scanned) and hasattr(page, "flush_cache"):
+                page.flush_cache()
         text_key = detect_supplier("\n".join(pages_text)) if scanned and len(scanned) < len(pages_text) else None
         if text_key and SUPPLIER_REGISTRY.get(text_key, {}).get("page_text"):
             # 文字層已經認得出供應商，而且這家的 page_text 會自己 OCR 掃描頁：
@@ -2298,7 +2302,6 @@ def find_best_extraction(
         # (去除重複，避免同一組設定被試兩次)。
         configs = [learned_config] + [c for c in configs if c != learned_config]
     configs = configs[:max_attempts]
-
     is_multi = is_multi_page_supplier(supplier_key)
 
     attempts: List[Dict] = []
