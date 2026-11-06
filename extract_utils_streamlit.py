@@ -28,6 +28,7 @@ import io
 import os
 import sys
 import json
+import hashlib
 import math
 import datetime
 import threading
@@ -134,6 +135,56 @@ _OCR_TEXT_CACHE: Dict[Tuple[str, int], str] = {}
 _OCR_CACHE_LIMIT = 2000
 _OCR_CACHE_LOCK = threading.Lock()
 
+# OCR 硬碟快取 (2026-11-06)：同一份掃描檔第二次以後 (重跑回歸、重新轉檔、規則修正後重跑) 不用再 OCR。
+# 鍵值 = 檔案路徑 + 大小 + 修改時間 + 模式 + 頁碼。改了 OCR 前處理時把 _OCR_DISK_VERSION 加一，舊快取就不會再用。
+# 只存「有辨識出文字」的結果：OCR 失敗 (空字串) 不存，避免暫時性錯誤被永久記住。
+# 關閉：環境變數 INVOICE_OCR_DISK_CACHE=0；位置：INVOICE_OCR_CACHE_DIR (預設 使用者資料夾\.invoice_ocr_cache)。
+_OCR_DISK_VERSION = "1"
+_OCR_DISK_ON = os.environ.get("INVOICE_OCR_DISK_CACHE", "1") != "0"
+_OCR_DISK_DIR = os.environ.get("INVOICE_OCR_CACHE_DIR") or os.path.join(
+    os.path.expanduser("~"), ".invoice_ocr_cache")
+
+
+def _disk_ocr_path(pdf_path: str, mode: str, page_index: int) -> Optional[str]:
+    try:
+        st = os.stat(pdf_path)
+    except OSError:
+        return None
+    ident = f"{_OCR_DISK_VERSION}|{os.path.abspath(pdf_path)}|{st.st_size}|{st.st_mtime_ns}|{mode}|{page_index}"
+    digest = hashlib.sha1(ident.encode("utf-8")).hexdigest()
+    return os.path.join(_OCR_DISK_DIR, digest[:2], digest + ".json")
+
+
+def _disk_ocr_get(pdf_path: str, mode: str, page_index: int):
+    """讀硬碟快取；沒有或讀取失敗回傳 None (呼叫端照常 OCR)。"""
+    if not _OCR_DISK_ON:
+        return None
+    path = _disk_ocr_path(pdf_path, mode, page_index)
+    if not path or not os.path.exists(path):
+        return None
+    try:
+        with open(path, encoding="utf-8") as f:
+            return json.load(f)["v"]
+    except Exception:  # noqa: BLE001  快取檔壞掉就當作沒有
+        return None
+
+
+def _disk_ocr_put(pdf_path: str, mode: str, page_index: int, value) -> None:
+    """寫硬碟快取 (先寫暫存檔再 rename，多個程序同時寫不會寫壞)。寫入失敗不影響擷取。"""
+    if not _OCR_DISK_ON:
+        return
+    path = _disk_ocr_path(pdf_path, mode, page_index)
+    if not path:
+        return
+    try:
+        os.makedirs(os.path.dirname(path), exist_ok=True)
+        tmp = f"{path}.{os.getpid()}.{threading.get_ident()}.tmp"
+        with open(tmp, "w", encoding="utf-8") as f:
+            json.dump({"v": value}, f, ensure_ascii=False)
+        os.replace(tmp, path)
+    except Exception:  # noqa: BLE001
+        pass
+
 
 def _cache_put(cache: Dict, key, value) -> None:
     """寫入 OCR 快取；超過上限就丟掉最早放進去的一筆 (dict 保持插入順序)。"""
@@ -156,6 +207,10 @@ def _ocr_page_text(pdf_path: str, page_index: int, page) -> str:
     cached = _OCR_TEXT_CACHE.get(cache_key)
     if cached is not None:
         return cached
+    disk = _disk_ocr_get(pdf_path, "hi300", page_index)
+    if disk is not None:
+        _cache_put(_OCR_TEXT_CACHE, cache_key, disk)
+        return disk
 
     text = ""
     if _OCR_AVAILABLE:
@@ -180,6 +235,8 @@ def _ocr_page_text(pdf_path: str, page_index: int, page) -> str:
             text = ""
 
     _cache_put(_OCR_TEXT_CACHE, cache_key, text)
+    if text.strip():
+        _disk_ocr_put(pdf_path, "hi300", page_index, text)
     return text
 
 
@@ -204,6 +261,11 @@ def _ocr_page_fast(pdf_path: str, page_index: int, page) -> Tuple[str, bool]:
     cached = _OCR_FAST_CACHE.get(cache_key)
     if cached is not None:
         return cached
+    disk = _disk_ocr_get(pdf_path, "fast150", page_index)
+    if disk is not None:
+        result = (disk[0], bool(disk[1]))
+        _cache_put(_OCR_FAST_CACHE, cache_key, result)
+        return result
     result = ("", False)
     if _OCR_AVAILABLE:
         try:
@@ -211,6 +273,8 @@ def _ocr_page_fast(pdf_path: str, page_index: int, page) -> Tuple[str, bool]:
         except Exception:
             result = ("", False)
     _cache_put(_OCR_FAST_CACHE, cache_key, result)
+    if result[0].strip():
+        _disk_ocr_put(pdf_path, "fast150", page_index, [result[0], result[1]])
     return result
 
 
@@ -365,6 +429,10 @@ def _ocr_page_text_enhanced(pdf_path: str, page_index: int, page) -> str:
     cached = _OCR_ENHANCED_TEXT_CACHE.get(cache_key)
     if cached is not None:
         return cached
+    disk = _disk_ocr_get(pdf_path, "enh300", page_index)
+    if disk is not None:
+        _cache_put(_OCR_ENHANCED_TEXT_CACHE, cache_key, disk)
+        return disk
 
     text = ""
     if _OCR_AVAILABLE:
@@ -384,6 +452,8 @@ def _ocr_page_text_enhanced(pdf_path: str, page_index: int, page) -> str:
             text = ""
 
     _cache_put(_OCR_ENHANCED_TEXT_CACHE, cache_key, text)
+    if text.strip():
+        _disk_ocr_put(pdf_path, "enh300", page_index, text)
     return text
 
 
