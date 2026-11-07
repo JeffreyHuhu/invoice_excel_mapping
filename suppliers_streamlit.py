@@ -7987,6 +7987,9 @@ _OPL_LABELS = [
     r"REF\s*JOB\s*NO\.", r"ATTN", r"SHIPPER", r"VESSEL", r"CONSIGNEE", r"POL", r"POD",
     r"AWB/BL\s*NO\.", r"MAWB/OBL\s*NO\.", r"GROSS\s*WT", r"ATD", r"VOLUME", r"ETA",
     r"NO\.\s*OF\s*PKGS", r"CARRIER", r"YOUR\s*REF", r"CONTAINER\s*NO", r"INCOTERM",
+    # 空運版 (2026-11-08，"INVOICE (A4) Outstading-AIR AMD" NCLR26040482)：
+    # "CONSIGNEE : PT NIKOMAS GEMILANG ORIGIN : HO CHI MINH, VIETNAM" 兩欄併成一行
+    r"ORIGIN", r"DEST", r"MAWB\s*NO\.", r"HAWB\s*NO\.", r"CHARGE\s*WT", r"REMARKS",
 ]
 _OPL_STOP = r"(?=\s+(?:" + "|".join(_OPL_LABELS) + r")\s*:|\s*\n|\s*$)"
 
@@ -8080,10 +8083,12 @@ def parse_opl(text: str) -> Dict:
         "order_no": _opl_field(r"YOUR\s*REF", text),
         "arrive_date": _opl_field(r"ETA", text),
         "onboard_date": _opl_field(r"ATD", text),
-        "bl_no": _opl_field(r"AWB/BL\s*NO\.", text),
-        "mbl_no": _opl_field(r"MAWB/OBL\s*NO\.", text),
-        "port_of_loading": _opl_field(r"POL", text),
-        "port_of_discharge": _opl_field(r"POD", text),
+        # 空運版標籤不同：HAWB NO. / MAWB NO. / ORIGIN / DEST (跟其他供應商一樣
+        # HAWB 放 B/L、MAWB 放 MBL)；空運版沒有航班號碼，Vessel 留空
+        "bl_no": _opl_field(r"AWB/BL\s*NO\.", text) or _opl_field(r"HAWB\s*NO\.", text),
+        "mbl_no": _opl_field(r"MAWB/OBL\s*NO\.", text) or _opl_field(r"MAWB\s*NO\.", text),
+        "port_of_loading": _opl_field(r"POL", text) or _opl_field(r"ORIGIN", text),
+        "port_of_discharge": _opl_field(r"POD", text) or _opl_field(r"DEST", text),
         "volume": _opl_volume(text),
         "vessel": _opl_field(r"VESSEL", text),
         "container_no": _opl_field(r"CONTAINER\s*NO", text),
