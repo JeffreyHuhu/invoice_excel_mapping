@@ -10157,10 +10157,276 @@ def _tw_is_cong_no(book) -> bool:
 _tw_vt_parse, _tw_vt_totals = _vt_make("CÔNG TY TNHH LIÊN VẬN QUỐC TẾ", _VT_TRANS_WAGON)
 
 
+# --- VN01 TRANS WAGON：PAYMENT FOR LOCAL CHARGE (工作表 BẢNG KÊ，2026-11-09 使用者答案) ---
+# 一列一票：STT/Invoice No/B/L/ATD/XRATE + 費用欄 (USD，欄位依月份不同，動態抓
+# XRATE 右邊到 Total 左邊的每一欄) + Total/VAT/Sum Total (USD)/Sum Total (VND)。
+# 金額 = USD × XRATE 四捨五入；每票最後加一列 VAT 8% = Sum Total(VND) − 費用 VND 加總。
+# 答案的公司全名含逗號後空格 "CO., LTD" (跟既有 CONG_NO 版 "CO.,LTD" 不同，照答案)。
+_TW_SUPPLIER_SPACE = "TRANS WAGON INTERNATIONAL CO., LTD"
+
+
+def _tw_header_consignee(rows: List[list]) -> Optional[str]:
+    """抬頭客戶公司名稱："To : …" 或沒有標籤、直接寫公司名的那一格 (例如
+    "CONG TY POU PHONG VIETNAM")。簡稱/越南文名稱用 _VN_CONSIGNEES 換成英文全名。"""
+    text = _vt_consignee(rows)
+    if not text:
+        for row in rows[:10]:
+            for c in row:
+                if not c:
+                    continue
+                first = str(c).splitlines()[0].strip()
+                if first and re.match(r"^C[ÔO]NG\s+TY\b", _vt_norm(first)) and "TRANS WAGON" not in first.upper():
+                    text = first
+                    break
+            if text:
+                break
+    if not text:
+        return None
+    flat = re.sub(r"[^A-Z]", "", _vt_norm(text))
+    for key, full in _VN_CONSIGNEES.items():
+        if re.sub(r"[^A-Z]", "", key) in flat:
+            return full
+    return text
+
+
+def _tw_usd_text(usd: float) -> str:
+    """費用名稱括號裡的美金金額：75 -> "75"、40.6 -> "40.6"。"""
+    return f"{usd:,.2f}".rstrip("0").rstrip(".")
+
+
+def _tw_bang_ke_head(rows: List[list]) -> Tuple[Optional[int], List[str]]:
+    for i, row in enumerate(rows[:20]):
+        labels = [_tw_key(c) for c in row]
+        if {"B/L", "ATD", "XRATE", "SUMTOTAL(VND)"} <= set(labels):
+            return i, labels
+    return None, []
+
+
+def _tw_is_bang_ke(book) -> bool:
+    return any(_tw_bang_ke_head(rows)[0] is not None for _, rows in book.sheets)
+
+
+def _tw_bang_ke_sheets(book) -> Tuple[List[Dict], List[Dict]]:
+    """「PAYMENT FOR LOCAL CHARGE」版：回傳 (費用列, 每張發票的合計)。"""
+    items: List[Dict] = []
+    totals: List[Dict] = []
+    for name, rows in book.sheets:
+        head, labels = _tw_bang_ke_head(rows)
+        if head is None:
+            continue
+        col = {k: labels.index(k) for k in (
+            "INVOICENO", "B/L", "ATD", "XRATE", "TOTAL", "SUMTOTAL(VND)", "VATINVDATE",
+            "NOTEPORTOFLOADING/DISCHARGE") if k in labels}
+        fee_cols = list(range(col["XRATE"] + 1, col["TOTAL"]))
+        fee_names = {c: re.sub(r"\s+", " ", _vn_text(rows[head][c])).strip() for c in fee_cols}
+        consignee = _tw_header_consignee(rows)
+        for row in rows[head + 1:]:
+            bl = _vn_text(_vn_cell(row, col["B/L"]))
+            if bl.upper() == "TOTAL":
+                break
+            invoice = _vn_text(_vn_cell(row, col["INVOICENO"]))
+            if not invoice:
+                continue
+            rate = _vn_num(_vn_cell(row, col["XRATE"])) or 0
+            note = _vn_text(_vn_cell(row, col.get("NOTEPORTOFLOADING/DISCHARGE")))
+            pol = pod = None
+            if " - " in note:
+                pol, pod = (p.strip() for p in note.split(" - ", 1))
+            base = {"supplier": _TW_SUPPLIER_SPACE, "consignee": consignee, "invoice_no": invoice,
+                    "invoice_date": _vn_date(_vn_cell(row, col.get("VATINVDATE"))),
+                    "onboard_date": _vn_date(_vn_cell(row, col["ATD"])),
+                    "bl_no": bl, "port_of_loading": pol, "port_of_discharge": pod}
+            fee_vnd_total = 0
+            for c in fee_cols:
+                usd = _vn_num(_vn_cell(row, c))
+                if not usd:
+                    continue
+                vnd = int(usd * rate + 0.5)
+                fee_vnd_total += vnd
+                items.append({**base, "description": f"{fee_names[c]} (USD {_tw_usd_text(usd)})",
+                              "amount": vnd, "vat": None})
+            sum_total_vnd = _vn_num(_vn_cell(row, col.get("SUMTOTAL(VND)")))
+            vat_amt = (sum_total_vnd - fee_vnd_total) if sum_total_vnd is not None else None
+            items.append({**base, "description": "VAT 8%", "amount": None, "vat": vat_amt})
+            totals.append({"invoice_no": invoice, "total": fee_vnd_total, "grand_total": sum_total_vnd})
+    return items, totals
+
+
+# --- VN01 TRANS WAGON：FREIGHT STATEMENT (EXPORT/IMPORT) (工作表 TONG，2026-11-09 使用者
+# 答案) --------------------------------------------------------------------------------
+# 一列一票 (BILL No.)：所有 TOTAL(VND) 欄的公式都沒有存值，VND 自己用 USD × XRATE 算。
+# D/O、H/D、CIC、CFS、THC、VSC、EQUIP、(進口多一欄 OTHER) 是有 VAT 的 Local Charge；
+# A/F、O/F、EXWORK 沒有 VAT。VAT 用每個 Local Charge 各自 ROUND(VND×8%)，不用「總額
+# 先四捨五入再分攤尾差」：驗算發現來源公式偶有手動 +1 (例如 08SEA2609077)，逐項各自
+# 四捨五入剛好跟來源的手動調整值一致，不需另外處理。
+# 進口版有 EXW 工作表：這票的 EXWORK 改用 EXW 明細逐筆列出 (不列 TONG 的 EXWORK 一列)。
+_TW_LOCAL_FEES = ("D/O", "H/D", "CIC", "CFS", "THC", "VSC", "EQUIP", "OTHER")
+_TW_NOVAT_FEES = ("A/F", "O/F", "EXWORK")
+
+
+def _tw_header_first_line(cell) -> str:
+    """表頭儲存格第一行 (換行在 _vn_text() 壓成空白前先切開，否則永遠只有一行)。"""
+    if not cell:
+        return ""
+    return re.sub(r"\s+", " ", str(cell).split("\n", 1)[0]).strip()
+
+
+def _tw_bare_fee_name(cell) -> str:
+    """表頭第一行去掉結尾的 "(USD)"，用來比對欄位代號 (例如 "O/F (USD)" -> "O/F")。"""
+    return re.sub(r"\s*\(USD\)\s*$", "", _tw_header_first_line(cell), flags=re.I).strip().upper()
+
+
+def _tw_fee_label(cell) -> str:
+    """費用名稱照抄表頭第一行原文 (例如 "D/O"、"O/F (USD)")。"""
+    return _tw_header_first_line(cell)
+
+
+def _tw_header_col(header_row: list, label: str) -> Optional[int]:
+    for c, cell in enumerate(header_row):
+        if _tw_header_first_line(cell).upper() == label:
+            return c
+    return None
+
+
+def _tw_box_cbm_volume(n20, n40, cbm) -> Optional[str]:
+    """材積寫成 "1 x 40'"；沒有櫃數時用 CBM，例如 "1.296 CBM" (同 CONG NO 版答案寫法)。"""
+    boxes = [f"{int(n)} x {size}" for n, size in ((n20, "20'"), (n40, "40'")) if n]
+    if boxes:
+        return " + ".join(boxes)
+    if cbm:
+        return f"{cbm:g} CBM"
+    return None
+
+
+def _tw_tong_head(rows: List[list]) -> Optional[int]:
+    for i, row in enumerate(rows[:15]):
+        names = {_tw_bare_fee_name(c) for c in row}
+        if {"D/O", "THC", "EXWORK"} <= names:
+            return i
+    return None
+
+
+def _tw_is_tong(book) -> bool:
+    return any(_tw_tong_head(rows) is not None for _, rows in book.sheets)
+
+
+def _tw_tong_fee_cols(header_row: list) -> Dict[str, int]:
+    out: Dict[str, int] = {}
+    for c, cell in enumerate(header_row):
+        name = _tw_bare_fee_name(cell)
+        if name in _TW_LOCAL_FEES or name in _TW_NOVAT_FEES:
+            out.setdefault(name, c)
+    return out
+
+
+def _tw_exw_sheet(rows: List[list]) -> Optional[int]:
+    for i, row in enumerate(rows[:5]):
+        if any(_tw_key(c) == "EXW/FCADETAIL" for c in row):
+            return i
+    return None
+
+
+def _tw_exw_details(book) -> Dict[str, List[Tuple[str, float]]]:
+    """進口版 EXW 工作表：{Bill No: [(明細名稱, USD), …]}；沒有這張表時回傳空字典。"""
+    details: Dict[str, List[Tuple[str, float]]] = {}
+    for _, rows in book.sheets:
+        h = _tw_exw_sheet(rows)
+        if h is None:
+            continue
+        current = None
+        for row in rows[h + 1:]:
+            bill = _vn_text(_vn_cell(row, 0))
+            label = _vn_text(_vn_cell(row, 2))
+            usd = _vn_num(_vn_cell(row, 3))
+            if bill:
+                current = bill
+            if current and label and usd:
+                details.setdefault(current, []).append((label, usd))
+    return details
+
+
+def _tw_tong_sheets(book) -> Tuple[List[Dict], List[Dict]]:
+    """「FREIGHT STATEMENT (EXPORT/IMPORT)」版：回傳 (費用列, 每張發票的合計)。"""
+    items: List[Dict] = []
+    totals: List[Dict] = []
+    exw = _tw_exw_details(book)
+    for name, rows in book.sheets:
+        head = _tw_tong_head(rows)
+        if head is None:
+            continue
+        header_row = rows[head]
+        fee_cols = _tw_tong_fee_cols(header_row)
+        bill_c = _tw_header_col(header_row, "BILL NO.")
+        atd_c = _tw_header_col(header_row, "ATD")
+        rate_c = _tw_header_col(header_row, "XRATE")
+        note_c = _tw_header_col(header_row, "NOTE PORT OF LOADING/DISCHARGE")
+        sub = rows[head + 1] if head + 1 < len(rows) else []
+        col20 = next((c for c, v in enumerate(sub) if _vn_text(v).strip("'").upper() == "20"), None)
+        col40 = next((c for c, v in enumerate(sub) if _vn_text(v).strip("'").upper() == "40"), None)
+        colcmb = next((c for c, v in enumerate(sub) if _vn_text(v).upper() == "CMB"), None)
+        consignee = _tw_header_consignee(rows)
+        for row in rows[head + 2:]:
+            if _vn_text(_vn_cell(row, 0)).upper() == "TOTAL":
+                break
+            bill = _vn_text(_vn_cell(row, bill_c))
+            if not bill:
+                continue
+            rate = _vn_num(_vn_cell(row, rate_c)) or 0
+            note = _vn_text(_vn_cell(row, note_c))
+            pol = pod = None
+            if " - " in note:
+                pol, pod = (p.strip() for p in note.split(" - ", 1))
+            date_text = _vn_date(_vn_cell(row, atd_c))
+            volume = _tw_box_cbm_volume(_vn_num(_vn_cell(row, col20)), _vn_num(_vn_cell(row, col40)),
+                                         _vn_num(_vn_cell(row, colcmb)))
+            base = {"supplier": _TW_SUPPLIER_SPACE, "consignee": consignee, "invoice_no": bill,
+                    "invoice_date": date_text, "onboard_date": date_text, "bl_no": bill,
+                    "port_of_loading": pol, "port_of_discharge": pod, "volume": volume}
+            exw_bill = exw.get(bill)
+            local_vnd = vat_vnd = novat_vnd = 0
+            for fee in _TW_LOCAL_FEES:
+                c = fee_cols.get(fee)
+                usd = _vn_num(_vn_cell(row, c)) if c is not None else None
+                if not usd:
+                    continue
+                vnd = int(usd * rate + 0.5)
+                vat = int(vnd * 0.08 + 0.5)
+                items.append({**base, "description": f"{_tw_fee_label(header_row[c])} (USD {_tw_usd_text(usd)})",
+                              "amount": vnd, "vat": vat})
+                local_vnd += vnd
+                vat_vnd += vat
+            for fee in _TW_NOVAT_FEES:
+                if fee == "EXWORK" and exw_bill:
+                    continue   # 這票的 EXWORK 改用 EXW 明細拆列
+                c = fee_cols.get(fee)
+                usd = _vn_num(_vn_cell(row, c)) if c is not None else None
+                if not usd:
+                    continue
+                vnd = int(usd * rate + 0.5)
+                items.append({**base, "description": f"{_tw_fee_label(header_row[c])} (USD {_tw_usd_text(usd)})",
+                              "amount": vnd, "vat": 0})
+                novat_vnd += vnd
+            if exw_bill:
+                for label, usd in exw_bill:
+                    vnd = int(usd * rate + 0.5)
+                    items.append({**base, "description": f"{label} (USD {_tw_usd_text(usd)})",
+                                  "amount": vnd, "vat": 0})
+                    novat_vnd += vnd
+            totals.append({"invoice_no": bill, "total": local_vnd + novat_vnd,
+                           "grand_total": local_vnd + vat_vnd + novat_vnd})
+    return items, totals
+
+
 def _tw_sheet_parse(book) -> List[Dict]:
-    # CONG NO 版另外處理；其餘版型 (S1 / FREIGHT STATEMENT / TỔNG) 照原規則
+    # CONG NO / BẢNG KÊ / TONG 版另外處理；其餘版型 (S1 / FREIGHT STATEMENT / TỔNG) 照原規則
     if _tw_is_cong_no(book):
         items, _ = _tw_cong_no_sheets(book)
+        return [{"header": {}, "items": items or [{"description": None, "amount": None}]}]
+    if _tw_is_bang_ke(book):
+        items, _ = _tw_bang_ke_sheets(book)
+        return [{"header": {}, "items": items or [{"description": None, "amount": None}]}]
+    if _tw_is_tong(book):
+        items, _ = _tw_tong_sheets(book)
         return [{"header": {}, "items": items or [{"description": None, "amount": None}]}]
     docs = _tw_vt_parse(book)
     # Excel 版的供應商一律用英文帳單抬頭名稱 (使用者 2026-11-04 規定：輸出英文公司名稱)
@@ -10174,6 +10440,10 @@ def _tw_sheet_parse(book) -> List[Dict]:
 def _tw_sheet_totals(book) -> List[Dict]:
     if _tw_is_cong_no(book):
         return _tw_cong_no_sheets(book)[1]
+    if _tw_is_bang_ke(book):
+        return _tw_bang_ke_sheets(book)[1]
+    if _tw_is_tong(book):
+        return _tw_tong_sheets(book)[1]
     return _tw_vt_totals(book)
 
 
