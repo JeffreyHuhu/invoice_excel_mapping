@@ -11739,7 +11739,8 @@ _DHL_VN_MAIN_RE = re.compile(
 # 只有一個金額的附加費 ("SHIPMENT VALUE PROTECTION 354,532") 也算；金額要有千分位或 3 位以內，
 # 不會誤抓 "YOUR VAT CODE 3900911265" 這種代碼
 _DHL_VN_SUR_RE = re.compile(
-    r"^(?P<desc>[A-Z][A-Za-z \-/]+?)\s+(?:(?:(?P<regular>[\d,]+)\s+)(?:[\d,]+\s+)*(?P<net>\d{1,3}(?:,\d{3})*)"
+    # 名稱本身帶數字/冒號 ("PREMIUM 12:00")：允許 desc 裡出現數字和冒號
+    r"^(?P<desc>[A-Z][A-Za-z0-9 \-/:]+?)\s+(?:(?:(?P<regular>[\d,]+)\s+)(?:[\d,]+\s+)*(?P<net>\d{1,3}(?:,\d{3})*)"
     # 只有一個金額時一定要有千分位 (不然 "Page 2" 會被當成 2 元)
     r"|(?P<net1>\d{1,3}(?:,\d{3})+))$")
 
@@ -11838,8 +11839,9 @@ def parse_dhl_express_vn(text: str) -> Dict:
         "supplier": "DHL - VNPT EXPRESS LTD.",
         "invoice_no": _dhl_vn_invoice_no(text),
         "invoice_date": _vn_pdf_date(_search(r"^Date\s+(\S+)", text)),
-        # 掃描字型會把 "DHL contact" 讀成 "DEL contact"
-        "consignee": _search(r"^(C[OÔ]NG TY .+?)\s+D[HE]L contact", text)}
+        # 掃描字型會把 "DHL contact" 讀成 "DEL contact"；集團公司名稱換成英文
+        # (使用者 2026-11-09 規定)
+        "consignee": _vn_full_consignee(_search(r"^(C[OÔ]NG TY .+?)\s+D[HE]L contact", text))}
     items, current, start, main_item = [], None, False, None
     for line in text.splitlines():
         line = line.strip()
@@ -11922,8 +11924,9 @@ def _parse_dhl_ib_tariff(text: str) -> Dict:
     h = {"supplier": "DHL - VNPT EXPRESS LTD.",
          "invoice_no": _search(r"INVOICE NO\s+(\S+)", text),
          "invoice_date": _format_date_en(*date.groups()) if date else None,
-         # "CONG TY TNHH POUHUNG VIET NAM DHL CONTACT INVOICING HOTLINE" (左右兩欄同一行)
-         "consignee": _search(r"^(C[OÔ]NG TY [A-Z ]+?)\s+DHL CONTACT", text)}
+         # "CONG TY TNHH POUHUNG VIET NAM DHL CONTACT INVOICING HOTLINE" (左右兩欄同一行)；
+         # 集團公司名稱換成英文 (使用者 2026-11-09 規定)
+         "consignee": _vn_full_consignee(_search(r"^(C[OÔ]NG TY [A-Z ]+?)\s+DHL CONTACT", text))}
     items, common = [], {}
     for line in text.splitlines():
         line = line.strip()
