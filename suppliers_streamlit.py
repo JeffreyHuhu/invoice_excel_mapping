@@ -9189,6 +9189,29 @@ def _vt_consignee(rows: List[list]) -> Optional[str]:
     return None
 
 
+def _vt_bill_month(rows: List[list]) -> Optional[Tuple[int, int]]:
+    """帳單月份："HÀNG NHẬP THÁNG 1/2025"、"HÀNG XUẤT THÁNG 02/2026" -> (年, 月)。"""
+    text = _vt_norm(" ".join(_vn_text(c) for r in rows[:6] for c in r if c not in (None, "")))
+    m = re.search(r"THANG\s+(\d{1,2})[/.](\d{4})", text)
+    return (int(m.group(2)), int(m.group(1))) if m else None
+
+
+def _vt_dm_swap(value, bill_month: Optional[Tuple[int, int]]):
+    """Excel 日期值日、月放反 (VN02 BK/công nợ/POU HUNG 對帳表)：帳單月份是 1 月，
+    卻出現 2025-08-01 這種月份對不上帳單月 (也不是上個月) 的日期，對調日、月後
+    (2025-01-08) 就落在帳單月或上個月範圍內，改用對調後的日期。"""
+    if not bill_month or not isinstance(value, (datetime.date, datetime.datetime)):
+        return value
+    y, m, d = value.year, value.month, value.day
+    by, bm = bill_month
+    py, pm = (by, bm - 1) if bm > 1 else (by - 1, 12)
+    if (y, m) in ((by, bm), (py, pm)):
+        return value
+    if 1 <= m <= 12 and 1 <= d <= 12 and (y, d) in ((by, bm), (py, pm)):
+        return datetime.date(y, d, m)
+    return value
+
+
 def _vt_loose_date(text: str, year: Optional[str]) -> Optional[str]:
     """沒有年份或年份兩位的日期：'04/08'、'14/8'、'AUG.07'、'12/08/26'、'20+21/8/2026' (取第一天)。"""
     m = re.match(r"(\d{1,2})(?:\+\d{1,2})?/(\d{1,2})(?:/(\d{2}|\d{4}))?$", text.strip())
@@ -9330,7 +9353,8 @@ def _vt_parse_sheet(name: str, rows: List[list], cfg: Dict, supplier: str,
         and cur not in desc.upper() else desc) for c, desc in fees]
     # 欄位可以直接給欄號 (int)：表頭沒有標題的欄 (VN12 NGUYÊN HƯỞNG 的 SHENZHEN 欄，2026-11-06)
     fields = {code: (lab if isinstance(lab, int) else find(lab)) for code, lab in cfg.get("fields", {}).items()}
-    boxes = {size: _vt_col(labels, lab) for size, lab in cfg.get("boxes", {}).items()}
+    boxes = {size: _vt_col(labels, *(lab if isinstance(lab, (list, tuple)) else (lab,)))
+             for size, lab in cfg.get("boxes", {}).items()}
     # 表內沒有客戶名稱時，看工作表名稱的寶成廠別 ("FCL POU CHEN" -> POU CHEN)
     pou = re.search(r"(?<![A-Z])POU\s*-?\s*(YUEN|HUNG|CHEN|SUNG|LI|SHENG|YI)(?![A-Z])", _vt_norm(name))
     common = {"supplier": supplier, "consignee": _vt_consignee(rows) or (f"POU {pou.group(1)}" if pou else None),
@@ -9414,6 +9438,7 @@ def _vt_parse_sheet(name: str, rows: List[list], cfg: Dict, supplier: str,
         years = collections.Counter((_vn_date(_vn_cell(r, col["date"])) or "")[-4:] for r in rows[start:end])
         years.pop("", None)
         sheet_year = years.most_common(1)[0][0] if years else (common["invoice_date"] or "")[-4:] or None
+    bill_month = _vt_bill_month(rows) if cfg.get("date_dm_swap") else None
     for row in rows[start:end]:
         key = next((_vn_text(_vn_cell(row, k)) for k in keys if _vn_text(_vn_cell(row, k))), "")
         if cfg.get("key_comma") and key:
@@ -9481,6 +9506,8 @@ def _vt_parse_sheet(name: str, rows: List[list], cfg: Dict, supplier: str,
                 head[code] = last_fields[code]
         if col.get("date") is not None:
             raw_date = _vn_cell(row, col["date"])
+            if bill_month is not None:
+                raw_date = _vt_dm_swap(raw_date, bill_month)
             # 日期後面可能接其他字 ("26/08/2026 - 146 KGS"，VN18)
             m_date = re.match(r"(\d{1,2})/(\d{1,2})/(\d{4})", _vn_text(raw_date))
             row_date = _vn_date(raw_date) or (_format_date_en(*m_date.groups()) if m_date else None)
@@ -10462,7 +10489,9 @@ register_supplier(
 # 用第三方發票號碼 SỐ HĐ NÂNG, SỐ HĐ HẠ (逗號連起來，使用者 2026-10-27)，
 # 同一批好幾個貨櫃合併勾稽；貨櫃號碼、櫃型 (20'/40'/45') 逐列。
 _VT_VHL_COMMON = {
-    "header": "SO CONTAINER", "key": ["SO LO MOI", "SO LO CU", "=SO LO", "SO CONTAINER"],
+    # "SOA CONTAINER"：舊字型編碼 (TCVN3) 讀出來變成 "SOÁ"，不是聲調問題，要另外列
+    # (使用者 2026-11-09 答案 BK NEO 表)
+    "header": ("SO CONTAINER", "SOA CONTAINER"), "key": ["SO LO MOI", "SO LO CU", "=SO LO", "SO CONTAINER"],
     # 發票號碼 = 表頭「Đính kèm hóa đơn số」下方的字軌 (1C26TYY 這種，只取字軌)，2026-11-05 依新答案
     "doc_key": r"\b(\d[A-Z]\d{2}[A-Z]{3})\b",
     "gross_vat": True,
@@ -10499,13 +10528,18 @@ _VT_VINH_HUNG_LONG = [
                "fees": [("=TONG CONG", "PHÍ NEO XE")], "grand": "=TONG CONG"}),
     # 磅櫃 / 附加費表 (CÂN CONT、cân-phụ thu)
     (r"(?!)", {**_VT_VHL_COMMON, "date": ("=NGAY", "NGAY LAY"), "require": ("PHI CAN CONT", "CHI HO CAN"),
+               "fields": {**_VT_VHL_COMMON["fields"], "bl_no": "SO LO"},
                "fees": [(x, None) for x in ("PT CAN CONT", "=PTCC", "PHI CAN CONT", "=PHU THU", "PHU THU CAN",
                                             "CHI HO CAN")],
                # 代墊過磅費已含 VAT：TỔNG 是含稅合計 (跟同一批的運費表合併勾稽)
                "grand": ("=TONG", "=TONG CONG")}),
     # 2026-10-28 抽樣補：散貨 (HÀNG LẺ：TIỀN CƯỚC VC、PHÍ BOT、代墊) 與超大櫃 (CONT QUÁ KHỔ：
     # VAT 欄叫 "VAT 8%"，同列另有代墊吊櫃費 PHÍ NÂNG/HẠ (GỒM VAT)、VSC)
+    # name_require：跟 2026-11-09 新答案的簡單版 "hang le" (CƯỚC/PHÍ NÂNG/PHÍ HẠ、
+    # 合計欄 "TỔNG CỘNG") 表頭不一樣，要用這張表自己的合計欄名稱排除，不然名稱一樣
+    # 會先被這份比對掉，簡單版就進不了下面「靠表頭配對」的 XUẤT 版面
     (r"CUOC VC|HANG LE", {**_VT_VHL_COMMON,
+                  "name_require": ("TONG CONG SO TIEN", "TONG TIEN CUOC VAN CHUYEN"),
                   "fees": [("CUOC VC TRONG", None), ("CUOC VC NGOAI", None), ("=CUOC VAN CHUYEN", None),
                            ("=TIEN CUOC VC", None), ("SO TIEN PHU THU", None), ("PHI CO SO HA TANG", None),
                            ("PHU THU HA RONG", None),
@@ -10539,24 +10573,73 @@ def detect_vinh_hung_long(text: str) -> bool:
 # 費用 = 含稅總額，AMOUNT = 總額 ÷ 1.08、VAT = 總額 − AMOUNT (gross_vat)；發票號碼 = 表頭字軌 (doc_key)；
 # B/L NO. = SỐ LÔ (批號)。CHI HỘ 工作表沒有發票字軌 (N/A)。
 _VT_VHL_ANSWER = [
+    # 工作表名稱每個月、每個帳本都不一樣 (DU DUC-NHẬP、6070、X1-1、nhap1…)，一律用表頭
+    # 判斷 (require)，不要靠名稱比對；require_all 的欄位是這個版面獨有、不會跟其他版面
+    # 混到的欄 (NHẬP 有「TỔNG CỘNG CƯỚC VC」中間小計欄，XUẤT 沒有)。
+    #
+    # Excel 日期日、月放反只出現在 BK/công nợ/POU HUNG 對帳表 (靠表頭判斷配對的版面)，
+    # JANUARY／FEBRUARY-YUEDE (靠工作表名稱 "DU DUC-NHẬP"/"DU DUC -XUẤT" 直接配對) 不會
+    # 放反；所以另外複製兩份「只靠表頭配對、永遠不靠名稱」的版本 (名稱寫 "(?!)"：
+    # 用查表配對，加 date_dm_swap)，放在最前面優先比對，名稱有符合的工作表 (1月/2月)
+    # 一律先被下面「靠名稱」的版本比對掉，不會用到這兩份。
+    # BK 的 "6070" 表頭日期欄沒有 "LẤY" 只寫 "NGÀY"，"NGAY LAY" 找不到時退回 "=NGAY"
+    (r"(?!)", {**_VT_VHL_COMMON, "key": ["SO LO"], "date": ("NGAY LAY", "=NGAY"), "date_dm_swap": True,
+               "require_all": ("TONG CONG CUOC VC",),
+               "fields": {**_VT_VHL_COMMON["fields"], "bl_no": "SO LO"},
+               # công nợ VHL "6010" 的 CƯỚC 拆成市內/市外兩欄、VSC 併進 "PHÍ D/O VSC"；
+               # POU HUNG "xuat" 表 (雖然叫 xuat，但有 TỔNG CỘNG CƯỚC VC 中間小計欄，結構
+               # 跟 NHẬP 一樣) 另有「hỗ trợ phí cơ sở hạ tầng」費與「Phí hạ bãi sớm」
+               "fees": [("=CUOC VC", "CƯỚC VC"), ("=CUOC VC TRONG TPHCM", "CƯỚC VC TRONG TPHCM"),
+                        ("=CUOC VC NGOAI TPHCM", "CƯỚC VC NGOÀI TPHCM"), ("=BD NANG, HA", "BD NÂNG, HẠ"),
+                        ("=PHI NANG", "PHÍ NÂNG"), ("=PHI HA", "PHÍ HẠ"), ("=VSC", "VSC"),
+                        ("=PHI D/O VSC", "PHÍ D/O VSC"), ("=HO TRO PHI CO SO HA TANG", None),
+                        ("=PHI HA BAI SOM", "Phí hạ bãi sớm")],
+               "grand": "=TONG CONG"}),
+    (r"(?!)", {**_VT_VHL_COMMON, "key": ["SO LO"], "date": "NGAY", "date_dm_swap": True,
+               "require": "CUOC", "_xuat_variant": True,
+               "fields": {**_VT_VHL_COMMON["fields"], "bl_no": "SO LO"},
+               "fees": [("CUOC", None), ("=PHI NANG", "PHÍ NÂNG"), ("=PHI HA", "PHÍ HẠ"),
+                        ("=PHI HA SOM", "Phí hạ sớm")],
+               "grand": "=TONG CONG"}),
     (r"DU DUC-?NHAP", {**_VT_VHL_COMMON, "key": ["SO LO"], "date": "NGAY LAY",
+                       "require_all": ("TONG CONG CUOC VC",),
                        "fields": {**_VT_VHL_COMMON["fields"], "bl_no": "SO LO"},
-                       "fees": [("CUOC VC", "CƯỚC VC"), ("BD NANG", "BD NÂNG, HẠ"), ("PHI NANG", "PHÍ NÂNG"),
-                                ("PHI HA", "PHÍ HẠ"), ("VSC", "VSC")],
+                       # 一定要用完全比對 "=" (2 月的表頭把代墊發票號欄直接寫成
+                       # "SỐ HĐ \nPHÍ NÂNG"，用片語比對會先抓到這欄的字軌號碼當成金額)
+                       "fees": [("=CUOC VC", "CƯỚC VC"), ("=BD NANG, HA", "BD NÂNG, HẠ"),
+                                ("=PHI NANG", "PHÍ NÂNG"), ("=PHI HA", "PHÍ HẠ"), ("=VSC", "VSC")],
                        "grand": "=TONG CONG"}),
     (r"DU DUC ?-?XUAT", {**_VT_VHL_COMMON, "key": ["SO LO"], "date": "NGAY",
+                         "require": "CUOC", "_xuat_variant": True,
                          "fields": {**_VT_VHL_COMMON["fields"], "bl_no": "SO LO"},
-                         # BD NÂNG (BDNH) 不填，R 欄 TỔNG CỘNG 沒有算進去 (使用者指定)
-                         "fees": [("=CUOC", "CƯỚC"), ("=PHI NANG", "PHÍ NÂNG"), ("=PHI HA", "PHÍ HẠ"),
+                         # 費用名稱照抄表頭原文 (desc=None)：1 月表頭是 "CƯỚC"，2 月是
+                         # "CƯỚC VẬN CHUYỂN"，兩種都要照抄，不能寫死成同一個字串。
+                         # BD NÂNG HẠ (BDNH) 要不要列，_vhl_cfgs_for_book() 動態補上
+                         # "CUOC" 不能用 "=" 完全比對：1 月表頭是 "CƯỚC"，2 月是
+                         # "CƯỚC VẬN CHUYỂN"，片語比對才能兩種都抓到
+                         "fees": [("CUOC", None), ("=PHI NANG", "PHÍ NÂNG"), ("=PHI HA", "PHÍ HẠ"),
                                   ("=PHI HA SOM", "Phí hạ sớm")],
                          "grand": "=TONG CONG"}),
-    (r"CAN CONT", {**_VT_VHL_COMMON, "key": ["SO LO"], "date": "NGAY",
+    (r"CAN CONT", {**_VT_VHL_COMMON, "key": ["SO LO"], "date": "NGAY", "require_all": ("PTCC",),
                    "fields": {**_VT_VHL_COMMON["fields"], "bl_no": "SO LO"},
                    "fees": [("=PTCC", "PTCC"), ("=CAN", "CÂN")], "grand": "=TONG"}),
     (r"NEO-?DD", {**_VT_VHL_COMMON, "gross_vat": False, "vat_of_amount": True, "date": None,
+                  "require": "PHI NEO XE", "key": ["SO LO", "SOA LOA"],
                   "const": {"invoice_date": "N/A"},  # 工作表沒有提櫃日，填 N/A (答案提示列)
-                  "fields": {**_VT_VHL_COMMON["fields"], "bl_no": "SO LO"},
-                  "fees": [("=TONG CONG", "PHÍ NEO XE x {days} ngày")], "days_label": "NGAY NEO",
+                  # BK 的 "NEO" 工作表是舊字型編碼 ("SOÁ LÔ"、"SOÁ CONTAINER"、"SOÁ NGÀY NEO"、
+                  # "LOAÏI CONT" 讀出來變成 "SOA LOA"、"SOA CONTAINER"、"SOA NGAØY NEO"、
+                  # "LOAII CONT")，相關欄位都要多列一個舊編碼寫法
+                  "fields": {**_VT_VHL_COMMON["fields"], "bl_no": ("SO LO", "SOA LOA"),
+                             "container_no": ("SO CONTAINER", "SOA CONTAINER")},
+                  "boxes": {"20": ("LOAI CONT 20'", "LOAII CONT 20'"), "40": ("LOAI CONT 40'", "LOAII CONT 40'"),
+                            "45": ("LOAI CONT 45'", "LOAII CONT 45'")},
+                  # 英文備註位置在 "PHÍ NEO XE" 後面、天數前面 (使用者指定的固定格式)，
+                  # 跟其他費用的備註加在最後面不一樣，寫入層的 english_note() 沒辦法產生
+                  # 這種中間插入的格式，所以直接在這裡寫死 (_EN_PHRASES 另有 "PHI NEO XE"
+                  # 片語對照，讓 english_note() 認得這裡已經加過備註，不會重複加)
+                  "fees": [("=TONG CONG", "PHÍ NEO XE (Truck Detention Fee) x {days} ngày")],
+                  # 舊編碼 "SOÁ NGÀY NEO" 讀出來的 "Ø" 不是一般的 "O"，用結尾 "Y NEO" 來配對
+                  "days_label": ("NGAY NEO", "Y NEO"),
                   "grand": "=TONG CONG"}),
     (r"CHI HO", {**_VT_VHL_COMMON, "date": "NGAY LAY", "doc_const": "N/A",
                  "fees": [("CUOC VC", "CƯỚC VC")], "grand": None}),
@@ -10565,8 +10648,74 @@ _VT_VINH_HUNG_LONG[0:0] = _VT_VHL_ANSWER
 _VT_VINH_HUNG_LONG.insert(0, (r"(?!)", {
     **_VT_VINH_HUNG_LONG[0][1], "require_all": ("TONG CONG HD NANG HA", "=TONG CONG", "=CAN CONT"),
     "fees": _VT_VINH_HUNG_LONG[0][1]["fees"] + [("=CAN CONT", None)]}))
-_vt_register("VINH_HUNG_LONG", "CÔNG TY TNHH VĨNH HƯNG LONG", detect_vinh_hung_long,
-             "VINH HUNG LONG CO., LTD", _VT_VINH_HUNG_LONG)
+
+
+def _vhl_xuat_sheet(rows: List[list]) -> bool:
+    """是不是「XUẤT (出口)」版面：有 SỐ CONTAINER + CƯỚC，但沒有 NHẬP 版面獨有的
+    「TỔNG CỘNG CƯỚC VC」中間小計欄。"""
+    h = _vt_header_row(rows, "SO CONTAINER")
+    if h is None:
+        return False
+    labels = _vt_labels(rows, h, True)
+    return _vt_col(labels, "CUOC") is not None and _vt_col(labels, "=TONG CONG CUOC VC") is None
+
+
+def _vhl_xuat_has_bdnh(rows: List[list]) -> bool:
+    """「XUẤT」版面的 BDNH (BD NÂNG HẠ) 欄要不要列進費用，看每櫃小計公式有沒有
+    算進去 (使用者 2026-11-09 確認：1 月 TỔNG CỘNG = CƯỚC + 吊櫃合計，沒有算 BDNH；
+    2 月 TỔNG CỘNG = CƯỚC + BDNH + 吊櫃合計，有算)。用金額關係判斷，不用月份硬寫，
+    之後月份版面只要公式邏輯一樣就會自動判斷正確。"""
+    h = _vt_header_row(rows, "SO CONTAINER")
+    if h is None:
+        return False
+    labels = _vt_labels(rows, h, True)
+    c_cuoc, c_bdnh = _vt_col(labels, "CUOC"), _vt_col(labels, "=BDNH", "=BD NANG HA")
+    c_hd, c_grand = _vt_col(labels, "=TONG CONG HD NANG HA"), _vt_col(labels, "=TONG CONG")
+    if c_cuoc is None or c_bdnh is None or c_hd is None or c_grand is None:
+        return False
+    for row in rows[h + 2:h + 30]:
+        cuoc, bdnh = _vn_num(_vn_cell(row, c_cuoc)), _vn_num(_vn_cell(row, c_bdnh))
+        hd, grand = _vn_num(_vn_cell(row, c_hd)), _vn_num(_vn_cell(row, c_grand))
+        if cuoc is None or grand is None:
+            continue
+        return abs(grand - (cuoc + (bdnh or 0) + (hd or 0))) < 1
+    return False
+
+
+def _vhl_cfgs_for_book(book) -> List[Tuple[str, Dict]]:
+    """「XUẤT」版面的費用設定 (_xuat_variant 標記的兩份：靠名稱配對、靠表頭配對)
+    動態決定要不要加 BD NÂNG HẠ，依這本活頁簿裡任一張 XUẤT 版面工作表的金額關係判斷。"""
+    cfgs = list(_VT_VINH_HUNG_LONG)
+    has_bdnh = any(_vhl_xuat_sheet(rows) and _vhl_xuat_has_bdnh(rows) for _, rows in book.sheets)
+    if not has_bdnh:
+        return cfgs
+    return [(pat, {**cfg, "fees": cfg["fees"] + [(("=BDNH", "=BD NANG HA"), "BD NÂNG HẠ")]})
+            if cfg.get("_xuat_variant") else (pat, cfg) for pat, cfg in cfgs]
+
+
+def _vhl_sheet_parse(book) -> List[Dict]:
+    parse, _ = _vt_make("VINH HUNG LONG CO., LTD", _vhl_cfgs_for_book(book))
+    docs = parse(book)
+    for doc in docs:
+        for it in doc["items"]:
+            # SỐ LÔ 有時候寫的不是批號 (使用者指定)：KIEN GIANG 是地名 -> B/L NO. 不填，
+            # 改填目的港；HANG ROI (散貨) 只是標記 -> B/L NO. 不填
+            if it.get("bl_no") == "KIEN GIANG":
+                it["bl_no"], it["port_of_discharge"] = None, "KIEN GIANG"
+            elif it.get("bl_no") == "HANG ROI":
+                it["bl_no"] = None
+    return docs
+
+
+def _vhl_sheet_totals(book) -> List[Dict]:
+    _, totals = _vt_make("VINH HUNG LONG CO., LTD", _vhl_cfgs_for_book(book))
+    return totals(book)
+
+
+register_supplier(
+    "VINH_HUNG_LONG", "CÔNG TY TNHH VĨNH HƯNG LONG", detect_vinh_hung_long, None,
+    sheet_parse=_vhl_sheet_parse, sheet_totals=_vhl_sheet_totals,
+)
 
 
 # --- VN06 BÌNH TÂN (HỢP TÁC XÃ VẬN TẢI DỊCH VỤ DU LỊCH BÌNH TÂN，MST 0303140905) --

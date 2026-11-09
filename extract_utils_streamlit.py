@@ -920,9 +920,37 @@ _EN_FULL = {
     "DIEU CHINH TO KHAI GIAM SO LUONG, SO KIEN, TRONG LUONG, TRI GIA...PSV0810686870":
         "Customs declaration amendment to reduce quantity, packages, weight and value... "
         "PSV0810686870",
+    # VN02 VĨNH HƯNG LONG (拖車行) 費用名稱 (使用者 2026-11-09 答案)。這裡都是整句
+    # (費用欄名稱本身就是完整的 description，不是夾在長句子裡的詞組)，用 _EN_FULL
+    # 整句比對，避免用 _EN_PHRASES 片語比對時誤觸其他供應商裡恰好包含同一段文字的描述
+    "CUOC VC TRONG TPHCM": "Trucking Freight - within HCMC",
+    "CUOC VC NGOAI TPHCM": "Trucking Freight - outside HCMC",
+    "CUOC VAN CHUYEN": "Trucking Freight",
+    "CUOC VC": "Trucking Freight",
+    "CUOC": "Trucking Freight",
+    "BD NANG, HA": "Dispatch Fee",
+    "BD NANG HA": "Dispatch Fee",
+    "BDNH": "Dispatch Fee",
+    "PHI NANG": "Lift-On Fee",
+    "PHI HA": "Lift-Off Fee",
+    "PHI HA SOM": "Early Lift-Off Fee",
+    "PHI HA CONT SOM": "Early Lift-Off Fee",
+    "PHI HA BAI SOM": "Early Lift-Off Fee",
+    "VSC": "Container Cleaning Fee",
+    "PHI D/O VSC": "D/O & Container Cleaning Fee",
+    "HO TRO PHI CO SO HA TANG": "Port Infrastructure Fee Support",
+    "PTCC": "Container Weighing Surcharge",
+    "CAN": "Container Weighing Fee",
+    "PHU THU": "Container Weighing Surcharge",
+    "CHI HO CAN": "Container Weighing Fee - Paid on Behalf",
+    "PHI NEO XE": "Truck Detention Fee",
 }
 # 詞組對照 (由長到短套用；越南文、印尼文常見帳單用語)
 _EN_PHRASES = (
+    # VN02 VĨNH HƯNG LONG 的 "PHÍ NEO XE (Truck Detention Fee) x N ngày" 是直接在
+    # parse_xxx() 寫死備註 (位置在中間，不是句尾，english_note() 自動加不出來)，這裡
+    # 用片語比對讓 english_note() 認得已經加過備註，不要再重複加一次
+    ("PHI NEO XE", "Truck Detention Fee"),
     # 越南文
     ("PHU PHI XANG DAU", "Fuel surcharge"), ("PHI VAN CHUYEN", "Transportation fee"),
     ("PHI DICH VU", "Service fee"), ("PHAT SINH", "Incurred charge"),
@@ -2523,45 +2551,57 @@ def read_reference_excel(source) -> pd.DataFrame:
     if isinstance(source, (bytes, bytearray)):
         source = io.BytesIO(source)
     wb = load_workbook(source, data_only=True)
-    ws = wb.active
+    visible = [wb[name] for name in wb.sheetnames if wb[name].sheet_state == "visible"] or [wb.active]
 
-    # 2026-10 起使用者範本在正式表頭上面多加了一列「抓取欄位」(給自己看的
-    # 內部欄位命名備忘，例如 "Invoice Date"/"Payment can be Transfer to")，
-    # 這一列的文字恰好也可能包含 "INVOICE DATE" 這個錨點字樣，如果不排除
-    # 會被誤認成表頭列，比正式的「顯示欄位」列多抓了一列、害後面全部資料
-    # 錯位一行。真正的表頭列一定是我們自己 DISPLAY_HEADERS 的雙行格式
-    # ("INVOICE DATE\n發票日期" 這種英文+中文兩行)，所以這裡額外要求儲存
-    # 格文字裡要有換行符號，排除掉那種只有英文單行的「備忘列」。
-    header_row, start_col = None, None
-    for r in range(1, 5):
-        for c in range(1, 5):
-            val = ws.cell(row=r, column=c).value
-            if val and "\n" in str(val) and _HEADER_ANCHOR in str(val).upper():
-                header_row, start_col = r, c
-                break
-        if header_row:
-            break
-    if header_row is None:
-        header_row, start_col = 1, 1
+    def _find_anchor(ws):
+        # 2026-10 起使用者範本在正式表頭上面多加了一列「抓取欄位」(給自己看的
+        # 內部欄位命名備忘，例如 "Invoice Date"/"Payment can be Transfer to")，
+        # 這一列的文字恰好也可能包含 "INVOICE DATE" 這個錨點字樣，如果不排除
+        # 會被誤認成表頭列，比正式的「顯示欄位」列多抓了一列、害後面全部資料
+        # 錯位一行。真正的表頭列一定是我們自己 DISPLAY_HEADERS 的雙行格式
+        # ("INVOICE DATE\n發票日期" 這種英文+中文兩行)，所以這裡額外要求儲存
+        # 格文字裡要有換行符號，排除掉那種只有英文單行的「備忘列」。
+        for r in range(1, 5):
+            for c in range(1, 5):
+                val = ws.cell(row=r, column=c).value
+                if val and "\n" in str(val) and _HEADER_ANCHOR in str(val).upper():
+                    return r, c
+        return None, None
 
-    col_to_code: Dict[int, str] = {}
-    for c in range(start_col, ws.max_column + 1):
-        code = _field_code_for_header_text(ws.cell(row=header_row, column=c).value)
-        if code and code not in col_to_code.values():
-            col_to_code[c] = code
+    def _sheet_records(ws, header_row, start_col):
+        col_to_code: Dict[int, str] = {}
+        for c in range(start_col, ws.max_column + 1):
+            code = _field_code_for_header_text(ws.cell(row=header_row, column=c).value)
+            if code and code not in col_to_code.values():
+                col_to_code[c] = code
+        out = []
+        for row in ws.iter_rows(min_row=header_row + 1, values_only=False):
+            rec = {code: None for code in FIELD_CODES}
+            empty = True
+            for col_idx, code in col_to_code.items():
+                idx0 = col_idx - 1
+                value = row[idx0].value if idx0 < len(row) else None
+                rec[code] = value
+                if value not in (None, ""):
+                    empty = False
+            if not empty:
+                out.append(rec)
+        return out
 
+    # 一個供應商一張工作表的舊範本：只有 wb.active 一張表，沒有錨點時照舊
+    # 預設 header_row=1、start_col=1。多工作表範本 (例如 VN02 一個來源工作表
+    # 對一張答案工作表，另加一張「核對」)：逐張可見工作表找錨點，找到的全部
+    # 合併；「核對」/「查驗結果」這類輔助表沒有錨點，自動跳過。
     records = []
-    for row in ws.iter_rows(min_row=header_row + 1, values_only=False):
-        rec = {code: None for code in FIELD_CODES}
-        empty = True
-        for col_idx, code in col_to_code.items():
-            idx0 = col_idx - 1
-            value = row[idx0].value if idx0 < len(row) else None
-            rec[code] = value
-            if value not in (None, ""):
-                empty = False
-        if not empty:
-            records.append(rec)
+    found_any = False
+    for ws in visible:
+        header_row, start_col = _find_anchor(ws)
+        if header_row is None:
+            continue
+        found_any = True
+        records.extend(_sheet_records(ws, header_row, start_col))
+    if not found_any:
+        records = _sheet_records(visible[0], 1, 1)
     return pd.DataFrame(records, columns=FIELD_CODES)
 
 
