@@ -944,6 +944,9 @@ _EN_FULL = {
     "PHU THU": "Container Weighing Surcharge",
     "CHI HO CAN": "Container Weighing Fee - Paid on Behalf",
     "PHI NEO XE": "Truck Detention Fee",
+    # VN03 RỒNG Á CHÂU：CSHT 英文備註暫定寫法 (使用者 2026-11-09 答案，之後依
+    # 統一費用對照表更新)
+    "CSHT": "Port Infrastructure Fee",
 }
 # 詞組對照 (由長到短套用；越南文、印尼文常見帳單用語)
 _EN_PHRASES = (

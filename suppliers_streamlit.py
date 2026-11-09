@@ -6967,9 +6967,14 @@ _VN_CONTAINER_RE = re.compile(r"^[A-Z]{4}\d{7}$")
 
 def _vn_container(value) -> Optional[str]:
     """「CONT / XE」欄常混著車牌 (51C.91515) 或簡寫櫃號 (CTTU642)，只收完整的
-    貨櫃號碼 (4 碼英文 + 7 碼數字)。"""
-    text = _vn_text(value).upper().replace(" ", "")
-    return text if _VN_CONTAINER_RE.match(text) else None
+    貨櫃號碼 (4 碼英文 + 7 碼數字)。一格裡換行塞好幾個櫃號時 (使用者 2026-11-09
+    VN03 答案)，各自驗證後用 ", " 連接。"""
+    codes = []
+    for part in re.split(r"[\n,]+", "" if value is None else str(value)):
+        code = _vn_text(part).upper().replace(" ", "")
+        if _VN_CONTAINER_RE.match(code):
+            codes.append(code)
+    return ", ".join(codes) if codes else None
 
 
 # ===========================================================================
@@ -7279,7 +7284,8 @@ register_supplier(
 # 金額勾稽：整份檔案逐欄「明細加總 = 合計列」(帳單只有整張表的合計列，沒有
 # 每張發票的合計)，結果套用到檔案裡的每張發票。
 
-_RAC_SUPPLIER = "CÔNG TY TNHH GIAO NHẬN THƯƠNG MẠI RỒNG Á CHÂU"
+# SUPPLIER 一律用英文全名 (使用者 2026-11-09 規定)
+_RAC_SUPPLIER = "Asia Dragon Forwarding Trading Company Limited"
 _VN_CONSIGNEES = {
     # 檔名關鍵字 -> 越南 Top 公司名稱 (Vietnam Supplier Top 20.xlsx「越南by公司」)
     "POU SUNG": "POU SUNG VIETNAM COMPANY LIMITED",
@@ -7307,6 +7313,7 @@ _RAC_CHARGE_LABELS = {
     # 2026-10-28 抽樣 POU PHONG 對帳表 ("CÔNG NỢ POU PHONG T03.2026 ĐỢT 1 -NHAP" 等) 的右表欄名
     "CFS,THC,CIC PER P/L", "D/O, H/L FEE PER P/L", "STORAGE PER P/L", "THC/CIC/ DO VS CONT",
     "LIFT ON/OFF", "CFS,THC, CIC FEE", "CFS,THC,CIC FEE", "D/O, H/L FEE",
+    "TOLL",  # NHAP FCL DOT 1 的過路費 (使用者 2026-11-09 答案)
 }
 # SERVICE ALL 存在時，它的組成欄不另外轉 (避免重複計算)
 _RAC_SERVICE_ALL_PARTS = {"SERVICE FEE", "EXTRA CUSTOM SHEET"}
@@ -7316,9 +7323,11 @@ _RAC_SUBTOTAL_LABELS = {"TỔNG CỘNG", "TOTAL", "CLEARING EXPENSE PER P/L", "C
 # 描述欄位：表頭 -> 代號 (同名欄位以第一次出現的為準，左右表內容相同)
 _RAC_META_LABELS = {
     "INVOICE": "invoice_no", "SO INVOICE": "invoice_no", "INVOICE NO": "invoice_no",
-    "SỐ BILL": "bl_no", "AWB,B/L NO": "bl_no",
-    "DECLARATION": "mbl_no", "SO TO KHAI": "mbl_no",
-    "DATE C/D": "date_cd", "DELIVERY DATE FCL": "delivery_date",
+    "SỐ BILL": "bl_no", "AWB,B/L NO": "bl_no", "BILL": "bl_no",
+    "DECLARATION": "mbl_no", "SO TO KHAI": "mbl_no", "EXTRA CUSTOMS": "mbl_no",
+    "KGS OF BL": "kgs_of_bl", "CONT": "container_no",
+    "SL CONT": "sl_cont", "CONT 20/40": "cont_size",
+    "DATE C/D": "date_cd", "DELIVERY DATE FCL": "delivery_date", "DATE": "invoice_date_col",
     "NGÀY ĐÓNG HÀNG": "stuffing_date", "PORT": "port", "KGS": "kgs",
     "20'": "cont_20", "40'": "cont_40", "CONT NO": "container_no", "CBM": "cbm",
 }
@@ -7384,7 +7393,7 @@ def _rac_table(rows: List[list]):
     has_service_all = "SERVICE ALL" in labels[block_start:]
 
     meta: Dict[str, int] = {}
-    charges, vat_cols, components = [], [], set()
+    charges, vat_cols, vat_cols_left, components = [], [], [], set()
     for j, label in enumerate(labels):
         if not label:
             continue
@@ -7392,6 +7401,11 @@ def _rac_table(rows: List[list]):
         if field and field not in meta:
             meta[field] = j
         if j < block_start:
+            # 左表 (整張 B/L) 的 VAT PASS THROUGH 留著備援：少數列 (例如 B/L 是
+            # "LOCAL" 的列) 右邊「依 KGS 分攤後」的 VAT 欄沒有算，要退回左表的值
+            # (使用者 2026-11-09 答案)
+            if label in _RAC_VAT_LABELS:
+                vat_cols_left.append(j)
             continue
         # 費用名稱照抄表頭原文；PHI VAN CHUYEN 組的「DON GIA」就是運費本身，
         # THANH TIEN 是小計；PHI DICH VU 組取 THANH TIEN (DON GIA 是單價)
@@ -7404,7 +7418,13 @@ def _rac_table(rows: List[list]):
         elif has_service_all and label in _RAC_SERVICE_ALL_PARTS:
             components.add(j)
         elif label in _RAC_CHARGE_LABELS or label.startswith("PHỤ PHÍ XĂNG DẦU"):
-            charge = original
+            # 欄名去掉 "PER P/L" (使用者 2026-11-09 答案，費用名稱不要帶這個技術性
+            # 標記)；"CFS,THC,CIC PER P/L" 左表的乾淨欄名是 "CFS,THC,CIC FEE"
+            # (多一個 "FEE")，這裡補上，其他欄 (STORAGE、D/O, H/L FEE…) 單純去掉
+            # 字尾就是乾淨欄名，不用再處理
+            charge = re.sub(r"\s*PER\s*P/L\s*$", "", original, flags=re.I).strip() or original
+            if charge.upper() == "CFS,THC,CIC":
+                charge += " FEE"
         if charge:
             charges.append((j, charge))
         elif label in _RAC_VAT_LABELS:
@@ -7423,23 +7443,33 @@ def _rac_table(rows: List[list]):
     row_total = next((j for j in range(width - 1, block_start - 1, -1)
                       if labels[j] in ("TOTAL", "TỔNG CỘNG")), None)
     return {"head": head, "meta": meta, "charges": charges, "vat_cols": vat_cols,
-            "billing": billing, "sub_header": is_sub, "row_total": row_total}
+            "vat_cols_left": vat_cols_left, "billing": billing, "sub_header": is_sub, "row_total": row_total}
 
 
 def _rac_volume(row: list, meta: Dict[str, int], kind: str) -> Optional[str]:
-    """材積統一寫法 (見 _fmt_volume)：FCL 櫃量 (例如 '1X20G')；LCL 沒有櫃：
-    CBM 欄 (例如 '2.5 M3')，沒有 CBM 才寫重量 (例如 '877.78 KG')。"""
+    """材積統一寫法：FCL 櫃量寫成「1 x 20'」「2 x 40'」(20'/40' 都有時用 " + " 連接，
+    使用者 2026-11-09 規定，跟其他供應商共用的 _fmt_volume() "1X20G" 寫法不同，
+    不要去改 _fmt_volume())；LCL 沒有櫃：CBM 欄，沒有 CBM 才寫重量。"""
+    # "SL CONT"（數量）x "CONT 20/40"（櫃型，例如 40）兩欄合併 (CÔNG NỢ POU PHONG
+    # NHAP FCL 版面，使用者 2026-11-09 答案)
+    sl_cont = _vn_num(_vn_cell(row, meta.get("sl_cont")))
+    cont_size = _vn_num(_vn_cell(row, meta.get("cont_size")))
+    if sl_cont and cont_size:
+        return f"{int(sl_cont)} x {int(cont_size)}'"
     containers = []
-    for field, size in (("cont_20", "20G"), ("cont_40", "40G")):
+    for field, size in (("cont_20", "20'"), ("cont_40", "40'")):
         n = _vn_num(_vn_cell(row, meta.get(field)))
         if n:
             containers.append((n, size))
     if containers:
-        return _fmt_volume(containers=containers)
+        return " + ".join(f"{int(n)} x {size}" for n, size in containers)
     if kind == "fcl_import":
         return None
-    cbm = _vn_num(_vn_cell(row, meta.get("cbm")))
     kgs = _vn_num(_vn_cell(row, meta.get("kgs")))
+    if kind == "lcl_import":
+        # LCL+LOCAL - IMPORT 一律用 KGS，不管 CBM 欄有沒有值 (使用者 2026-11-09 答案)
+        return _fmt_volume(kg=_vn_text(kgs) if kgs else None)
+    cbm = _vn_num(_vn_cell(row, meta.get("cbm")))
     return _fmt_volume(cbm=_vn_text(cbm) if cbm else None, kg=_vn_text(kgs) if kgs else None)
 
 
@@ -7456,6 +7486,8 @@ def _rac_parse_sheet(name: str, rows: List[list]):
     total = vat_total = 0.0
     invoice_totals: Dict[str, Optional[float]] = {}
     last_port = None
+    last_file_no, last_file_box = None, {"container_no": None, "volume": None}
+    last_bl_no, last_kgs_of_bl = None, None
     for row in rows[start:]:
         invoice_no = _vn_text(_vn_cell(row, meta.get("invoice_no")))
         first = _vn_label(_vn_cell(row, 0))
@@ -7475,13 +7507,36 @@ def _rac_parse_sheet(name: str, rows: List[list]):
             elif invoice_no not in invoice_totals or invoice_totals[invoice_no] is not None:
                 invoice_totals[invoice_no] = (invoice_totals.get(invoice_no) or 0) + (row_total or 0)
         date_cd = _vn_date(_vn_cell(row, meta.get("date_cd")))
+        container_no = _vn_container(_vn_cell(row, meta.get("container_no")))
+        volume = _rac_volume(row, meta, kind)
+        if kind == "fcl_import":
+            # 同一票 (File No，A 欄) 有多張 B/L 時，櫃數/櫃號只寫在第 1 列，要往下
+            # 填到同一票的其他列 (使用者 2026-11-09 答案)
+            file_no = _vn_text(_vn_cell(row, 0))
+            if file_no != last_file_no:
+                last_file_no, last_file_box = file_no, {"container_no": None, "volume": None}
+            container_no = container_no or last_file_box["container_no"]
+            volume = volume or last_file_box["volume"]
+            last_file_box = {"container_no": container_no, "volume": volume}
+        bl_no = _vn_text(_vn_cell(row, meta.get("bl_no"))) or None
+        if kind == "lcl_import" and meta.get("kgs_of_bl") is not None:
+            # Bill 空白、KGS OF BL 跟前一票相同 (同一張 B/L 分攤成好幾票)：B/L NO.
+            # 用前一票的 Bill (使用者 2026-11-09 答案)
+            kgs_of_bl = _vn_num(_vn_cell(row, meta["kgs_of_bl"]))
+            if not bl_no and kgs_of_bl is not None and kgs_of_bl == last_kgs_of_bl:
+                bl_no = last_bl_no
+            last_bl_no, last_kgs_of_bl = bl_no, kgs_of_bl
         shared = {
             "invoice_no": invoice_no,
-            "bl_no": _vn_text(_vn_cell(row, meta.get("bl_no"))) or None,
+            "bl_no": bl_no,
             "mbl_no": _vn_text(_vn_cell(row, meta.get("mbl_no"))) or None,
-            "container_no": _vn_container(_vn_cell(row, meta.get("container_no"))),
-            "volume": _rac_volume(row, meta, kind),
+            "container_no": container_no,
+            "volume": volume,
         }
+        # 有獨立的 "DATE" 欄 (新格式) 才當 INVOICE DATE；沒有這欄的版面 (例如
+        # FCL - IMPORT) 照舊維持 N/A (使用者 2026-11-09 答案)
+        if meta.get("invoice_date_col") is not None:
+            shared["invoice_date"] = _vn_date(_vn_cell(row, meta["invoice_date_col"])) or "N/A"
         # 同一批貨的後續列常不重複填港口：空白時沿用上一列 (日期/櫃號不沿用)
         port = _vn_text(_vn_cell(row, meta.get("port"))) or last_port
         last_port = port
@@ -7492,18 +7547,23 @@ def _rac_parse_sheet(name: str, rows: List[list]):
             arrive = date_cd if kind == "lcl_import" else \
                 _vn_date(_vn_cell(row, meta.get("delivery_date")))
             shared.update(arrive_date=arrive, onboard_date=date_cd, port_of_discharge=port)
+        net = 0.0
         for j, charge in table["charges"]:
             amount = _vn_num(_vn_cell(row, j))
             if amount:
                 items.append({"description": charge, "amount": amount, "vat": None, **shared})
-        vat = sum(_vn_num(_vn_cell(row, j)) or 0 for j in table["vat_cols"])
+                net += amount
+        vat = sum(_vn_num(_vn_cell(row, j)) or 0 for j in table["vat_cols"]) or \
+            sum(_vn_num(_vn_cell(row, j)) or 0 for j in table["vat_cols_left"])
+        # Description 固定「VAT PASS THROUGH (VAT x%)」(使用者 2026-11-09 規定，取代舊的
+        # 「VAT」/「VAT PASS THROUGH」沒有稅率寫法)；稅率 = VAT ÷ 費用加總，四捨五入到整數
+        vat_desc = f"VAT PASS THROUGH (VAT {round(vat / net * 100)}%)" if net and vat else "VAT PASS THROUGH"
         if kind != "export":
-            items.append({"description": "VAT" if kind == "lcl_import" else "VAT PASS THROUGH",
-                          "amount": None, "vat": vat or None, **shared})
+            items.append({"description": vat_desc, "amount": None, "vat": vat or None, **shared})
         elif vat:
             # 出口表也有 VAT PASS THROUGH 欄時 (2026-10-28 抽樣 POU PHONG "XKTC" 工作表)，
             # 有金額才列；原本沒有 VAT 欄的出口表不受影響
-            items.append({"description": "VAT PASS THROUGH", "amount": None, "vat": vat, **shared})
+            items.append({"description": vat_desc, "amount": None, "vat": vat, **shared})
     return items, total, vat_total, invoice_totals
 
 
