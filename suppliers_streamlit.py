@@ -11732,9 +11732,16 @@ register_supplier(
 # 再來 "PROD CODE EXPRESS WORLDWIDE nondoc"、"Sender: … Receiver: …"。
 # VAT 只有整張一個；稽核：費用加總 = Sub-total，加 VAT = Total VND。
 _DHL_VN_MAIN_RE = re.compile(
-    # 機場代碼可能有數字 ("S2X"，掃描檔)
-    r"^(?P<date>\d{2}/\d{2}/\d{4})\s+(?P<org>[A-Za-z0-9]{3})\s+(?P<hawb>\d{8,})\s+(?P<dest>[A-Za-z0-9]{3})\s+"
-    r"(?P<pcs>\d+)\s+(?P<kg>[\d.]+)\s+(?P<regular>[\d,]+)(?:\s+[\d,]+)*\s+(?P<net>[\d,]+)$")
+    # 機場代碼可能有數字 ("S2X"，掃描檔)。件數/重量 0 的稅費單 (例如 LOW VALUE
+    # REGULATORY TAX) 這一行本身沒有 REGULAR CHARGE/NET CHARGE 數字，金額只在下面
+    # 的附加費行，所以這段要設成選填，不然整行比對失敗、current 沒設到，下面的
+    # 附加費行也會被跳過 (使用者 2026-11-09 抽查 "152016 EXP.pdf" SGNIR00379176)
+    # PIECE 欄偶爾是字母 "L" 不是數字 (2026-11-09 抽查 "SGNIR00269258-IMPORT.pdf")；
+    # ORG 偶爾掉一個字變成只有 2 碼 ("CA"，2026-11-09 抽查 "SGNIR00317248 IMPORT.pdf"
+    # 的 "CA 2946902066"，照抄帳單原樣，不猜第 3 碼)，或多一個句點 ("DG."，2026-11-09
+    # 抽查 "SGNIR00402876.pdf"；句點不算進代碼本身)
+    r"^(?P<date>\d{2}/\d{2}/\d{4})\s+(?P<org>[A-Za-z0-9]{2,3})\.?\s+(?P<hawb>\d{8,})\s+(?P<dest>[A-Za-z0-9]{3})\s+"
+    r"(?P<pcs>[A-Z\d]+)\s+(?P<kg>[\d.]+)(?:\s+(?P<regular>[\d,]+)(?:\s+[\d,]+)*\s+(?P<net>[\d,]+))?$")
 # 附加費名稱有大小寫混合 ("Direct Signature 150,000 150,000")
 # 只有一個金額的附加費 ("SHIPMENT VALUE PROTECTION 354,532") 也算；金額要有千分位或 3 位以內，
 # 不會誤抓 "YOUR VAT CODE 3900911265" 這種代碼
@@ -11860,10 +11867,15 @@ def parse_dhl_express_vn(text: str) -> Dict:
             current = {"bl_no": m.group("hawb"), "onboard_date": _vn_pdf_date(m.group("date")),
                        "port_of_loading": m.group("org").upper(), "port_of_discharge": m.group("dest").upper(),
                        "volume": _fmt_volume(kg=m.group("kg"))}
-            # 運費名稱 (REGULAR CHARGE) 要等同一票的 PROD CODE 行出現才會填入 (見下方)
-            items.append({"description": "FREIGHT CHARGE", "amount": _vn_pdf_num(m.group("net")),
-                          "vat": None, **current})
-            main_item = items[-1]
+            # 件數/重量 0 的稅費單這一行沒有金額，金額在下面的附加費行 (不建立
+            # FREIGHT CHARGE 項目；PROD CODE 改套到那筆附加費，見下方)
+            if m.group("net"):
+                # 運費名稱 (REGULAR CHARGE) 要等同一票的 PROD CODE 行出現才會填入 (見下方)
+                items.append({"description": "FREIGHT CHARGE", "amount": _vn_pdf_num(m.group("net")),
+                              "vat": None, **current})
+                main_item = items[-1]
+            else:
+                main_item = None
             continue
         if current is None:
             continue
@@ -11903,7 +11915,19 @@ def _dhl_express_vn_total(text: str):
 
 
 def _dhl_express_vn_grand(text: str):
-    totals = re.findall(r"^Total VND\s+([\d,]+)", _dhl_vn_clean(text), re.MULTILINE)
+    text = _dhl_vn_clean(text)
+    totals = []
+    for m in re.finditer(r"^Total VND\b[ \t]*(.*)$", text, re.MULTILINE):
+        tail = m.group(1).strip()
+        if re.fullmatch(r"[\d,]+", tail):
+            totals.append(tail)
+            continue
+        # 頁尾版面偶爾跟地址欄交錯，金額不在同一行 (2026-11-09 抽查 "SGNIR00324691.pdf"：
+        # "Total VND" 後面接著 "37-10, 37-11," 等地址碎片，金額隔幾行才出現)，往下
+        # 一小段範圍內找第一個純數字列
+        num = re.search(r"^[ \t]*([\d,]+)[ \t]*$", text[m.end():m.end() + 300], re.MULTILINE)
+        if num:
+            totals.append(num.group(1))
     return sum(_vn_pdf_num(v) or 0 for v in totals) if totals else None
 
 
