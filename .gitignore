@@ -16,3 +16,5 @@ test_samples/APL_VN/
 test_samples/NGUYEN_HUONG/
 test_samples/DHL_VN/
 test_samples/EXPEDITORS/
+test_samples/DHL_EXPRESS_VN/sample13.pdf
+test_samples/DHL_EXPRESS_VN/sample13_ref.xlsx
