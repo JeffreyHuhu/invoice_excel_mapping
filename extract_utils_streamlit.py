@@ -1003,6 +1003,11 @@ _EN_PHRASES = (
     ("PHI DIEU HANH BEN BAI HANG MAY BAY", "Air Cargo Terminal Handling Fee"),
     ("PHI KHAC (THU HO/ CHI HO KH)", "Other Fee (Collected/Paid on behalf of Customer)"),
     ("PHI LUU BAI", "Storage Fee"), ("PHI NGOAI GIO", "Overtime Fee"),
+    # 越南 APL (VN11) 暫定翻譯 (使用者 2026-11-10 同意先套用，之後統一費用對照表
+    # 更新時再通知修改)
+    ("PHI DIEU HANH BEN BAI CHO NGUYEN CONG-TO-NO", "FCL Terminal Handling Fee"),
+    ("PHU PHI HA TANG CANG BIEN", "Seaport Infrastructure Surcharge"),
+    ("PHI DIEN GIAO HANG", "Telex Release Fee"),
     # 越南 MAERSK (VN07) 費用名稱 (使用者 2026-11-06 答案)
     ("PHI XEP DO HANG HOA", "Cargo Handling Fee"), ("PHI NIEM CHI HANG TAU", "Carrier Seal Fee"),
     ("PHI CHUNG TU - CANG DI", "Origin Documentation Fee"),
