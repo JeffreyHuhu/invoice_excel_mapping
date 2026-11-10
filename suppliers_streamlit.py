@@ -12452,6 +12452,11 @@ def parse_apl_vn(text: str) -> Dict:
     # 單號、船名、港口、櫃號、材積，寫在該運送單的每一列費用上 (2026-11-06 新答案)
     # 運送單標題：「Chứng từ số: N, 船名…」或單行「Chứng từ số: N」(接著是費用)；列表標題 (N; N;) 不算
     starts = list(re.finditer(r"Chứng từ số:\s*(\S+?)(?:,\s*|\s*\n)", text))
+    # "Thu hộ APL Logistics Ltd: Chứng từ số: xxx (FCR : nnn)" 區塊：號碼跟緊接著的下一個
+    # 正常 "Chứng từ số: xxx" 區塊相同，那個區塊底下的費用要加註代收代付 (暫定文字，
+    # 2026-11-10 VN11 FEB.2025 答案)；(FCR : nnn) 不填，這裡故意不擷取
+    thu_ho_orders = set(m.group(1) for m in re.finditer(
+        r"Thu hộ APL Logistics Ltd:\s*Chứng từ số:\s*(\S+?)(?:\s*\(|,\s*|\s*\n)", text))
     items = []
     for i, sm in enumerate(starts or [None]):
         if sm is None:
@@ -12493,19 +12498,23 @@ def parse_apl_vn(text: str) -> Dict:
         ship = {"order_no": order, "vessel": vessel, "port_of_loading": pol,
                 "port_of_discharge": pod, "container_no": container,
                 "bl_no": hawb if air else None}
+        suffix = " - Thu hộ APL Logistics Ltd" if order in thu_ho_orders else ""
         cbm = kgs = None
-        sizes: List[str] = []
+        sizes: Dict[str, int] = {}
         block_items = []
         for im in _APL_VN_ITEM_RE.finditer(rest):
-            desc = im.group("desc").strip()
+            desc = im.group("desc").strip() + suffix
             qty = im.group("qty").replace(".", "").replace(",", ".")
             if im.group("unit") == "CBM":
                 cbm = qty
             elif im.group("unit") == "KGS":
                 kgs = qty
-            box = re.search(r"công-tơ-nơ\s+(\d{2}\w*)$", desc)
-            if box and im.group("unit") == "CTR" and box.group(1) not in sizes:
-                sizes.append(box.group(1))
+            # 櫃型後面可能接一個單引號 ("45'")，不算進櫃型文字裡 (2026-11-10 FEB.2025 答案 7144)
+            box = re.search(r"công-tơ-nơ\s+(\d{2}\w*)'?$", im.group("desc").strip())
+            if box and im.group("unit") == "CTR":
+                # 櫃數用這一列自己的 Số lượng，不可寫死 1 個 (2026-11-10 答案修正
+                # 27435/27438/28051/28171 這 4 張：同種櫃型不只 1 個)
+                sizes[box.group(1)] = sizes.get(box.group(1), 0) + int(float(qty) or 1)
             block_items.append({"description": desc, "amount": _dsv_vn_dot_amount(im.group("amount")),
                                 "vat": _dsv_vn_dot_amount(im.group("tax"))})
         if cbm:
@@ -12513,7 +12522,7 @@ def parse_apl_vn(text: str) -> Dict:
         elif kgs:
             volume = f"{kgs} KG"
         elif sizes:
-            volume = ", ".join(f"1X{sz}" for sz in sizes)
+            volume = ", ".join(f"{n}X{sz}" for sz, n in sizes.items())
         else:
             volume = None
         for it in block_items:
@@ -12549,8 +12558,16 @@ _APL_VN_SHEET = [
     # 當發票號碼 (2026-11-10 VN11 答案：01-2025 TRUCK EXPORT 有 Inv# 欄、POUYUEN DN 沒有)；
     # Order No. = Local invoice No.；B/L = Booking No.；櫃型寫成 "1X40HC" (2026-11-10 使用者
     # 決定跟其他供應商統一用這個格式，不用 VN11 答案原文的「1 x 40HC」)
-    (r".", {"header": "BOOKING NO", "key": ["BOOKING NO"], "inv_col": "Inv#",
-            "fees": [("DET", "DET - {desc_col}")], "desc_col": "REMARKS",
+    (r".", {"header": "BOOKING NO", "key": ["BOOKING NO"], "inv_col": "INV#",
+            # CHARGE 底下不只 DET 一欄：Chassis contseal、Drop off TCIT/VICT、Customs/others
+            # 或 Waiting/others 都要各自拆一筆費用 (2026-11-10 VN11 答案：01-2025 TRUCK EXPORT
+            # 同一列可能同時有 Drop off TCIT/VICT 跟 DET 兩筆費用)
+            "fees": [("CHASSIS CONTSEAL", "Chassis contseal - {desc_col}"),
+                     ("DROP OFF TCIT/VICT", "Drop off TCIT/VICT - {desc_col}"),
+                     ("DET", "DET - {desc_col}"),
+                     ("CUSTOMS / OTHERS", "Customs / others - {desc_col}"),
+                     ("WAITING / OTHERS", "Waiting / others - {desc_col}")],
+            "desc_col": "REMARKS",
             "total": "TOTAL ( VND )", "doc_key": r"Invoice No\.:", "doc_key_col": 12,
             "order_doc": r"Local invoice No\.:", "order_doc_col": 12, "doc_date": "INVOICE DATE",
             "vat_total": "TOTAL VAT AMOUNT", "vat_desc": "TOTAL VAT AMOUNT IN VND",

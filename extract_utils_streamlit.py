@@ -988,6 +988,21 @@ _EN_PHRASES = (
     # 越南 MOL LOGISTICS 空運 Debit Note 費用名稱 (VN09，使用者 2026-11-10 答案)
     ("PHI VAN DON HANG KHONG", "Air Waybill Fee"), ("PHI AMS", "AMS Filing Fee"),
     ("PHI SOI CHIEU", "X-ray Screening Fee"),
+    # 越南 APL (VN11) 費用名稱 (使用者 2026-11-10 答案；櫃型/天數等後綴照原文接在英文後面)
+    ("PHI SAP XEP HANG LE", "LCL Cargo Arrangement Fee"),
+    ("PHI SAP XEP HANG NGUYEN CONG-TO-NO", "FCL Cargo Arrangement Fee"),
+    ("PHI QUAN LY VAN TAI HANG HOA", "Freight Management Fee"),
+    ("PHI GIAY CHUNG NHAN NHAN HANG", "Forwarder Cargo Receipt (FCR) Fee"),
+    ("PHI NIEM PHONG CHI", "Seal Fee"),
+    ("PHI DIEU HANH BEN BAI CHO HANG LE", "LCL Terminal Handling Fee"),
+    ("PHI DIEU HANH BEN BAI CONG-TO-NO", "Container Terminal Handling Fee"),
+    ("PHI KHAI BAO TRONG LUONG HANG HOA", "VGM Declaration Fee"),
+    ("PHI VAN DON HANG MAY BAY", "Air Waybill Fee"),
+    ("PHI KHAI BAO HANG HOA THEO HE THONG AMS", "AMS Filing Fee"),
+    ("PHI SOI HANG MAY BAY", "Air Cargo X-ray Screening Fee"),
+    ("PHI DIEU HANH BEN BAI HANG MAY BAY", "Air Cargo Terminal Handling Fee"),
+    ("PHI KHAC (THU HO/ CHI HO KH)", "Other Fee (Collected/Paid on behalf of Customer)"),
+    ("PHI LUU BAI", "Storage Fee"), ("PHI NGOAI GIO", "Overtime Fee"),
     # 越南 MAERSK (VN07) 費用名稱 (使用者 2026-11-06 答案)
     ("PHI XEP DO HANG HOA", "Cargo Handling Fee"), ("PHI NIEM CHI HANG TAU", "Carrier Seal Fee"),
     ("PHI CHUNG TU - CANG DI", "Origin Documentation Fee"),
