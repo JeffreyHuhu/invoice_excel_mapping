@@ -7447,22 +7447,21 @@ def _rac_table(rows: List[list]):
 
 
 def _rac_volume(row: list, meta: Dict[str, int], kind: str) -> Optional[str]:
-    """材積統一寫法：FCL 櫃量寫成「1 x 20'」「2 x 40'」(20'/40' 都有時用 " + " 連接，
-    使用者 2026-11-09 規定，跟其他供應商共用的 _fmt_volume() "1X20G" 寫法不同，
-    不要去改 _fmt_volume())；LCL 沒有櫃：CBM 欄，沒有 CBM 才寫重量。"""
+    """材積統一寫法：FCL 櫃量寫成「1X20」「2X40」(多櫃用 ", " 連接，
+    使用者 2026-11-10 統一改為 1X40 格式，同 APL_VN)；LCL 沒有櫃：CBM 欄，沒有 CBM 才寫重量。"""
     # "SL CONT"（數量）x "CONT 20/40"（櫃型，例如 40）兩欄合併 (CÔNG NỢ POU PHONG
     # NHAP FCL 版面，使用者 2026-11-09 答案)
     sl_cont = _vn_num(_vn_cell(row, meta.get("sl_cont")))
     cont_size = _vn_num(_vn_cell(row, meta.get("cont_size")))
     if sl_cont and cont_size:
-        return f"{int(sl_cont)} x {int(cont_size)}'"
+        return f"{int(sl_cont)}X{int(cont_size)}"
     containers = []
-    for field, size in (("cont_20", "20'"), ("cont_40", "40'")):
+    for field, size in (("cont_20", "20"), ("cont_40", "40")):
         n = _vn_num(_vn_cell(row, meta.get(field)))
         if n:
             containers.append((n, size))
     if containers:
-        return " + ".join(f"{int(n)} x {size}" for n, size in containers)
+        return ", ".join(f"{int(n)}X{size}" for n, size in containers)
     if kind == "fcl_import":
         return None
     kgs = _vn_num(_vn_cell(row, meta.get("kgs")))
@@ -10450,8 +10449,8 @@ def _tw_cong_no_sheets(book) -> Tuple[List[Dict], List[Dict]]:
                 booking = bk
                 n20, n40 = _vn_num(_vn_cell(row, c20)), _vn_num(_vn_cell(row, c40))
                 cbm = _vn_num(_vn_cell(row, ccbm))
-                boxes = [f"{int(n)} x {size}" for n, size in ((n20, "20'"), (n40, "40'")) if n]
-                volume = " + ".join(boxes) if boxes else (f"{cbm:g} CBM" if cbm else None)
+                boxes = [f"{int(n)}X{size}" for n, size in ((n20, "20"), (n40, "40")) if n]   # 統一寫法 1X40 (2026-11-10)
+                volume = ", ".join(boxes) if boxes else (f"{cbm:g} CBM" if cbm else None)
             base = {"supplier": _TW_EXCEL_SUPPLIER, "consignee": consignee, "invoice_no": invoice,
                     "invoice_date": _tw_cong_no_date(_vn_cell(row, col["INVOICEDATE"])),
                     "bl_no": booking, "volume": volume}
@@ -10613,10 +10612,11 @@ def _tw_header_col(header_row: list, label: str) -> Optional[int]:
 
 
 def _tw_box_cbm_volume(n20, n40, cbm) -> Optional[str]:
-    """材積寫成 "1 x 40'"；沒有櫃數時用 CBM，例如 "1.296 CBM" (同 CONG NO 版答案寫法)。"""
-    boxes = [f"{int(n)} x {size}" for n, size in ((n20, "20'"), (n40, "40'")) if n]
+    """材積寫成 "1X40" (使用者 2026-11-10 統一格式，同 APL_VN)；多櫃用 ", " 連接；
+    沒有櫃數時用 CBM，例如 "1.296 CBM"。"""
+    boxes = [f"{int(n)}X{size}" for n, size in ((n20, "20"), (n40, "40")) if n]
     if boxes:
-        return " + ".join(boxes)
+        return ", ".join(boxes)
     if cbm:
         return f"{cbm:g} CBM"
     return None
