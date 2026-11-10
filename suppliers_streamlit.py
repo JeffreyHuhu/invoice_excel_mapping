@@ -9478,8 +9478,10 @@ def parse_expeditors(text: str) -> Dict:
         "order_no", "arrive_date", "onboard_date", "mbl_no", "port_of_loading",
         "container_no", "shipper")}
     h["supplier"] = _search(r"(Expeditors Vietnam Company Limited)", text)
-    h["invoice_no"] = _search(r"TAX No:\s*NUMBER\s+(\S+)", text)
-    m = re.search(r"CLIENT NO:\s*\S+\s+DATE\s+(\d{2})/(\d{2})/(\d{2})", text)
+    # 舊版型 (2025 年初樣本) 把字母拆開印出 "N U M B ER"、"D A TE"：每個字母間
+    # 允許空白，兼容新舊兩種版型 (2026-11-10 抽樣 EXPEDITORS_JAN/FEB.2025)
+    h["invoice_no"] = _search(r"TAX No:\s*N\s*U\s*M\s*B\s*E\s*R\s+(\S+)", text)
+    m = re.search(r"CLIENT NO:\s*\S+\s+D\s*A\s*T\s*E\s+(\d{2})/(\d{2})/(\d{2})", text)
     h["invoice_date"] = _format_date_en(m.group(2), m.group(1), f"20{m.group(3)}") if m else None
     # 中間可能夾空行 (樣本 E3Z3101331)
     h["consignee"] = _search(r"CLIENT NO:[^\n]*\n\s*(.+?)\s+INVOICE\s*$", text)
@@ -9498,6 +9500,17 @@ def parse_expeditors(text: str) -> Dict:
         if im and not line.strip().startswith("BAS "):
             items.append({"description": im.group("desc"),
                           "amount": _cw_comma_number(im.group("amount")), "vat": None})
+    # 單一費用列的金額被字型錯誤吃掉 (例如 "AIR FREIGHT E &5"，正確應為 85)：
+    # 這一列抓不到金額、整張又只有這一列費用時，改用 SUB TOTAL 當金額
+    # (2026-11-10 抽樣 EXPEDITORS_APR.2026 E3Z2939002)
+    if not items and block:
+        lines = [l.strip() for l in block.group(1).split("\n")
+                 if l.strip() and not l.strip().startswith("BAS ")]
+        if len(lines) == 1:
+            sub_total = _exp_extract_total(text)
+            dm = re.match(r"^(?P<desc>.+?)\s+(?:\d{1,2}|E)\s+\S+$", lines[0])
+            if dm and sub_total is not None:
+                items.append({"description": dm.group("desc"), "amount": sub_total, "vat": None})
     # VAT 以下方稅率表為準 ("8 Standard VAT (8%) USD 87.50 7 94.50")：上方 "VAT:"
     # 有時字型壞掉讀成 "Z" (樣本 E3Z3101671)
     # 一張發票跨兩頁時稅率表在第二頁：只在有 SUB TOTAL 的那一頁取 VAT，先用 "VAT:" (2026-10-28 抽樣)
@@ -11836,10 +11849,17 @@ _vt_register("IMX", "CÔNG TY TNHH DỊCH VỤ CHUYỂN PHÁT NHANH IMX", detect
 _LH = "LAM HANG - (THUE 8%)"
 _VT_EXPEDITORS = [
     (r".", {"header": "EI REF", "key": ["TAX INVOICE NUMBER", "VAN DON PHU"],
+            # 表頭有「單價」與「金額」兩組重複欄名 (CƯỚC、THU HỘ ĐẠI LÝ NƯỚC NGOÀI 各
+            # 出現兩次)，單價組恆為 0：用 "$=" 取最後一個 (金額組) 才是真正的金額
+            # (2026-11-10 抽樣 AIR IMP 08.30.2025 CƯỚC 欄被單價組的 0 蓋掉)。
+            # OCEAN IMP 版型第 4/5 欄標題不同 (PHÍ BỐC XẾP / PHÍ CFS，不是 AIR IMP 的
+            # PHÍ VỆ SINH CONT / PHÍ PCS/CFS)：兩種都要比對 (2026-11-10 抽樣
+            # OCEAN IMP 07.30.2025 PHÍ BỐC XẾP 欄漏抓)
             "fees": [(f"{_LH} PHI LENH", None), (f"{_LH} PHI XEP DO", None), (f"{_LH} PHI PHU TROI", None),
-                     (f"{_LH} PHI VE SINH", None), (f"{_LH} PHI PCS", None), (f"{_LH} PHI E-MANIFEST", None),
-                     (f"{_LH} PHI HANDLING", None), ("=CUOC", "CƯỚC"),
-                     ("=THU HO DAI LY NUOC NGOAI", "THU HỘ ĐẠI LÝ NƯỚC NGOÀI")],
+                     ((f"{_LH} PHI VE SINH", f"{_LH} PHI BOC XEP"), None),
+                     ((f"{_LH} PHI PCS", f"{_LH} PHI CFS"), None), (f"{_LH} PHI E-MANIFEST", None),
+                     (f"{_LH} PHI HANDLING", None), ("$=CUOC", "CƯỚC"),
+                     ("$=THU HO DAI LY NUOC NGOAI", "THU HỘ ĐẠI LÝ NƯỚC NGOÀI")],
             "vat": "=VAT", "vat_desc": "VAT 8%", "grand": "TONG CONG (VND)", "date": "TAX INVOICE DATE",
             "boxes": {"20": "KHOI LUONG 20'", "40": "KHOI LUONG 40'"}, "kg": "CBM/C.W",
             "fields": {"mbl_no": "VAN DON CHINH", "bl_no": "VAN DON PHU", "order_no": "EI REF",
