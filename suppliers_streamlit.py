@@ -8644,6 +8644,24 @@ _CW_CHARGE_RE = re.compile(
     # 抽查 DHL_VN BY SHIPMENT 批次 S2501377271)
     r"|0%\s+(?:(?:\d\.\s?|\*\s))?(?=\d{1,3}(?:\.\d{3})*(?:,\d{1,2})?$))\s*"
     r"(?P<amount>\d{1,3}(?:\.\d{3})*(?:,\d{1,2})?)$", re.MULTILINE)
+# 費用名稱裡夾著外幣單價跟匯率 ("Org. Terminal Handling-Forwarder USD 108,96 @"、
+# "Freight USD 2.911,35 @ 25698,000000"：匯率可能接在同一行的 "@" 後面，也可能印在
+# 下一行，兩種都被 _CW_CHARGE_RE 的 desc 群組整段吃進去)，答案要求外幣單價移到名稱
+# 後面的括號、去掉 "@" 和匯率 (VN13 DHL 空運票，2026-11-10)
+_CW_FX_DESC_RE = re.compile(r"^(?P<desc>.+?)\s+(?P<cur>[A-Z]{3})\s+(?P<amt>[\d.,]+)\s+@(?:\s+[\d.,]+)?$")
+
+
+def _cw_clean_fx_desc(desc: str) -> str:
+    m = _CW_FX_DESC_RE.match(desc)
+    return f"{m.group('desc')} ({m.group('cur')} {m.group('amt')})" if m else desc
+
+
+def _cw_clean_draft_watermark(desc: str) -> str:
+    """"PRO FORMA" 頁常有一層 "DRAFT" 浮水印，字元位置固定，疊到真正文字上會插進一個
+    字母 ("Security FDiling Fee" = "Filing"；金額裡插一個字母 "3.5D84,10" = "3.584,10")
+    (VN13 DHL 答案，2026-11-10)。"""
+    desc = desc.replace("FDiling", "Filing")
+    return re.sub(r"(?<=[\d.])[A-Z](?=[\d,])", "", desc)
 
 
 def _cw_vn_number(text: Optional[str]):
@@ -8808,16 +8826,27 @@ def _cw_parse_doc(doc: str, supplier: Optional[str]) -> List[Dict]:
     h["volume"] = _fmt_volume(containers=boxes, cbm=vol.replace(",", ".") if vol else None,
                               kg=kg.replace(",", ".") if kg else None)
     h["vessel"] = h["bl_no"] = h["mbl_no"] = None
+    # OCEAN BILL OF LADING (MBL) 欄可能空白，只剩 IMO 和 HOUSE BILL OF LADING 兩個值
+    # (VN13 DHL 答案：MBL 空白填 N/A，2026-11-10)；前後不能同時要求 \s+ (CLAUDE.md
+    # Regex 陷阱)，ocean 群組整個選填
     m = _cw_after(doc, r"OCEAN BILL OF LADING.*HOUSE BILL OF LADING",
-                  r"(?P<v>.+?) / (?P<voy>\S+) / \S+ (?P<ocean>\S+) (?P<house>\S+)$")
+                  r"(?P<v>.+?) / (?P<voy>\S+) / \S+(?:\s+(?P<ocean>\S+))?\s+(?P<house>\S+)$")
     if m:
         h["vessel"] = f"{m.group('v')} / {m.group('voy')}"
-        h["mbl_no"], h["bl_no"] = m.group("ocean"), m.group("house")
+        h["mbl_no"], h["bl_no"] = m.group("ocean") or "N/A", m.group("house")
     else:
         m = _cw_after(doc, r"FLIGHT / DATE & REFERENCE\s+MAWB\s+HAWB",
                       r"(?P<flight>\S+) / .*?(?P<mawb>\S+) (?P<hawb>\S+)$")
         if m:
             h["vessel"], h["mbl_no"], h["bl_no"] = m.group("flight", "mawb", "hawb")
+        else:
+            # DHL 版面的表頭沒有 "& REFERENCE"、也沒有中間那個單號，船名多接日期
+            # (VN13 答案，2026-11-10)
+            m = _cw_after(doc, r"FLIGHT / DATE\s+MAWB\s+HAWB",
+                          r"(?P<flight>\S+) / (?P<date>\S+) (?P<mawb>\S+) (?P<hawb>\S+)$")
+            if m:
+                h["vessel"] = f"{m.group('flight')} / {m.group('date')} (Flight)"
+                h["mbl_no"], h["bl_no"] = m.group("mawb"), m.group("hawb")
     m = _cw_after(doc, r"^ORIGIN\b",
                   rf"(?P<pol>.+?)\s+(?P<etd>{_CW_DATE})\s+(?P<pod>.+?)(?:\s+(?P<eta>{_CW_DATE}))?$")
     h["port_of_loading"] = m.group("pol").strip(" ,") if m else None
@@ -8826,13 +8855,15 @@ def _cw_parse_doc(doc: str, supplier: Optional[str]) -> List[Dict]:
     h["arrive_date"] = _cw_date(m.group("eta")) if m else None
     sec = re.search(r"^CONTAINERS\s*\n(.*?)(?:\n\s*(?:Total CO|CO₂|CHARGES)|\Z)",
                     doc, re.DOTALL | re.MULTILINE)
-    conts = [ln.strip() for ln in sec.group(1).split("\n")
-             if re.match(r"\s*[A-Z]{4}\d{7}\b", ln)] if sec else []
+    # 櫃號不一定在這一行開頭 (VN13 DHL："- 40HC, OOCU6556180 - 40HC"，前面多一個沒有
+    # 櫃號的櫃型，2026-11-10)：改成整段找「櫃號 - 櫃型」，不要求從行首開始，其他
+    # 供應商既有答案要保留「櫃號 - 櫃型」(例如 "FFAU3490244 - 40HC") 不受影響
+    conts = re.findall(r"[A-Z]{4}\d{7}\s*-\s*\w+", sec.group(1)) if sec else []
     h["container_no"] = ", ".join(conts) or None
 
     cur = _search(r"CHARGES IN ([A-Z]{3})", doc)
     suffix = f" ({cur})" if cur and cur != "VND" else ""      # 外幣發票的費用名稱加幣別
-    items = [{"description": im.group("desc").strip() + suffix,
+    items = [{"description": _cw_clean_fx_desc(_cw_clean_draft_watermark(im.group("desc").strip())) + suffix,
               "amount": _cw_vn_number(im.group("amount")),
               "vat": _cw_vn_number(im.group("vat"))}
              for im in _CW_CHARGE_RE.finditer(doc)]
@@ -8878,12 +8909,14 @@ def _cw_parse(text: str, supplier: Optional[str]) -> Dict:
     return {"header": {}, "items": items}
 
 
-def _cw_totals(text: str, patterns, conv=_cw_vn_number):
+def _cw_totals(text: str, patterns, conv=_cw_vn_number, key_fn=_cw_invoice_no):
     """每張發票的總額 {SHIPMENT 號碼: 金額}。patterns 依序試，第一個抓得到的
-    為準 (同一個 pattern 抓到好幾個就加總，例如 MOL 每個幣別一行 GRAND TOTAL)。"""
+    為準 (同一個 pattern 抓到好幾個就加總，例如 MOL 每個幣別一行 GRAND TOTAL)。
+    key_fn：發票號碼不是 SHIPMENT 號碼時可以換一個 (VN13 DHL 的「INVOICE」頁用
+    F 號碼，2026-11-10)。"""
     out, missing = {}, set()
     for doc in _cw_docs(text):
-        inv = _cw_invoice_no(doc)
+        inv = key_fn(doc)
         for pattern in patterns:
             vals = re.findall(pattern, doc, re.MULTILINE)
             if inv and vals:
@@ -8975,23 +9008,161 @@ def _parse_dhl_vn_charge_sheet(text: str) -> Dict:
     return {"header": h, "items": items or [{"description": None, "amount": None, "vat": None}]}
 
 
+_DHL_VN_SUPPLIER = "DHL GLOBAL FORWARDING (VIETNAM) CORPORATION"
+
+
+def _dhl_vn_doc_key(doc: str) -> Optional[str]:
+    """一般 "INVOICE" 頁 (不是 PRO FORMA) 的發票號碼是 F 號碼，不是 SHIPMENT 號碼
+    (VN13 答案，2026-11-10)。"""
+    return _search(r"\bINVOICE\s+(F\d+)\b", doc) or _cw_invoice_no(doc)
+
+
+def _is_dhl_vn_vat_invoice(page: str) -> bool:
+    return "HÓA ĐƠN GIÁ TRỊ GIA TĂNG" in page.upper()
+
+
+def _dhl_vn_vat_docs(text: str) -> List[str]:
+    """VAT INVOICE 頁可能跨頁：第 1 頁結尾 "Trang 1/2"，續頁開頭
+    "tiếp theo trang trước"，Tổng cộng 在最後一頁 (VN13 答案，2026-11-10)。"""
+    merged: List[str] = []
+    for page in text.split(_CW_PAGE_MARK):
+        if not _is_dhl_vn_vat_invoice(page):
+            continue
+        if merged and re.search(r"ti[eế]p theo trang tr[uướ]+c", page, re.IGNORECASE):
+            merged[-1] += "\n" + page
+        else:
+            merged.append(page)
+    return merged
+
+
+def _dhl_vn_cw_text(text: str) -> str:
+    """拿掉 VAT INVOICE 頁，剩下的頁交給共用的 CargoWise 解析 (PRO FORMA / 一般
+    INVOICE)。"""
+    return _CW_PAGE_MARK.join(p for p in text.split(_CW_PAGE_MARK) if not _is_dhl_vn_vat_invoice(p))
+
+
+# VAT INVOICE 費用列："STT 號 Số vận đơn 品名 Tỷ giá 數量 單價 未稅 稅率% 稅額 含稅"；
+# Số vận đơn、品名都可能整欄空白 (前後不能同時要求 \s+，CLAUDE.md Regex 陷阱)
+_DHL_VN_VATINV_ITEM_RE = re.compile(
+    r"^(?P<stt>\d+)\s+(?:(?P<hbl>[A-Z]{2,4}\d{5,7})\s+)?(?P<desc>.*?)\s*"
+    r"(?P<rate>[\d.,]+)\s+(?P<qty>[\d.,]+)\s+(?P<price>[\d.,]+)\s+(?P<net>[\d.,]+)\s+"
+    r"(?P<pct>\d+)%\s+(?P<vat>[\d.,]+)\s+(?P<total>[\d.,]+)$", re.MULTILINE)
+# 英文備註 (使用者同意先暫用，之後依統一費用對照表更新，2026-11-10)
+_DHL_VN_EN_NOTE = {
+    "PHI XEP DO HANG TAI CANG DI": "Origin Cargo Handling Fee",
+    "PHI QUAN LY CHUNG TU TAI CANG DI": "Origin Documentation Management Fee",
+    "PHI CHUNG TU GOC TAI CANG DI": "Origin Original Documents Fee",
+    "PHI KHAI BAO HAI QUAN TAI CANG DI": "Origin Customs Declaration Fee",
+    "PHI VAN CHUYEN BOC XEP TAI KHO TAI CANG DI": "Origin Warehouse Trucking & Handling Fee",
+    "PHI DICH VU KHAI BAO TRONG LUONG TAI CANG DI": "Origin VGM Declaration Service Fee",
+}
+
+
+def _dhl_vn_vat_key(doc: str) -> Optional[str]:
+    # _cargowise_pages 會把這頁兩欄的版面重排，"Số hóa đơn(Invoice No.):" 後面常常
+    # 變空白，真正的號碼被排到上一欄「Ký hiệu(Serial No.): 1C25TSG」的下一行，自己
+    # 獨立一行 (VN13 答案，2026-11-10)：優先認這個排列，抓不到才退回原本的標籤比對
+    m = re.search(r"Ký hiệu\(Serial No\.\):\s*(\S+)\s*\n\s*(\d+)\b", doc)
+    if m:
+        return f"{m.group(1)}-{m.group(2)}"
+    series = _search(r"Ký hiệu\(Serial No\.\):\s*(\S+)", doc)
+    number = _search(r"Số hóa đơn\(Invoice No\.\):\s*(\S+)", doc)
+    return f"{series}-{number}" if series and number else number
+
+
+def _dhl_vn_vat_totals(doc: str):
+    m = re.search(r"Tổng cộng\(Grand total\):\s*([\d.]+)\s+([\d.]+)\s+([\d.]+)", doc)
+    return (_dsv_vn_dot_amount(m.group(1)), _dsv_vn_dot_amount(m.group(3))) if m else (None, None)
+
+
+def _parse_dhl_vn_vat_invoice(doc: str) -> List[Dict]:
+    h: Dict[str, Optional[str]] = {"supplier": _DHL_VN_SUPPLIER, "invoice_no": _dhl_vn_vat_key(doc)}
+    m = re.search(r"Ngày hóa đơn\(Invoice date\):\s*(\d{1,2})\s*/\s*(\d{1,2})\s*/\s*(\d{4})", doc)
+    h["invoice_date"] = _format_date_en(*m.groups()) if m else None
+    h["consignee"] = _search(r"Người mua\(Buyer Name\):\s*(.+)", doc)
+    if h["consignee"]:
+        h["consignee"] = _vn_full_consignee(h["consignee"])
+    h["order_no"] = _search(r"Số hóa đơn nội bộ\(DGF Inv\.No\.\):\s*(\S+)", doc) or "N/A"
+    items = []
+    lines = doc.splitlines()
+    for i, line in enumerate(lines):
+        m = _DHL_VN_VATINV_ITEM_RE.match(line.strip())
+        if not m:
+            continue
+        desc = m.group("desc").strip()
+        if not desc:
+            # 品名折成 3 行：費用列上方第 1 行 = 前半段，下方第 1 行 = 後半段
+            # (VN13 答案，2026-11-10)
+            prefix = lines[i - 1].strip() if i else ""
+            suffix = lines[i + 1].strip() if i + 1 < len(lines) else ""
+            desc = " ".join(x for x in (prefix, suffix) if x)
+        en = _DHL_VN_EN_NOTE.get(_vt_norm(desc))
+        items.append({"description": f"{desc} ({en})" if en else desc,
+                      "amount": _dsv_vn_dot_amount(m.group("net")), "vat": _dsv_vn_dot_amount(m.group("vat")),
+                      "bl_no": m.group("hbl") or "N/A", **h})
+    return items or [{"description": None, "amount": None, "vat": None, **h}]
+
+
 def parse_dhl_vn(text: str) -> Dict:
     if _is_dhl_vn_charge_sheet(text):
         return _parse_dhl_vn_charge_sheet(text)
-    return _cw_parse(text, _search(r"(DHL Global Forwarding \(Vietnam\) Corporation)", text))
+    items = []
+    for doc in _cw_docs(_dhl_vn_cw_text(text)):
+        rows = _cw_parse_doc(doc, _DHL_VN_SUPPLIER)
+        # 一般 "INVOICE" 頁用 F 號碼；材積照帳單原文寫 M3，不是 CBM (VN13 答案，2026-11-10)
+        f_no = _search(r"\bINVOICE\s+(F\d+)\b", doc)
+        for r in rows:
+            if f_no:
+                r["invoice_no"] = f_no
+            if r.get("volume"):
+                r["volume"] = r["volume"].replace(" CBM", " M3")
+            if r.get("consignee"):
+                r["consignee"] = _vn_full_consignee(r["consignee"])
+        items += rows
+    for doc in _dhl_vn_vat_docs(text):
+        items += _parse_dhl_vn_vat_invoice(doc)
+    return {"header": {}, "items": items}
 
 
-def _dhl_vn_grand(text: str):
+def _dhl_vn_extract_total(text: str):
+    if _is_dhl_vn_charge_sheet(text):
+        return None
+    out = _cw_totals(text, [r"SUBTOTAL[ \t]+(\d[\d.]*(?:,\d+)?)",
+                            r"discrepancies\.[ \t]+(\d{1,3}(?:\.\d{3})+(?:,\d+)?)[ \t]*$"],
+                     key_fn=_dhl_vn_doc_key)
+    for doc in _dhl_vn_vat_docs(text):
+        net, _grand = _dhl_vn_vat_totals(doc)
+        key = _dhl_vn_vat_key(doc)
+        if key and net is not None:
+            out[key] = net
+    return out
+
+
+def _dhl_vn_extract_grand_total(text: str):
     if _is_dhl_vn_charge_sheet(text):
         v = _search(r"Total \(VND\)\s*([\d.]+,\d{2})", text)
         return _dhl_vn_num(v) if v else None
-    return _cw_extract_grand_total(text)
+    out = (_cw_totals(text, [r"^TOTAL[ \t]+(?:VND|USD)[ \t]+(\d[\d.]*(?:,\d+)?)",
+                             r"^(\d[\d.]*(?:,\d+)?)[ \t]*\nTOTAL[ \t]+(?:VND|USD)\s*$",
+                             r"Invoiced[ \t]+(?:VND|USD)[ \t]+(\d{1,3}(?:\.\d{3})+(?:,\d+)?)\b",
+                             # DHL 版面 "TOTAL VND" 常跟左欄的銀行轉帳說明擠在同一行，不是行首
+                             # (VN13 答案，2026-11-10)
+                             r"TOTAL[ \t]+(?:VND|USD)[ \t]+(\d[\d.]*(?:,\d+)?)\s*$"],
+                      key_fn=_dhl_vn_doc_key)
+           or _cw_totals(text, [r"GRAND TOTAL for [A-Z]{3}[ \t]+(\d[\d,]*(?:\.\d+)?)"],
+                         conv=_cw_comma_number, key_fn=_dhl_vn_doc_key))
+    for doc in _dhl_vn_vat_docs(text):
+        _net, grand = _dhl_vn_vat_totals(doc)
+        key = _dhl_vn_vat_key(doc)
+        if key and grand is not None:
+            out[key] = grand
+    return out
 
 
 register_supplier(
-    "DHL_VN", "DHL GLOBAL FORWARDING (VIETNAM) CORPORATION", detect_dhl_vn, parse_dhl_vn,
-    extract_total=lambda t: None if _is_dhl_vn_charge_sheet(t) else _cw_extract_total(t),
-    extract_grand_total=_dhl_vn_grand, page_text=_cargowise_pages,
+    "DHL_VN", _DHL_VN_SUPPLIER, detect_dhl_vn, parse_dhl_vn,
+    extract_total=_dhl_vn_extract_total,
+    extract_grand_total=_dhl_vn_extract_grand_total, page_text=_cargowise_pages,
 )
 
 
