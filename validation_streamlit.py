@@ -152,11 +152,6 @@ SUPPLIER_EXEMPTIONS: Dict[str, set] = {
 }
 
 
-# 不計入的客戶：CONSIGNEE 去掉空白與符號後包含這個字就列 ERROR (使用者 2026-10-28)
-EXCLUDED_CONSIGNEES: Dict[str, str] = {
-    "POUPHONG": "POU PHONG VIETNAM COMPANY LIMITED",
-}
-
 LEVEL_HIGH = "高"
 LEVEL_MEDIUM = "中"
 LEVEL_LOW = "低"
@@ -217,12 +212,6 @@ def _check_header(row: Dict, supplier_key: Optional[str] = None) -> List[Dict]:
         if _is_blank(row.get(code)):
             issues.append(_issue(ERROR if level == "ERROR" else WARN, code, "MISSING_REQUIRED",
                                  f"必要欄位「{FIELD_LABELS[code]}」抓不到值"))
-    # 不計入的客戶 (使用者 2026-10-28：給 Pou Phong 的發票不計入；2026-11-04 改列中)
-    flat = re.sub(r"[^A-Z]", "", str(row.get("consignee") or "").upper())
-    for key, name in EXCLUDED_CONSIGNEES.items():
-        if key in flat:
-            issues.append(_issue(WARN, "consignee", "EXCLUDED_CONSIGNEE",
-                                 f"客戶是 {name}，這張發票不計入"))
     for code in DATE_FIELD_CODES:
         raw = row.get(code)
         if _is_na(raw):

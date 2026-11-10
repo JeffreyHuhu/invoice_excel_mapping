@@ -7298,8 +7298,8 @@ _VN_CONSIGNEES = {
     "POU HUNG": "POU HUNG VIETNAM COMPANY LIMITED",
     "PRIME ASIA": "PRIME ASIA (VIETNAM) CO.,LTD.",
     # POU PHONG 不在 Top 20 清單 (2026-10-28 抽樣 "CÔNG NỢ POU PHONG T06.2026…"、資料夾
-    # "POUPHONG\…")：全名使用者 2026-10-28 確認；給 POU PHONG 的發票不計入，
-    # 由 validation 的 EXCLUDED_CONSIGNEES 列 ERROR
+    # "POUPHONG\…")：全名使用者 2026-10-28 確認。帳單上確實是 POU PHONG 時算成功辨識，
+    # 不計入錯誤 (使用者 2026-11-10 規定，取消先前的不計入/中 規則)
     "POU PHONG": "POU PHONG VIETNAM COMPANY LIMITED",
     "POUPHONG": "POU PHONG VIETNAM COMPANY LIMITED",
 }
