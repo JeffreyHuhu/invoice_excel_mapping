@@ -8741,6 +8741,40 @@ def _cw_after(text: str, header_re: str, line_re: str, look: int = 4):
     return None
 
 
+_CW_CHARGE_SHEET_FEE_RE = re.compile(
+    r"^(?P<desc>\S.+?)\s+(?P<charge>\d{1,3}(?:\.\d{3})*)\s+"
+    r"(?P<tax>\d{1,3}(?:\.\d{3})*)\s+(?P<amount>\d{1,3}(?:\.\d{3})*)$")
+
+
+def _cw_charge_sheet_items(doc: str) -> List[Dict]:
+    """DSV 越南「Charge Sheet」版面 (BY SHIPMENT 合輯裡偶爾夾著的另一種版型，使用者
+    2026-11-09 抽查 BY SHIPMENT 批次，FEB.2026/JAN.2025 各有一張)。費用行第一行是
+    「名稱片段 CHARGE(VND) TAX(VND) AMOUNT(VND)」，名稱剩下的部分 (單價/單位說明)
+    折到接下來幾行，直到下一筆費用或 "Job Total" 才結束 (Job Total 是整張小計，
+    不當品項)。"""
+    if "CHARGE DESCRIPTION" not in doc or "Job Total" not in doc:
+        return []
+    items: List[Dict] = []
+    pending: Optional[Dict] = None
+    for line in doc.splitlines():
+        m = _CW_CHARGE_SHEET_FEE_RE.match(line.strip())
+        if m and m.group("desc") == "Job Total":
+            break
+        if m:
+            if pending:
+                items.append(pending)
+            pending = {"description": m.group("desc"),
+                       "amount": _dsv_vn_dot_amount(m.group("charge")),
+                       "vat": _dsv_vn_dot_amount(m.group("tax"))}
+        elif pending and line.strip():
+            pending["description"] += " " + line.strip()
+    if pending:
+        items.append(pending)
+    for it in items:
+        it["description"] = re.sub(r"\s+", " ", it["description"]).strip()
+    return items
+
+
 def _cw_parse_doc(doc: str, supplier: Optional[str]) -> List[Dict]:
     h: Dict[str, Optional[str]] = {"supplier": supplier}
     h["invoice_no"] = _cw_invoice_no(doc)
@@ -8825,6 +8859,8 @@ def _cw_parse_doc(doc: str, supplier: Optional[str]) -> List[Dict]:
         items.append({"description": desc,
                       "amount": int(net) if float(net).is_integer() else net,
                       "vat": int(vat) if float(vat).is_integer() else vat})
+    if not items:
+        items = _cw_charge_sheet_items(doc)
     if not items:
         items = [{"description": None, "amount": None, "vat": None}]
     return [{**h, **it} for it in items]
