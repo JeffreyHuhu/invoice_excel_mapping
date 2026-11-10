@@ -12490,7 +12490,7 @@ def parse_apl_vn(text: str) -> Dict:
         elif kgs:
             volume = f"{kgs} KG"
         elif sizes:
-            volume = ", ".join(f"1 x {sz}" for sz in sizes)
+            volume = ", ".join(f"1X{sz}" for sz in sizes)
         else:
             volume = None
         for it in block_items:
@@ -12528,7 +12528,7 @@ _APL_VN_SHEET = [
             "order_doc": r"Local invoice No\.:\s*(\S+)", "doc_date": "INVOICE DATE",
             "vat_total": "TOTAL VAT AMOUNT", "vat_desc": "TOTAL VAT AMOUNT IN VND",
             "fields": {"container_no": "CONTAINER NUMBER", "bl_no": "BOOKING NO"},
-            "volume_col": 3, "volume_prefix": "1 x ", "vat_last": True,
+            "volume_col": 3, "volume_prefix": "1X", "vat_last": True,
             "vat_na_fields": ("bl_no", "volume", "container_no", "port_of_loading", "port_of_discharge",
                               "vessel", "shipper", "onboard_date", "arrive_date")}),
 ]
