@@ -8640,8 +8640,10 @@ _CW_CHARGE_RE = re.compile(
     # "VAT RATE REASON" 表的原因編號 (1. VAT EXEMPT INTERNATIONAL TRANSPORT)，不是金額
     # (2026-10-28 抽樣 DHL_MAY.2026 S2601691598)
     r"^(?P<desc>.+?)(?: - (?:Greater|Base|Min|\d)[^\n]*?)?\s+(?:(?P<rate>\d+)%=(?P<vat>[\d.]+(?:,\d+)?)|Zero Rated"
-    # OCR 頁的原因編號可能讀成 "*" 或 "1." 後面多一個空白 ("0% * 46.695.655")
-    r"|0%\s+(?:\d\.\s?|\*\s)(?=\d{1,3}(?:\.\d{3})*(?:,\d{1,2})?$))\s*"
+    # OCR 頁的原因編號可能讀成 "*" 或 "1." 後面多一個空白 ("0% * 46.695.655")；
+    # 原因編號也可能整個不印，"0%" 後面直接接金額 ("0% 74.815.872"，2026-11-10
+    # 抽查 DHL_VN BY SHIPMENT 批次 S2501377271)
+    r"|0%\s+(?:(?:\d\.\s?|\*\s))?(?=\d{1,3}(?:\.\d{3})*(?:,\d{1,2})?$))\s*"
     r"(?P<amount>\d{1,3}(?:\.\d{3})*(?:,\d{1,2})?)$", re.MULTILINE)
 
 
@@ -8683,7 +8685,13 @@ _CW_PAGE_MARK = "\n##PAGE##"
 
 
 def _cw_invoice_no(text: str) -> Optional[str]:
-    """SHIPMENT 號碼；掃描頁 OCR 會在字母跟數字中間多讀一個 O ("SSGNO0315882")。"""
+    """SHIPMENT 號碼；掃描頁 OCR 會在字母跟數字中間多讀一個 O ("SSGNO0315882")。
+    掃描頁抬頭的 "SHIPMENT xxx" 有時被切成兩段 ("SHIPMENT S2602884 158"，中間
+    多一個空白把號碼截短)：頁面上通常還有條碼的文字層 "^SHP=S2602884191;INV;|"
+    沒有這個問題，優先用它 (使用者 2026-11-10 抽查 DHL_VN BY SHIPMENT 批次)。"""
+    barcode = _search(r"\^SHP=([A-Z][A-Z0-9]{5,});INV", text)
+    if barcode:
+        return barcode
     inv = _search(_CW_INV_RE, text)
     if inv:
         fixed = re.sub(r"^([A-Z]+?)O+(?=\d{7,}$)", r"\1", inv)
