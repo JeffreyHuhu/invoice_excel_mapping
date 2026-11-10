@@ -11949,14 +11949,38 @@ _KN_VN_LIST_FEES = (
     "Phí làm hàng lẻ - 428", "Phí e-VGM - 347", "Phí Cơ sở hạ tầng cảng xuất",
     "Phí làm hàng ngoài giờ", "Phí sắp xếp hàng xuất", "Phí lưu kho hàng xuất",
     "Phí DEM/DET")
+#   FCR 欄 (dn) 有時整欄空白 (連 "0" 佔位都沒有，只留 Combined SO# 一個數字)，
+#   前後不能同時要求 \s+ (見 CLAUDE.md Regex 陷阱)，改成整組 FCR 選填 (使用者
+#   2026-11-10 抽查 KN_VN BY WEEKLY 批次，FEB/JAN/MAR/OCT.2025 第 1 頁漏抓)
 _KN_VN_LIST_ROW_RE = re.compile(
-    r"^(?P<file>\d{8,})\s+(?P<dn>\S+)\s+(?P<so>\d+)\s+(?P<cbm>[\d.]+)\s+(?P<kg>[\d.]+?)"
+    r"^(?P<file>\d{8,})\s+(?:(?P<dn>\S+)\s+)?(?P<so>\d+)\s+(?P<cbm>[\d.]+)\s+(?P<kg>[\d.]+?)"
     r"(?P<dest>[A-Z][A-Z ]+?)\s+(?P<money>(?:[\d,]+ VND\s*){12})$", re.MULTILINE)
+
+
+def _kn_vn_pages(pdf_path: str) -> List[str]:
+    """附件清單常跨頁 (使用者 2026-11-10 抽查 BY WEEKLY 批次)：續頁沒有公司抬頭、
+    也沒有 "ĐƠN NGÀY" 這個清單日期，只剩費用欄表頭 + 明細列，併回前一頁同一張
+    清單，明細才能套用同一個發票日期 (否則續頁那幾票 INVOICE DATE 會是 N/A)。"""
+    out: List[str] = []
+    for page in extract_pages_from_pdf(pdf_path):
+        upper = page.upper()
+        is_continuation = (out and "KUEHNE + NAGEL" not in upper
+                           and (_KN_VN_LIST_ROW_RE.search(page) or _KN_VN_SHORT_ROW_RE.search(page)))
+        if is_continuation:
+            out[-1] += "\n" + page
+        else:
+            out.append(page)
+    return out
 
 
 def detect_kn_vn(text: str) -> bool:
     upper = text.upper()
-    return "KUEHNE + NAGEL" in upper and ("HÓA ĐƠN" in upper or "HOÁ ĐƠN" in upper or "VIỆT NAM" in upper)
+    if "KUEHNE + NAGEL" in upper and ("HÓA ĐƠN" in upper or "HOÁ ĐƠN" in upper or "VIỆT NAM" in upper):
+        return True
+    # 附件清單續頁：公司抬頭只印在清單第一頁，續頁只剩費用欄表頭 + 明細列，沒有
+    # 公司名稱或任何關鍵字，整頁會被當成「不是這家」漏掉 (使用者 2026-11-10 抽查
+    # KN_VN BY WEEKLY 批次，FEB/JAN/MAR/OCT.2025 各漏了一頁的明細)
+    return bool(_KN_VN_LIST_ROW_RE.search(text) or _KN_VN_SHORT_ROW_RE.search(text))
 
 
 # 精簡版附件清單 (2026-10-28 抽樣 "KEUHNE+NAGEL_SEP.2026_BY WEEKLY" 第 1 頁)：空白的費用欄、SO#、
@@ -11993,6 +12017,11 @@ def _kn_vn_list_rows(text: str):
 def parse_kn_vn(text: str) -> Dict:
     h: Dict[str, Optional[str]] = {"supplier": "Kuehne + Nagel Co., Ltd"}
     list_rows = _kn_vn_list_rows(text)
+    # 附件清單表格常跨頁：公司抬頭頁本身的明細列印在下一頁，這一頁單獨解析時
+    # list_rows 是空的，不要掉進下面的「單張發票」分支產生一筆全 N/A 的假列
+    # (使用者 2026-11-10 抽查 KN_VN BY WEEKLY 批次)
+    if not list_rows and "ĐÍNH KÈM HOÁ ĐƠN" in text.upper():
+        return {"header": h, "items": []}
     if list_rows:
         h["invoice_date"] = _vn_pdf_date(_search(r"ĐƠN NGÀY\s*(\d{1,2}/\d{1,2}/\d{4})", text.upper()))
         h["consignee"] = "POUYUEN VIETNAM COMPANY LIMITED" if "POUYUEN" in text.upper() else None
@@ -12071,6 +12100,7 @@ register_supplier(
     # 月結 PDF (BY SHIPMENT) 是好幾張電子發票合在一起：每頁一張 (2026-10-28 抽樣)
     "KN_VN", "CÔNG TY TNHH KUEHNE + NAGEL (VIỆT NAM)", detect_kn_vn, parse_kn_vn, multi_page=True,
     extract_total=lambda t: _kn_vn_totals(t)[0], extract_grand_total=lambda t: _kn_vn_totals(t)[1],
+    page_text=_kn_vn_pages,
 )
 
 
