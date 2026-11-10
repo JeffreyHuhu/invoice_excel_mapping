@@ -985,6 +985,9 @@ _EN_PHRASES = (
     ("PHI XEP DO", "Terminal Handling / Loading-Unloading Fee"), ("PHI LAM HANG", "Handling Fee"),
     ("PHI SOI HANG", "X-ray Screening Fee"), ("PHI PHAT HANH VAN DON", "B/L Issuance Fee"),
     ("PHI VGM", "VGM Fee"), ("PHI CFS", "CFS Fee"), ("PHI THC", "Terminal Handling Charge"),
+    # 越南 MOL LOGISTICS 空運 Debit Note 費用名稱 (VN09，使用者 2026-11-10 答案)
+    ("PHI VAN DON HANG KHONG", "Air Waybill Fee"), ("PHI AMS", "AMS Filing Fee"),
+    ("PHI SOI CHIEU", "X-ray Screening Fee"),
     # 越南 MAERSK (VN07) 費用名稱 (使用者 2026-11-06 答案)
     ("PHI XEP DO HANG HOA", "Cargo Handling Fee"), ("PHI NIEM CHI HANG TAU", "Carrier Seal Fee"),
     ("PHI CHUNG TU - CANG DI", "Origin Documentation Fee"),
@@ -1484,7 +1487,13 @@ def _parse_multi_page_pdf(pdf_path: str, key: str, **pdfplumber_kwargs) -> List[
 
 def _drop_duplicate_invoice_pages(page_rows: List[List[Dict]]) -> List[Dict]:
     """稽核原則 (使用者 2026-11)：發票號碼相同、總金額相同視為重複的發票，只保留第一張。
-    發票號碼是 N/A 的頁面不比對。"""
+    發票號碼是 N/A 的頁面不比對。
+
+    發票號碼相同、總金額也相同時，再看 Order No. 是否也相同才當作真的重複 (使用者
+    2026-11-10 VN09 MOL 答案：Số/日期空白的草稿發票，INVOICE NO 統一只填 Ký hiệu，
+    同一個月常有好幾張草稿恰好是同一筆標準費用、總金額一樣，但其實是不同訂艙號碼的
+    不同發票，不能被誤判成重複刪掉)。Order No. 是 N/A 或缺資料時維持舊版只看
+    (invoice_no, total) 的判斷方式，不影響其他供應商既有行為。"""
     seen: Dict[tuple, bool] = {}
     kept: List[Dict] = []
     for rows in page_rows:
@@ -1492,10 +1501,12 @@ def _drop_duplicate_invoice_pages(page_rows: List[List[Dict]]) -> List[Dict]:
             continue
         inv = rows[0].get("invoice_no")
         total = sum(r.get("amount") for r in rows if isinstance(r.get("amount"), (int, float)))
+        order_no = rows[0].get("order_no")
+        key = (inv, total, order_no) if order_no not in (None, "N/A", "") else (inv, total)
         if inv not in (None, "N/A", ""):
-            if (inv, total) in seen:
+            if key in seen:
                 continue
-            seen[(inv, total)] = True
+            seen[key] = True
         kept.extend(rows)
     return kept
 

@@ -9020,11 +9020,15 @@ def detect_mol(text: str) -> bool:
 
 
 # --- MOL CONSOLIDATION SERVICE 越南增值稅發票 (2026-10-28 抽樣 "MOL LOGICTICS_SEP.2025" 等，63 頁) --
-# 一頁一張 HÓA ĐƠN GIÁ TRỊ GIA TĂNG；這批 "Số (No)" 與日期都空白 (草稿)，發票號碼暫用備註裡的
-# 訂艙號碼 (VN2090087)，有填號碼時用號碼 (待使用者確認)。明細 "1 PHÍ CHỨNG TỪ (FCR fee) Bill 1.00
-# 1,000,000 1,000,000"，名稱太長時折到上下兩行；整張一個 VAT 單獨一列。
+# 一頁一張 HÓA ĐƠN GIÁ TRỊ GIA TĂNG；這批 "Số (No)" 與日期都空白 (草稿) 的張數占多數 (119 張裡
+# 117 張，使用者 2026-11-10 VN09 答案)，INVOICE NO 這種情況只填 Ký hiệu「1C25TMC」(不要用備註
+# 裡的訂艙號碼)。明細 "1 PHÍ CHỨNG TỪ (FCR fee) Bill 1.00 1,000,000 1,000,000"，名稱太長時折到
+# 上下兩行；整張一個 VAT 單獨一列。
 _MOLCS_ITEM_RE = re.compile(
-    r"^\d+\s+(?:(?P<desc>.+?)\s+)?(?P<unit>[A-Za-z]{2,6})\s+(?P<qty>[\d.]+)\s+[\d,]+\s+(?P<amount>[\d,]+)$")
+    r"^\d+\s+(?:(?P<desc>.+?)\s+)?(?P<unit>[A-Za-z]{2,6})\s+(?P<qty>[\d.,]+)\s+[\d.,]+\s+(?P<amount>[\d.,]+)$")
+# 訂艙號碼 (Order No.)／括號內的號碼 (B/L NO.)，例如 "VN2085282 (620112501501)"；多筆用「/」分隔
+# 時 Order No. 用「, 」連接 (使用者 2026-11-10 答案)。整行獨立，不要跟其他文字黏在一起判斷。
+_MOLCS_REF_RE = re.compile(r"^((?:VN\d{7}/)*VN\d{7})(?:\s*\((\S+)\))?\s*$", re.MULTILINE)
 
 
 def _is_molcs(text: str) -> bool:
@@ -9033,12 +9037,46 @@ def _is_molcs(text: str) -> bool:
 
 
 def _molcs_pages(text: str) -> List[str]:
-    return [p for p in text.split(_CW_PAGE_MARK) if _is_molcs(p) and "Cộng tiền hàng" in p]
+    """一張發票可能跨 2 頁 (第 2 頁開頭印 "Tiep theo trang truoc")：從發票頁開始累積，
+    遇到有 "Cộng tiền hàng" (Total before VAT) 的頁才收尾成一張完整發票的文字 (使用者
+    2026-11-10 VN09 答案；之前只挑『當頁已經有 Cộng tiền hàng』會把跨頁發票的品項頁漏掉)。
+    MOL 改成 multi_page=True 逐頁呼叫後，這支函式常常只拿到『一頁』：有合計就直接收尾；
+    只有品項、沒有合計的那一頁 (例如跨頁發票的第 1 頁) 也要在迴圈結束時原樣吐出來，不要
+    因為沒看到合計就整頁丟掉——另一頁 (只有合計、沒有品項) 會在各自的呼叫裡吐出 VAT 列，
+    最後兩頁的列用同一個 invoice_no 合併 (見 _parse_multi_page_pdf())。"""
+    out: List[str] = []
+    buf: List[str] = []
+    for p in text.split(_CW_PAGE_MARK):
+        if not _is_molcs(p):
+            continue
+        buf.append(p)
+        if "Cộng tiền hàng" in p:
+            out.append("\n".join(buf))
+            buf = []
+    if buf:
+        out.append("\n".join(buf))
+    return out
 
 
-def _molcs_num(value: Optional[str]) -> Optional[int]:
-    digits = (value or "").replace(",", "")
-    return int(digits) if digits.isdigit() else None
+def _molcs_num(value: Optional[str]):
+    """'1,000,000'／'1.000.000'／'13.08'／'3,00' -> 數字。規則 (使用者 2026-11-10 答案)：
+    最後一個 '.'/',' 後面只有 1~2 位數字時，那個符號是小數點，其餘的 '.'/',' 都是千分位。"""
+    if not value:
+        return None
+    text = value.strip()
+    m = re.search(r"[.,](\d{1,2})$", text)
+    if m:
+        intpart = re.sub(r"[.,]", "", text[:m.start()])
+        try:
+            num = float(f"{intpart or '0'}.{m.group(1)}")
+        except ValueError:
+            return None
+    else:
+        digits = re.sub(r"[.,]", "", text)
+        if not digits.isdigit():
+            return None
+        num = float(digits)
+    return int(num) if num == int(num) else num
 
 
 def _molcs_parse_page(page: str) -> List[Dict]:
@@ -9055,41 +9093,153 @@ def _molcs_parse_page(page: str) -> List[Dict]:
             before = lines[i - 1] if i - 1 > last else ""
             after = lines[i + 1] if i + 1 < stop and not _MOLCS_ITEM_RE.match(lines[i + 1]) else ""
             desc = f"{before} {after}".strip()
+        # Volume = 這一列自己的 Số lượng + ĐVT (每個品項各自的單位不同，不是整張發票共用一個值，
+        # 使用者 2026-11-10 答案：「13.08 CBM」「1 SHPT」「3 Cont」)
         items.append({"description": desc, "amount": _molcs_num(m.group("amount")), "vat": None,
-                      "unit": m.group("unit"), "qty": m.group("qty")})
+                      "volume": f"{_molcs_num(m.group('qty'))} {m.group('unit')}"})
         last = i + (0 if m.group("desc") else 1)
-    remark = " ".join(lines[last + 1:stop])
-    no = _search(r"Số \(No\):\s*(\d+)", page)
-    ref = _search(r"\b(VN\d{7})\b", remark)
-    d = re.search(r"Ngày \(Date\)\s*(\d{1,2})\s*tháng \(month\)\s*(\d{1,2})\s*năm \(year\)\s*(\d{4})", page)
-    # 海運 "(Tàu MAERSK NACKA,chuyến số 534S, HO CHI MINH-UBERHERRN)"、
-    # 空運 "(Chuyến bay LH8021, HO CHI MINH- UBERHERRN)"
-    ship = (re.search(r"\(Tàu\s+(.+?),\s*chuyến số\s+(\S+?),\s*(.+?)-\s*(.+?)\)", remark)
-            or re.search(r"\(Chuyến\s+bay\s+(\S+?)()\s*,\s*(.+?)-\s*(.+?)\)", remark))
-    cbm = next((it["qty"] for it in items if it["unit"].upper() == "CBM"), None)
+    # 有些月結檔的版型 (例如電子發票檢視器 "Bản thể hiện của hóa đơn điện tử") 欄位是
+    # 「數值在前、英文標籤括號在下一行」(例如 "Ký hiệu 1C25TMC\n(Sign):")，跟一般版型
+    # 「標籤在前、數值接在後面」(例如 "Ký hiệu (Sign): 1C25TMC") 相反；兩種都要認得
+    # (使用者 2026-11-10 VN09 答案，同一份 PDF 兩種版型混用)。
+    series = (_search(r"Ký hiệu \(Sign\):\s*(\S+)", page)
+              or _search(r"Ký hiệu\s+(\S+)\s*\n\s*\(Sign\):", page))
+    no = (_search(r"Số\s*\(No\):\s*(\d+)", page)
+          or _search(r"Số\s+(\d+)\s*\n\s*\(No\):", page))
+    d = (re.search(r"Ngày\s*\(Date\)\s*(\d{1,2})\s*tháng\s*\(month\)\s*(\d{1,2})\s*năm\s*\(year\)\s*(\d{4})", page)
+         or re.search(r"Ngày\s+(\d{1,2})\s+tháng\s+(\d{1,2})\s+năm\s+(\d{4})\s*\n\s*\(Date\)", page))
+    ref_m = _MOLCS_REF_RE.search(page)
     rate = _search(r"VAT rate\):\s*(\d+)\s*%", page)
+    consignee_raw = (_search(r"Tên đơn vị \(Company's name\):\s*(.+)", page)
+                      or _search(r"Tên đơn vị\s+(.+?)\s*\n\s*\(Company's name\):", page))
     common = {
-        "invoice_no": no or ref, "invoice_date": _format_date_en(*d.groups()) if d else None,
-        "supplier": "CÔNG TY TNHH MOL CONSOLIDATION SERVICE (VIỆT NAM)",
-        "consignee": _search(r"Tên đơn vị \(Company's name\):\s*(.+)", page),
-        "bl_no": ref,
-        "vessel": (f"{ship.group(1)} / {ship.group(2)}" if ship.group(2) else ship.group(1)) if ship else None,
-        "port_of_loading": ship.group(3).strip() if ship else None,
-        "port_of_discharge": ship.group(4).strip() if ship else None,
-        "volume": f"{cbm} CBM" if cbm else None,
+        # Số 空白時只填 Ký hiệu (使用者 2026-11-10 答案，不要用訂艙號碼頂替)
+        "invoice_no": f"{series}-{no}" if series and no else series,
+        "invoice_date": _format_date_en(*d.groups()) if d else None,
+        "supplier": "MOL CONSOLIDATION SERVICE (VIETNAM) CO., LTD.",   # 英文名 (使用者 2026-11-10 答案)
+        "consignee": _vn_full_consignee(consignee_raw),
+        "order_no": ", ".join(ref_m.group(1).split("/")) if ref_m else "N/A",
+        "bl_no": (ref_m.group(2) if ref_m else None) or "N/A",
     }
-    rows = [{**common, "description": it["description"], "amount": it["amount"], "vat": None} for it in items]
-    vat = _molcs_num(_search(r"VAT amount\):\s*([\d,]+)", page))
-    if rows and vat is not None:
-        rows.append({**common, "description": f"Thuế GTGT {rate}%" if rate else "Thuế GTGT", "amount": None,
-                     "vat": vat})
+    rows = [{**common, **it} for it in items]
+    vat = (_molcs_num(_search(r"VAT amount\):\s*([\d.,]+)", page))
+           or _molcs_num(_search(r"([\d.,]+)\s*\n\s*\(VAT amount\):", page)))
+    if vat is not None:
+        # 不要求這一頁本身要有品項列才加 VAT 列：MOL 現在逐頁辨識/擷取 (multi_page=True)，
+        # 跨頁發票的合計常常印在「只有合計、沒有品項」的那一頁，兩頁各自的列最後靠
+        # invoice_no 合併 (使用者 2026-11-10 答案；見 _parse_multi_page_pdf())。
+        rows.append({**common, "description": f"VAT {rate}%" if rate else "VAT", "amount": None,
+                     "vat": vat, "volume": "N/A", "order_no": "N/A", "bl_no": "N/A"})
+    return rows
+
+
+# --- VN09 MOL LOGISTICS 空運 Debit Note (SAEM11Y… 開頭；跟上面海運 CargoWise Debit Note
+# (SSEM11Z… 開頭、走 _cw_parse()) 完全是兩種版型，不要共用規則；使用者 2026-11-10 答案) --------
+# 費用名稱跟代碼 (OAWBFEE/WAMS/OXRAY/OTHC) 疊字 (兩層文字幾乎同位置，pdfplumber 逐字抽出時交錯
+# 排列)，這份檔案目前只出現這 4 種，直接整句替換成乾淨文字；之後遇到新代碼再補進這個字典。
+_MOL_DN_CHARGE_GARBLE = {
+    "OPAhWí vBậFnE đEơn hàng không": "Phí vận đơn hàng không",
+    "WPAhMí ASMS": "Phí AMS",
+    "OPXhRí AsoYi chiếu": "Phí soi chiếu",
+    "OPThHí CXếp Dỡ": "Phí Xếp Dỡ",
+}
+_MOL_DN_EN_NOTE = {
+    "Phí vận đơn hàng không": "Air Waybill Fee",
+    "Phí AMS": "AMS Filing Fee",
+    "Phí soi chiếu": "X-ray Screening Fee",
+    "Phí Xếp Dỡ": "Terminal Handling / Loading-Unloading Fee",
+}
+_MOL_DN_ITEM_RE = re.compile(
+    r"^(?P<desc>.+?)\s+(?P<qty>[\d.]+)\s*-\s*(?P<unit>\S+)\s+(?P<rate>[\d.]+)\s+(?P<vatpct>\d+)\s*%\s+"
+    r"(?P<cur>[A-Z]{3})\.?\s+(?P<pdfamt>[\d.]+)$", re.MULTILINE)
+_MOL_DN_GROUP_RE = re.compile(
+    r"^(POUYUEN VIETNAM COMPANY LIMITED|POU (?:LI|HUNG|SUNG|CHEN) VIETNAM COMPANY LIMITED)\b")
+_MOL_DN_FLIGHT_RE = re.compile(r"^(\S+)\s*/\s*(\d{1,2}-[A-Za-z]{3})\s+(\d{5,})\s+(\S+)$", re.MULTILINE)
+
+
+def _is_mol_air_dn(text: str) -> bool:
+    return bool(re.match(r"\s*Debit Note - ", text)) and "FLIGHT / DATE" in text
+
+
+def _mol_air_dn_pages(text: str) -> List[str]:
+    """空運 Debit Note 每張都是 "Page 1 of 1" (使用者 2026-11-10 樣本 5 張都是)，不用像
+    molcs 那樣跨頁累積，一頁就是一張完整發票。"""
+    return [p for p in text.split(_CW_PAGE_MARK) if _is_mol_air_dn(p)]
+
+
+def _mol_dn_date(text: Optional[str]) -> Optional[str]:
+    """'02-Apr-25' (13:50 等時間丟棄) -> 標準日期字串。"""
+    m = re.match(r"(\d{1,2})-([A-Za-z]{3})-(\d{2})", text or "")
+    if not m:
+        return None
+    day, mon, yy = m.groups()
+    return _format_date_en_from_month_name(day, mon, 2000 + int(yy))
+
+
+def _parse_mol_air_dn(page: str) -> List[Dict]:
+    for garbled, clean in _MOL_DN_CHARGE_GARBLE.items():
+        page = page.replace(garbled, clean)
+    lines = page.splitlines()
+    h: Dict[str, Optional[str]] = {
+        "invoice_no": _search(r"SHIPMENT(\S+)", page),
+        # TOP20 英文名稱 (使用者指定)
+        "supplier": "MOL LOGISTICS TRANSPORTATION VIETNAM INC",
+        "invoice_date": _mol_dn_date(_search(r"DATE(\S+)", page)),
+    }
+    # CONSIGNEE = 帳單抬頭 ("公司名稱 SHIPMENT…" 兩欄黏在一起，取 SHIPMENT 前的部分)。用整段文字
+    # 搜尋這一行，不要用固定行號——多頁文件合併時，第 1 頁以外的每一頁開頭都會多一個空白行
+    # (invoice_text() 用 "\n".join() 接上 _cargowise_pages() 自帶的換行分頁記號)，行號會位移。
+    consignee_m = re.search(r"^(.+?)\s*SHIPMENT\S", page, re.MULTILINE)
+    h["consignee"] = _vn_full_consignee(consignee_m.group(1).strip()) if consignee_m else None
+    h["order_no"] = _search(r"P\.O\.#(\S+)", page) or "N/A"
+
+    flight_m = _MOL_DN_FLIGHT_RE.search(page)
+    if flight_m:
+        h["vessel"] = f"{flight_m.group(1)} / {flight_m.group(2)} (Flight)"
+        h["mbl_no"], h["bl_no"] = flight_m.group(3), flight_m.group(4)
+
+    vol_m = re.search(r"([\d.]+)\s*M3", page)
+    h["volume"] = f"{vol_m.group(1)} M3" if vol_m else None
+
+    # ORIGIN/ETD/DESTINATION/ETA 這一列有時因為目的港名稱太長換行 (例如 "...International Apt,"
+    # 换行後接 "China")，先把標籤列到 "CHARGE DESCRIPTION" 之間的文字合併成一行再抓。
+    label_idx = next((i for i, ln in enumerate(lines) if ln.startswith("ORIGIN") and "ETD" in ln), None)
+    charge_idx = next((i for i, ln in enumerate(lines) if ln.startswith("CHARGE DESCRIPTION")), len(lines))
+    if label_idx is not None:
+        blob = " ".join(ln.strip() for ln in lines[label_idx + 1:charge_idx])
+        m = re.match(r"^(.+?)\s+(\d{1,2}-[A-Za-z]{3}-\d{2})\s+(.+?)\s+(\d{1,2}-[A-Za-z]{3}-\d{2})$", blob)
+        if m:
+            h["port_of_loading"], h["onboard_date"] = m.group(1), _mol_dn_date(m.group(2))
+            h["port_of_discharge"], h["arrive_date"] = m.group(3), _mol_dn_date(m.group(4))
+
+    shipper_idx = next((i for i, ln in enumerate(lines) if ln.strip() == "SHIPPER CONSIGNEE"), None)
+    if shipper_idx is not None and shipper_idx + 1 < len(lines):
+        sm = _MOL_DN_GROUP_RE.match(lines[shipper_idx + 1].strip())
+        if sm:
+            h["shipper"] = sm.group(1)
+
+    rows = []
+    for m in _MOL_DN_ITEM_RE.finditer(page):
+        desc = m.group("desc").strip()
+        qty, rate, pdf_amt = float(m.group("qty")), float(m.group("rate")), float(m.group("pdfamt"))
+        amount = round(qty * rate, 2)
+        vat = round(pdf_amt - amount, 2)
+        en = _MOL_DN_EN_NOTE.get(desc)
+        # 英文備註 + 幣別備註都直接寫在 description 裡 (位置不是句尾，不是 english_note() 自動
+        # 加得出來的格式，使用者 2026-11-10 答案："Phí AMS (AMS Filing Fee) (USD)")
+        full_desc = f"{desc} ({en}) (USD)" if en else f"{desc} (USD)"
+        rows.append({**h, "description": full_desc, "amount": amount, "vat": vat})
     return rows
 
 
 def parse_mol(text: str) -> Dict:
-    if _is_molcs(text):
-        rows = [r for p in _molcs_pages(text) for r in _molcs_parse_page(p)]
-        return {"header": {}, "items": rows or [{"description": None, "amount": None}]}
+    # 一份 PDF 可能同時混 VAT 發票 (molcs) 跟空運 Debit Note 兩種頁面 (使用者 2026-11-10
+    # VN09 答案)，不能用單一 if/elif 二選一，要各自找出自己的頁面分別處理、合併結果；完全沒有
+    # 這兩種頁面時 (舊樣本只有海運 Debit Note)，照舊退回 _cw_parse()。
+    rows = [r for p in _molcs_pages(text) for r in _molcs_parse_page(p)]
+    rows += [r for p in _mol_air_dn_pages(text) for r in _parse_mol_air_dn(p)]
+    if rows:
+        return {"header": {}, "items": rows}
     return _cw_parse(text, "MOL Logistics Vietnam Inc")
 
 
@@ -9098,14 +9248,28 @@ def _mol_totals(text: str, label: str):
     for p in _molcs_pages(text):
         rows = _molcs_parse_page(p)
         if rows:
-            out[rows[0]["invoice_no"]] = _molcs_num(_search(label + r"\):\s*([\d,]+)", p))
+            # 標籤/數值順序可能相反 (見 _molcs_parse_page() 說明)，兩種都要試。
+            value = (_search(label + r"\):\s*([\d.,]+)", p)
+                     or _search(r"([\d.,]+)\s*\n\s*\(" + label + r"\):", p))
+            out[rows[0]["invoice_no"]] = _molcs_num(value)
+    return out
+
+
+def _mol_grand_total(text: str):
+    # 一份 PDF 可能同時混 molcs VAT 發票跟 Debit Note (海運/空運)，兩種各自的含稅總額都要
+    # 合併進同一份勾稽結果，不能只挑其中一種 (使用者 2026-11-10 VN09 答案)。
+    out = dict(_mol_totals(text, r"Total amount")) if _is_molcs(text) else {}
+    out.update(_cw_extract_grand_total(text) or {})
     return out
 
 
 register_supplier(
     "MOL", "MOL LOGISTICS VIETNAM INC", detect_mol, parse_mol,
+    # 一份 PDF 可能混好幾張各自獨立的發票 (VAT 發票 + 空運/海運 Debit Note)，改成逐頁
+    # 辨識/擷取，比對時才會用 invoice_no 各自分組 (使用者 2026-11-10 VN09 答案)。
+    multi_page=True,
     extract_total=lambda t: _mol_totals(t, r"Total before VAT") if _is_molcs(t) else None,
-    extract_grand_total=lambda t: _mol_totals(t, r"Total amount") if _is_molcs(t) else _cw_extract_grand_total(t),
+    extract_grand_total=_mol_grand_total,
     page_text=_cargowise_pages,
 )
 
