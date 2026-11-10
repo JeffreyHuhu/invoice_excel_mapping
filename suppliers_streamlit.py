@@ -9573,6 +9573,12 @@ def _vt_parse_sheet(name: str, rows: List[list], cfg: Dict, supplier: str,
             # {shd}：費用欄左邊一欄的 SHĐ 憑證號碼 (VN16 Cont 表 NÂNG/HẠ/CÂN)，空白時整段括號不要
             shd = _vn_text(_vn_cell(row, col - 1))
             return desc.replace(" (SHĐ {shd})", f" (SHĐ {shd})" if shd else "").replace("{shd}", shd)
+        if "{rmb}" in desc and col:
+            # {rmb}：費用欄左邊一欄的 RMB 原幣金額，千分位逗號、小數照原樣 (VN12 NGUYÊN HƯỞNG
+            # 答案："air freight (RMB 6,408)"，2026-11-10)
+            rmb = _vn_num(_vn_cell(row, col - 1))
+            text = (f"{int(rmb):,}" if float(rmb).is_integer() else f"{rmb:,}") if rmb else ""
+            return desc.replace("{rmb}", f"RMB {text}" if text else "")
         if "{pct}" not in desc:
             return desc
         v = _vn_num(_vn_cell(row, pct_col)) if pct_col is not None else None
@@ -9796,7 +9802,12 @@ def _vt_parse_sheet(name: str, rows: List[list], cfg: Dict, supplier: str,
             yy = d_cell.year % 100 if isinstance(d_cell, (datetime.date, datetime.datetime)) else 0
             key = cfg["inv_series"].format(yy=f"{yy:02d}") + "-" + str(key).zfill(8)
         last_key = key
-        if not doc_key and cfg.get("inv_col"):
+        if not doc_key and cfg.get("date_key"):
+            # 沒有整張發票符號時，改用這一列自己的 Pickup Date (yyyy/mm/dd) 當發票號碼
+            # (VN12 NGUYÊN HƯỞNG 舊版答案，2026-11-10)
+            d_cell = _vn_cell(row, col["date"]) if col.get("date") is not None else None
+            key = d_cell.strftime("%Y/%m/%d") if isinstance(d_cell, (datetime.date, datetime.datetime)) else "N/A"
+        elif not doc_key and cfg.get("inv_col"):
             # 沒有整張的發票號碼 (doc_key) 時，改用 Inv# 欄當每一列的發票號碼 (不是 BOOKING
             # NO)；這張表沒有 Inv# 欄就填 N/A (VN11 答案：01-2025 TRUCK EXPORT 有 Inv# 欄、
             # POUYUEN DN 沒有，2026-11-10)
@@ -9899,9 +9910,11 @@ def _vt_parse_sheet(name: str, rows: List[list], cfg: Dict, supplier: str,
                 net = math.floor(gross / 1.08 + 0.5)
                 it["amount"], it["vat"] = net, gross - net
         if cfg.get("vat_zero_desc"):
-            # vat_zero_desc：這些費用名稱的 VAT 寫 0 (VN12 空運費免稅，2026-11-06 新答案)
+            # vat_zero_desc：這些費用名稱的 VAT 寫 0 (VN12 空運費免稅，2026-11-06 新答案)；
+            # 用開頭比對 (不要求完全相等)，因為費用名稱後面可能接原幣金額備註
+            # (VN12 "air freight (RMB 6,408)"，2026-11-10 新答案)
             for it in row_items:
-                if str(it["description"]).upper() in cfg["vat_zero_desc"]:
+                if str(it["description"]).upper().startswith(cfg["vat_zero_desc"]):
                     it["vat"] = 0
         if cfg.get("vat_of_amount"):
             # vat_of_amount：未稅金額 × 8% 寫在同一列 (VN02 NEO-DD 答案)
@@ -11194,20 +11207,44 @@ _vt_register("BINH_TAN", "HỢP TÁC XÃ VẬN TẢI DỊCH VỤ DU LỊCH BÌNH
 
 
 # --- VN12 NGUYÊN HƯỞNG (空運請款) ---------------------------------------------
-# 每項費用都有 RMB 與 VND 兩欄，只取 VND；發票號碼 = Waybill number。
+# 每項費用都有 RMB 與 VND 兩欄，只取 VND；Description 接上 RMB 原幣金額 (使用者
+# 2026-11-10 新答案："air freight (RMB 6,408)"、"Customs fees (RMB 150 / bill)")。
+# 舊版 (T01-2025) 比新版少 1 欄 (沒有城市欄)，用 "SAP" 欄位區分版型 (name_require)，
+# 一定要排在新版前面：舊版沒有「ĐÍNH KÈM HĐ SỐ」字軌，INVOICE NO 改用 Pickup Date
+# (yyyy/mm/dd)；Port of Loading 填 N/A (沒有城市欄，不可套新版寫死的欄號 2)。
+_VT_NGUYEN_HUONG_FEES = [
+    ("AIR FREIGHT VND", "air freight ({rmb})"), ("CUSTOMS FEES (BILL) VND", "Customs fees ({rmb} / bill)"),
+    ("BILL OF LADING FEE (BILL) VND", "Bill of lading fee ({rmb} / bill)"),
+    ("ADDITIONAL FEE (BILL) VND", "Additional fee ({rmb} / bill)"),
+    ("WAREHOUSING FEE (BILL) VND", "Warehousing fee ({rmb} / bill)"),
+    ("PAD EXPENSE VND", "Pad expense ({rmb})"), ("D/O (BILL) VND", "D/O (VND / bill)"),
+]
 _VT_NGUYEN_HUONG = [
-    (r".", {"header": "WAYBILL", "key": ["WAYBILL"],
+    # 只讀「空运请款」：sap、cps 是空白舊模板 (合計列都是 0，不會真的匯出資料，但
+    # 名稱比對限制到這張也比較保險)；Sheet1 有時整張複製「空运请款」(例如
+    # T3-2026)，但沒有表頭的「ĐÍNH KÈM HĐ SỐ」字軌，發票號碼會變成逐票的
+    # Waybill number，跟「空运请款」(整張一個字軌) 比對不出內容相同而被誤判成
+    # 兩份不同資料 (使用者 2026-11-10 答案：Sheet1 內容相同只能算 1 份)。
+    (r"空运请款", {"header": "WAYBILL", "key": ["WAYBILL"], "name_require": "SAP",
+            "date_key": True, "vat_zero_desc": ("AIR FREIGHT",),
+            "vat_total": "VAT 8%", "vat_desc": "VAT 8%", "vat_last": True,
+            # 舊版 VAT 列連 INVOICE NO 也填 N/A (跟新版不同，新版用字軌)，2026-11-10 答案
+            "vat_na_fields": ("invoice_no", "invoice_date", "bl_no", "order_no", "volume",
+                              "port_of_loading", "port_of_discharge", "vessel", "container_no",
+                              "shipper", "onboard_date", "arrive_date"),
+            "fees": _VT_NGUYEN_HUONG_FEES, "const": {"port_of_loading": "N/A"},
+            "total": "TOTAL AMOUNT VND", "date": "PICKUP DATE", "kg": "WEIGHT",
+            "fields": {"bl_no": "WAYBILL", "shipper": "=SHIPPER"}}),
+    (r"空运请款", {"header": "WAYBILL", "key": ["WAYBILL"],
             # 發票號碼 = 表頭「ĐÍNH KÈM HĐ SỐ」的字軌 (1C26TNH-，只取字軌) (VN12 新答案，2026-11-06)
             "doc_key": r"(\d[A-Z]\d{2}[A-Z]{3})-",
             "vat_zero_desc": ("AIR FREIGHT",),
             # 表尾整張 VAT 8% 列：發票號碼 = 字軌，日期/提單等填 N/A (2026-11-06 新答案)
             "vat_total": "VAT 8%", "vat_desc": "VAT 8%", "vat_no_date": True, "vat_last": True,
-            "fees": [("AIR FREIGHT VND", "Air freight"), ("CUSTOMS FEES (BILL) VND", "Customs fees"),
-                     ("BILL OF LADING FEE (BILL) VND", "Bill of lading fee"),
-                     ("ADDITIONAL FEE (BILL) VND", "Additional fee"),
-                     ("WAREHOUSING FEE (BILL) VND", "Warehousing fee"),
-                     ("PAD EXPENSE VND", "Pad expense"), ("D/O (BILL) VND", "D/O")],
+            "fees": _VT_NGUYEN_HUONG_FEES,
             "total": "TOTAL AMOUNT VND", "date": "PICKUP DATE", "kg": "WEIGHT",
+            # port_of_loading 欄位 (城市) 沒有表頭文字 (合併儲存格留白)，只能寫死欄號；
+            # 新版固定排在 Waybill number 前一欄 (使用者 2026-11-06 答案)
             "fields": {"bl_no": "WAYBILL", "shipper": "=SHIPPER", "port_of_loading": 2}}),
 ]
 
