@@ -9550,6 +9550,10 @@ def _vt_parse_sheet(name: str, rows: List[list], cfg: Dict, supplier: str,
     col = {k: find(v) for k, v in cfg.items()
            if k in ("total", "total_add", "grand", "vat", "date", "cbm", "kg", "port", "group_col", "base_key")}
     keys = [_vt_col(labels, k) for k in cfg["key"]]
+    # inv_col：整張沒有單一發票號碼 (doc_key) 時，改用這一欄當每一列的發票號碼 (VN APL
+    # Inv# 欄，原文照填包含 "+" 連接符號)；這一欄不存在 (例如 POUYUEN DN 沒有 Inv# 欄) 時
+    # 答案要求填 N/A，不要退回用 BOOKING NO 當發票號碼 (2026-11-10 VN11 答案)
+    inv_col = _vt_col(labels, cfg["inv_col"]) if cfg.get("inv_col") else None
     # volume_raw：材積直接照表上的數字 (樣本答案 VN06 IMP/EXP，2026-11-04)，依序取第一個有值的欄
     raw_vol_cols = [_vt_col(labels, k) for k in cfg.get("volume_raw", ())]
     # pct_col：費用名稱裡 "{pct}" 代入的百分比欄 (樣本答案 VN06 NB 的 FUEL SURCHARGE 16%，2026-11-05)
@@ -9662,15 +9666,31 @@ def _vt_parse_sheet(name: str, rows: List[list], cfg: Dict, supplier: str,
             common["invoice_date"] = _format_date_en(m_md.group(2), m_md.group(1), year_hint)
     doc_key = None
     if cfg.get("doc_key"):
-        # 整張對帳表一個號碼 (例如 VN19 "Mã bảng kê: PYV260901"、VN11 表尾
-        # "Invoice No.: 28433")：當發票號碼
-        all_text = " ".join(_vn_text(c) for r in rows for c in r if c not in (None, ""))
-        m_doc = re.search(cfg["doc_key"], all_text)
-        doc_key = m_doc.group(1) if m_doc else None
+        if cfg.get("doc_key_col") is not None:
+            # doc_key_col：標籤跟數值隔著空白欄，數值固定在同一列的某一欄 (VN APL 表尾
+            # "Invoice No.:" 那一列)。不可用整本攤平後「下一個非空白儲存格」找——數值欄
+            # 剛好空白時會撈到隔壁無關的計算數字 (例如 "Local invoice No.:" 那一列隔壁
+            # 欄剛好有個不相干的小計 140.6316，2026-11-10 VN11 TRUCK EXPORT 答案)
+            match_row = next((r for r in rows
+                              if any(isinstance(c, str) and re.search(cfg["doc_key"], c) for c in r)), None)
+            doc_key = (_vn_text(_vn_cell(match_row, cfg["doc_key_col"])) or None) if match_row else None
+        else:
+            # 整張對帳表一個號碼 (例如 VN19 "Mã bảng kê: PYV260901"、VN11 表尾
+            # "Invoice No.: 28433")：當發票號碼
+            all_text = " ".join(_vn_text(c) for r in rows for c in r if c not in (None, ""))
+            m_doc = re.search(cfg["doc_key"], all_text)
+            doc_key = m_doc.group(1) if m_doc else None
     if cfg.get("order_doc"):
-        # order_doc：整張工作表一個 Order No. (VN APL 答案：Local invoice No.，2026-11-06)
-        m_order = re.search(cfg["order_doc"], " ".join(_vn_text(c) for r in rows for c in r if c not in (None, "")))
-        common["order_no"] = m_order.group(1) if m_order else None
+        if cfg.get("order_doc_col") is not None:
+            # order_doc_col：同 doc_key_col，數值固定欄位，不用攤平找「下一個非空白」
+            match_row = next((r for r in rows
+                              if any(isinstance(c, str) and re.search(cfg["order_doc"], c) for c in r)), None)
+            common["order_no"] = (_vn_text(_vn_cell(match_row, cfg["order_doc_col"])) or "N/A") \
+                if match_row else "N/A"
+        else:
+            # order_doc：整張工作表一個 Order No. (VN APL 答案：Local invoice No.，2026-11-06)
+            m_order = re.search(cfg["order_doc"], " ".join(_vn_text(c) for r in rows for c in r if c not in (None, "")))
+            common["order_no"] = m_order.group(1) if m_order else None
     if "doc_const" in cfg:
         # doc_const：整張工作表固定的發票號碼 (VN02 CHI HỘ 工作表沒有字軌，填 N/A)
         doc_key = cfg["doc_const"]
@@ -9776,8 +9796,15 @@ def _vt_parse_sheet(name: str, rows: List[list], cfg: Dict, supplier: str,
             yy = d_cell.year % 100 if isinstance(d_cell, (datetime.date, datetime.datetime)) else 0
             key = cfg["inv_series"].format(yy=f"{yy:02d}") + "-" + str(key).zfill(8)
         last_key = key
+        if not doc_key and cfg.get("inv_col"):
+            # 沒有整張的發票號碼 (doc_key) 時，改用 Inv# 欄當每一列的發票號碼 (不是 BOOKING
+            # NO)；這張表沒有 Inv# 欄就填 N/A (VN11 答案：01-2025 TRUCK EXPORT 有 Inv# 欄、
+            # POUYUEN DN 沒有，2026-11-10)
+            raw_inv = _vn_text(_vn_cell(row, inv_col)) if inv_col is not None else None
+            key = raw_inv.lstrip("'") if raw_inv else "N/A"
         # vat_doc_only：對帳表號只給整張的 VAT 列用，費用列用自己的號碼 (VN11 Inv#)
-        key = key if cfg.get("vat_doc_only") else (doc_key or key)
+        else:
+            key = key if cfg.get("vat_doc_only") else (doc_key or key)
         head = dict(common, invoice_no=key)
         for code, c in fields.items():
             if c is not None and _vn_text(_vn_cell(row, c)):
@@ -9835,9 +9862,6 @@ def _vt_parse_sheet(name: str, rows: List[list], cfg: Dict, supplier: str,
             vraw = _vn_text(_vn_cell(row, cfg["volume_col"]))
             if vraw:
                 head["volume"] = (cfg.get("volume_prefix") or "") + vraw
-        if cfg.get("box_x_space") and head.get("volume"):
-            # box_x_space：櫃型寫成 "1 x 40'" (VN02 YUEDE 新答案，2026-11-05)
-            head["volume"] = re.sub(r"(\d+)X(\d+)", r"\1 x \2'", head["volume"])
         raw_vol = next((_vn_cell(row, c) for c in raw_vol_cols if c is not None and _vn_text(_vn_cell(row, c))), None)
         if raw_vol is not None:
             # 數字照原樣 (1.129、20)，文字照原文 ("40HC")
@@ -10792,7 +10816,6 @@ _VT_VHL_COMMON = {
     # 發票號碼 = 表頭「Đính kèm hóa đơn số」下方的字軌 (1C26TYY 這種，只取字軌)，2026-11-05 依新答案
     "doc_key": r"\b(\d[A-Z]\d{2}[A-Z]{3})\b",
     "gross_vat": True,
-    "box_x_space": True,
     "date": "NGAY HOAN THANH", "boxes": {"20": "LOAI CONT 20'", "40": "LOAI CONT 40'", "45": "LOAI CONT 45'"},
     "fields": {"container_no": "SO CONTAINER", "port_of_loading": ("CANG LAY", "=CANG"),
                "port_of_discharge": ("CANG HA", "CANG TRA")},
@@ -12521,11 +12544,15 @@ def apl_vn_invoice_page(page: str) -> bool:
 
 _APL_VN_SHEET = [
     # POU HUNG 對帳表 (VND 工作表，2026-11-06 新答案)：只取 DET 欄，費用名稱 = "DET - " + 備註；
-    # 發票號碼 = Invoice No. (整張)；Order No. = Local invoice No.；B/L = Booking No.；櫃型寫成 "1 x 40HC"
-    (r".", {"header": "BOOKING NO", "key": ["BOOKING NO"],
+    # 發票號碼 = Invoice No. (整張，表尾固定在同一欄，見 doc_key_col)；沒有 Invoice No. 時改用
+    # 每一列自己的 Inv# 欄 (原文照填含 "+")，連 Inv# 欄都沒有就填 N/A，不要退回用 Booking No.
+    # 當發票號碼 (2026-11-10 VN11 答案：01-2025 TRUCK EXPORT 有 Inv# 欄、POUYUEN DN 沒有)；
+    # Order No. = Local invoice No.；B/L = Booking No.；櫃型寫成 "1X40HC" (2026-11-10 使用者
+    # 決定跟其他供應商統一用這個格式，不用 VN11 答案原文的「1 x 40HC」)
+    (r".", {"header": "BOOKING NO", "key": ["BOOKING NO"], "inv_col": "Inv#",
             "fees": [("DET", "DET - {desc_col}")], "desc_col": "REMARKS",
-            "total": "TOTAL ( VND )", "doc_key": r"Invoice No\.:\s*(\d+)",
-            "order_doc": r"Local invoice No\.:\s*(\S+)", "doc_date": "INVOICE DATE",
+            "total": "TOTAL ( VND )", "doc_key": r"Invoice No\.:", "doc_key_col": 12,
+            "order_doc": r"Local invoice No\.:", "order_doc_col": 12, "doc_date": "INVOICE DATE",
             "vat_total": "TOTAL VAT AMOUNT", "vat_desc": "TOTAL VAT AMOUNT IN VND",
             "fields": {"container_no": "CONTAINER NUMBER", "bl_no": "BOOKING NO"},
             "volume_col": 3, "volume_prefix": "1X", "vat_last": True,
