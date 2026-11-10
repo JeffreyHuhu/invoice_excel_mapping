@@ -8366,15 +8366,22 @@ def _parse_dsv_vn_einvoice(text: str) -> Dict:
 #       可能是純數字 (空運 507586059429)。_cargowise_pages() 用 pdfplumber 表格附上
 #       "##DSVHDR## 欄名 | …" 與 "##DSVROW## 值 | …"，這裡依欄名對應：RATE 與
 #       Thành tiền trước thuế 之間是費用，Thuế 8% VAT 單獨一筆，每票 (SWB) 自己勾稽。
-def _dsv_vn_grid_lines(page) -> str:
+def _dsv_vn_grid_lines(page, year: Optional[str]) -> str:
+    """year：這個版面沒有任何欄位寫年份 (DATE 只有「27-Mar」)，從檔名補 (使用者
+    2026-11-09 抽查 "...BY WEEKLY" 低等級批次；_cargowise_pages() 從檔名抓年份)。
+    用額外一欄 "YEAR" 夾進每一列，_dsv_vn_grid_rows() 當備援年份來源。"""
     out = ""
     for table in page.extract_tables() or []:
-        if not table or not any("SOA" in (c or "") for c in table[0]):
+        # "SOA" 是舊字型編碼 ("SOÁ SWB")；新樣本的表頭是乾淨的 "Số SWB"，用 "SWB"
+        # 本身比對兩種編碼都抓得到
+        if not table or not any("SWB" in (c or "") for c in table[0]):
             continue
         cell = lambda c: re.sub(r"\s+", " ", c or "").strip()  # noqa: E731
-        out += "\n##DSVHDR## " + " | ".join(cell(c) for c in table[0])
+        header = [cell(c) for c in table[0]] + (["YEAR"] if year else [])
+        out += "\n##DSVHDR## " + " | ".join(header)
         for row in table[1:]:
-            out += "\n##DSVROW## " + " | ".join(cell(c) for c in row)
+            cells = [cell(c) for c in row] + ([year] if year else [])
+            out += "\n##DSVROW## " + " | ".join(cells)
     return out
 
 
@@ -8401,13 +8408,16 @@ def _dsv_vn_grid_rows(text: str) -> List[Dict]:
         total_label = next((lb for lb in labels if lb.startswith("Tổng")), None)
         if start is None or end is None:
             continue
-        soa = re.search(r"(\d{4})$", cells.get("SOA #", ""))
+        # SOA #/SO# 通常是空的，這個版面的年份要靠檔名 (YEAR 欄，_dsv_vn_grid_lines() 補的)
+        soa = re.search(r"(\d{4})$", cells.get("SOA #", "") or cells.get("SO#", ""))
+        year = soa.group(1) if soa else cells.get("YEAR")
         day = re.fullmatch(r"(\d{1,2})-([A-Za-z]{3})", cells.get("DATE", ""))
         rows.append({
             "swb": swb, "fcr": cells.get("FCR") or None, "po": cells.get("PO#") or None,
-            "date": _format_date_en_from_month_name(day.group(1), day.group(2), soa.group(1))
-            if day and soa else None,
-            "cbm": cells.get("CBM") or None,
+            "date": _format_date_en_from_month_name(day.group(1), day.group(2), year)
+            if day and year else None,
+            # CBM 偶爾被表格線切成兩段 ("1 .609")，去掉中間的空白接回去
+            "cbm": re.sub(r"(?<=\d)\s+(?=[.,]?\d)", "", cells.get("CBM") or "") or None,
             "fees": [(labels[i], _dsv_vn_grid_num(cells.get(labels[i]))) for i in range(start, end)],
             "subtotal": _dsv_vn_grid_num(cells.get(labels[end])),
             "vat_desc": vat_label, "vat": _dsv_vn_grid_num(cells.get(vat_label)) if vat_label else None,
@@ -8440,10 +8450,24 @@ def parse_dsv_vn(text: str) -> Dict:
     return _cw_parse(text, _search(r"(DSV Air & Sea Company Limited)", text))
 
 
+def _dsv_vn_sum_by_swb(rows: List[Dict], field: str) -> Dict[str, float]:
+    """同一個 SWB 在「每週合輯」可能分兩週出現 (同票貨分兩次收費，日期不同)，
+    明細 (_group_rows_by_invoice) 會把兩次的費用列合併成一組，這裡的總額也要
+    用加總、不能互相覆蓋，才會跟合併後的明細加總一致 (使用者 2026-11-09 抽查
+    DSV_VN「BY WEEKLY」批次，JUL.2026/OCT.2025/SEP.2025 各有一組 SWB 這樣分兩週)。"""
+    totals: Dict[str, float] = {}
+    for r in rows:
+        value = r.get(field)
+        if value is None:
+            continue
+        totals[r["swb"]] = totals.get(r["swb"], 0) + value
+    return totals
+
+
 def _dsv_vn_extract_total(text: str):
     """未稅總額：對帳表是每票 Thành tiền trước thuế；PRO FORMA 是每張 SUBTOTAL。"""
     if "##DSVROW## " in text:
-        return {r["swb"]: r["subtotal"] for r in _dsv_vn_grid_rows(text)}
+        return _dsv_vn_sum_by_swb(_dsv_vn_grid_rows(text), "subtotal")
     if _is_dsv_vn_einvoice(text):
         return _dsv_vn_dot_amount(_search(r"Cộng doanh thu trên hóa đơn \(Amount\)\s*:\s*([\d.]+)", text))
     rows = _dsv_vn_table_rows(text)
@@ -8452,7 +8476,7 @@ def _dsv_vn_extract_total(text: str):
 
 def _dsv_vn_extract_grand_total(text: str):
     if "##DSVROW## " in text:
-        return {r["swb"]: r["total"] for r in _dsv_vn_grid_rows(text)}
+        return _dsv_vn_sum_by_swb(_dsv_vn_grid_rows(text), "total")
     if _is_dsv_vn_einvoice(text):
         return _dsv_vn_dot_amount(_search(r"\(Total amount\)\s*:\s*([\d.]+)", text))
     rows = _dsv_vn_table_rows(text)
@@ -8488,6 +8512,9 @@ def _cargowise_pages(pdf_path: str) -> List[str]:
     import pdfplumber
     from extract_utils_streamlit import _ocr_page_with_psm
     pages = []
+    # DSV "BY WEEKLY" 版面的年份要從檔名補 (見 _dsv_vn_grid_lines())
+    dsv_year_m = re.search(r"(?<!\d)(20\d{2})(?!\d)", os.path.basename(pdf_path))
+    dsv_year = dsv_year_m.group(1) if dsv_year_m else None
     with pdfplumber.open(pdf_path) as pdf:
         for page_index, pg in enumerate(limited_pages(pdf)):
             if not any(c["text"].strip() for c in pg.chars):
@@ -8550,8 +8577,10 @@ def _cargowise_pages(pdf_path: str) -> List[str]:
                                and w["x0"] < cons["x0"] - 1), key=lambda w: w["x0"])
                 if line:
                     text += "\n##SHIPPER## " + " ".join(w["text"] for w in line)
-            if "SOA #" in text and "SWB" in text:
-                text += _dsv_vn_grid_lines(clean)
+            # "SOA #" 是舊字型編碼的 "SO#"；新樣本是乾淨編碼，只用 "SWB" 判斷就夠
+            # (使用者 2026-11-09 抽查 "...BY WEEKLY" 低等級批次)
+            if "SWB" in text:
+                text += _dsv_vn_grid_lines(clean, dsv_year)
             if ("TOTAL CHARGES" in text and not _CW_CHARGE_RE.search(text)
                     and not re.search(r"SUBTOTAL\s*:?\s*\d", text)):
                 # 費用表的字型沒有文字編碼 (畫面看得到，文字層沒有)：整頁改用 OCR
@@ -11503,43 +11532,103 @@ def _vn_pdf_date(text: Optional[str]) -> Optional[str]:
 
 
 # --- VN07 MAERSK LOGISTICS & SERVICES VIỆT NAM ---------------------------------
-# PDF：電子發票，費用行 "Phí xếp dỡ hàng hóa FCR001555329 VND M3 29.682 423,040 8% 12,556,673"
-# (名稱、FCR、幣別、單位、數量、單價、稅率、未稅金額)，稅額只有總數 -> 單獨一筆 VAT。
+# 一份大檔 PDF (396 頁) 混 3 種頁面 (使用者 2026-11-09 VN07_Claude_Code_修改說明)：
+#  (A) 一般電子發票，費用行 "Phí xếp dỡ hàng hóa SGN5049893 VND M3 3.896 280,709 8% 1,093,642"
+#      (名稱、FCR、幣別、單位、數量、單價、稅率、未稅金額)，稅額只有總數 -> 單獨一筆 VAT。
+#  (B) 字型缺字頁：越南文字母被 pdfplumber 讀成 "(cid:NN)" (例如 "Phí x(cid:1)p d(cid:2) hàng
+#      hóa")，但英文數字、ASCII 字母、括號內英文標籤都正常。表頭/合計一律只認英文標籤 (不要用
+#      越南文標籤，會因為缺字對不到)；品名用「去掉 (cid:NN) 後只留 A-Z/a-z」當 key 對應回正確
+#      品名 (A/B 兩種頁面同一套邏輯，不用另外分支判斷)。
+#  (C) MAERSK VIỆT NAM (船公司代收運費) 頁，表頭/費用列完全不同版型，見 _maersk_vn_carrier()。
 # Excel：Late come charge 對帳表，每列有自己的發票號碼 (INVOICE NO.)。
 _MAERSK_VN_ITEM_RE = re.compile(
     # 參考號碼也可能數字開頭 ("26HCM0018482"，2026-10-28 抽樣)
     r"^(?P<desc>.+?)\s+(?P<ref>FCR\d+|[A-Z]{3,}\d{5,}|\d{2}[A-Z]{2,4}\d{5,})\s+(?P<cur>[A-Z]{3})\s+(?P<unit>\S+)\s+"
     r"(?P<qty>[\d,.]+)\s+(?P<price>[\d,.]+)\s+(?P<rate>\d+%|KCT)\s+(?P<amount>[\d,.]+)$", re.MULTILINE)
 
+# (B) 字型缺字頁的品名修正字典：key 是「去掉 (cid:NN)、只留字母」的比對鍵 (例如 "Phí xếp dỡ
+# hàng hóa" 跟缺字的 "Phí x(cid:1)p d(cid:2) hàng hóa" 都會得到同一個鍵 "Phxpdhngha")，value 是
+# 正常頁的完整品名。對不到就照原文 (之後遇到新品名，依使用者確認的統一費用對照表補進這份清單)。
+_MAERSK_VN_KNOWN_DESCS = (
+    "Phí xếp dỡ hàng hóa", "Phí xếp dỡ container tại cảng đi", "Phí phát hành FCR",
+    "Phí cầu cảng", "Phí khai báo tổng trọng lượng (VGM)", "Phí quản lý chứng từ",
+    "Phí niêm chì hãng tàu", "Phí chứng từ - cảng đi", "Phí phát hành vận đơn",
+    "Phí dịch vụ quản lý khách hàng",
+)
+
+
+def _maersk_vn_desc_key(text: str) -> str:
+    cleaned = re.sub(r"\(cid:\d+\)", "", text or "")
+    return re.sub(r"[^A-Za-z]", "", cleaned)
+
+
+_MAERSK_VN_DESC_BY_KEY = {_maersk_vn_desc_key(d): d for d in _MAERSK_VN_KNOWN_DESCS}
+
+
+def _maersk_vn_fix_desc(desc: str) -> str:
+    if "(cid:" not in desc:
+        return desc
+    return _MAERSK_VN_DESC_BY_KEY.get(_maersk_vn_desc_key(desc), desc)
+
+
+def _maersk_vn_is_carrier(text: str) -> bool:
+    """(C) MAERSK VIỆT NAM 船公司代收頁 (跟 (A)/(B) MAERSK LOGISTICS & SERVICES 電子發票完全不同版型)。"""
+    upper = text.upper()
+    return "MAERSK VIETNAM LIMITED" in upper or "AS AGENT FOR CARRIER MAERSK" in upper
+
 
 def detect_maersk_vn(text: str) -> bool:
     upper = text.upper()
-    return "MAERSK LOGISTICS & SERVICES VI" in upper or (
-        "MAERSK" in upper and "LATE COME CHARGE" in upper)
+    if "MAERSK LOGISTICS & SERVICES VI" in upper or _maersk_vn_is_carrier(text):
+        return True
+    return "MAERSK" in upper and "LATE COME CHARGE" in upper
 
 
 def parse_maersk_vn(text: str) -> Dict:
+    if _maersk_vn_is_carrier(text):
+        return _parse_maersk_vn_carrier(text)
+    return _parse_maersk_vn_logistics(text)
+
+
+def _parse_maersk_vn_logistics(text: str) -> Dict:
     h: Dict[str, Optional[str]] = {}
-    series = _search(r"K[ýy] hi[ệe]u[^:]*:\s*(\S+)", text)
-    number = _search(r"S[ốo] \(Invoice No\.\):\s*(\d+)", text)
+    # 表頭只用括號內的英文標籤找值 (字型缺字頁的越南文標籤常常缺字對不到，但英文標籤跟數字
+    # 不受影響；使用者 2026-11-09 確認 A/B 兩種頁面共用這套規則)。
+    series = _search(r"\(Symbol No\. & Serial No\.\):\s*(\S+)", text)
+    number = _search(r"\(Invoice No\.\):\s*(\d+)", text)
     # 發票號碼 = 發票符號 + "-" + 號碼 (樣本答案 VN07 "1C26TSG-00164419"，使用者 2026-11-05 確認)
     h["invoice_no"] = f"{series}-{number}" if series and number else number
-    h["invoice_date"] = _vn_pdf_date(_search(r"\(Invoice Date\):\s*(\S+)", text))
+    h["invoice_date"] = _vn_pdf_date(_search(r"\(Invoice [Dd]ate\):\s*(\S+)", text))
     h["supplier"] = "MAERSK LOGISTICS & SERVICES VIETNAM COMPANY LIMITED"   # 英文名 (使用者確認)
-    h["consignee"] = _vn_full_consignee(_search(r"S[ốo] \(Invoice No\.\):[^\n]*\n(.+)", text))
+    h["consignee"] = _vn_full_consignee(_search(r"\(Invoice No\.\):[^\n]*\n(.+)", text))
     h["port_of_discharge"] = _search(r"\(POD\):\s*(\S+)", text)
     h["port_of_loading"] = _search(r"\(POL\):\s*(\S+)", text)
     h["order_no"] = _search(r"\(Ref No\):\s*(\S+)", text)
-    items, cbm = [], None
+
+    # 每筆費用各自的 FCR/HBL/Job number 就是這一列的 B/L NO.；Volume = 同一個 FCR 的 M3
+    # 數量 (DOC 列沿用同一 FCR 的 M3 列)，沒有 M3 列時填「數量 單位」(使用者 2026-11-09 確認，
+    # VN07 的 Volume 寫法沿用帳單原印的 M3 單位，不走其他供應商的 _fmt_volume() CBM 慣例)。
+    groups: "collections.OrderedDict[str, list]" = collections.OrderedDict()
     for m in _MAERSK_VN_ITEM_RE.finditer(text):
-        h.setdefault("bl_no", m.group("ref"))
-        if m.group("unit").upper() == "M3":
-            cbm = m.group("qty")
-        items.append({"description": m.group("desc").strip(), "amount": _vn_pdf_num(m.group("amount")),
-                      "vat": None})
-    h["volume"] = _fmt_volume(cbm=cbm)
+        groups.setdefault(m.group("ref"), []).append(m)
+
+    items = []
+    for ref, matches in groups.items():
+        cbm = next((mm.group("qty") for mm in matches if mm.group("unit").upper() == "M3"), None)
+        for mm in matches:
+            volume = f"{cbm} M3" if cbm else f"{mm.group('qty')} {mm.group('unit')}"
+            items.append({
+                "description": _maersk_vn_fix_desc(mm.group("desc").strip()),
+                "amount": _vn_pdf_num(mm.group("amount")), "vat": None,
+                "bl_no": ref, "volume": volume,
+            })
+
     vat = _search(r"\(Total VAT amount\):\s*([\d,.]+)", text)
-    rate = _search(r"\s(\d+)%\s+[\d,.]+$", text)
+    # 稅率印在這張發票的 Subtotal 區塊 ("chịu thuế suất 8%")，少數發票這個區塊跟
+    # "(Total VAT amount)" 剛好被分頁切到不同頁 (使用者 2026-11-09 樣本
+    # 1C25TSG-00056964：Subtotal/8% 在上一頁，Total VAT amount 在下一頁)，這一頁
+    # 抓不到稅率時沿用 VN07 目前唯一出現過的稅率 8%。
+    rate = _search(r"\s(\d+)%\s+[\d,.]+$", text) or "8"
     if vat:
         # 整張 VAT 列：抬頭的單號、港口、材積填 N/A (樣本答案 VN07 PDF，2026-11-05)
         items.append({"description": f"VAT {rate}%" if rate else "VAT", "amount": None,
@@ -11548,11 +11637,71 @@ def parse_maersk_vn(text: str) -> Dict:
     return {"header": h, "items": items or [{"description": None, "amount": None, "vat": None}]}
 
 
+# (C) MAERSK VIỆT NAM 船公司代收頁：費用行 "PHÍ XẾP DỠ HÀNG - CẢNG ĐI 1 CÔNG TEN NƠ VND
+# 3,050,000 1 3,050,000KHAC:5.26% 160,526 3,210,526" (名稱、數量、單位、幣別、單價、匯率、
+# 未稅金額[跟稅率黏在一起無空白]、稅率、稅額、含稅金額)，每筆費用自帶稅額 (不另外產生 VAT 列)。
+# 單位只有 2 種 (使用者指定)：CÔNG TEN NƠ = Container、VẬN ĐƠN = B/L。
+_MAERSK_VN_CARRIER_ITEM_RE = re.compile(
+    r"^(?P<desc>[^\n]+?)\s+(?P<qty>[\d.,]+)\s+(?P<unit>CÔNG TEN NƠ|VẬN ĐƠN)\s+(?P<cur>VND|USD)\s+"
+    r"(?P<price>[\d,.]+)\s+(?P<roe>[\d,.]+)\s+(?P<amount>[\d,.]+)KHAC:(?P<rate>[\d.]+)%\s+"
+    r"(?P<tax>[\d,.]+)\s+(?P<total>[\d,.]+)$", re.MULTILINE)
+_MAERSK_VN_CARRIER_POR_POD_RE = re.compile(
+    r"^(?P<por>.+?,[A-Z]{2})\s(?P<pod>.+?,[A-Z]{2})\s(?P<vessel>.+)$", re.MULTILINE)
+_MAERSK_VN_CARRIER_ETD_ETA_RE = re.compile(
+    r"^(?P<etd>\d{2}/\d{2}/\d{4})\s(?P<eta>\d{2}/\d{2}/\d{4})\s(?P<voy>\S+)$", re.MULTILINE)
+
+
+def _parse_maersk_vn_carrier(text: str) -> Dict:
+    h: Dict[str, Optional[str]] = {}
+    series = _search(r"\(Symbol No\. & Serial No\.\):\s*(\S+)", text)
+    number = _search(r"\(Invoice No\.\):\s*(\d+)", text)
+    h["invoice_no"] = f"{series}-{number}" if series and number else number
+    h["invoice_date"] = _vn_pdf_date(_search(r"\(Invoice [Dd]ate\):\s*(\S+)", text))
+    h["supplier"] = "MAERSK VIETNAM LIMITED"   # 船公司 (使用者指定，同一份 PDF 一起處理)
+    h["consignee"] = _vn_full_consignee(_search(r"\(Name, address of Customer\):[^\n]*\n(.+)", text))
+    h["order_no"] = _search(r"\(Reference\):\s*(\S+)", text)
+    h["bl_no"] = _search(r"\(B/L No / Container No\.\):\s*(\S+)", text) or "N/A"
+
+    vessel = None
+    m = _MAERSK_VN_CARRIER_POR_POD_RE.search(text)
+    if m:
+        h["port_of_loading"] = m.group("por")
+        h["port_of_discharge"] = m.group("pod")
+        vessel = m.group("vessel").strip()
+    m2 = _MAERSK_VN_CARRIER_ETD_ETA_RE.search(text)
+    if m2:
+        h["onboard_date"] = _vn_pdf_date(m2.group("etd"))
+        h["arrive_date"] = _vn_pdf_date(m2.group("eta"))
+        # Vessel = 船名 + Main Voy No. (例如 "MAERSK DHAKA 512B"，使用者指定)
+        h["vessel"] = f"{vessel} {m2.group('voy')}" if vessel else None
+    elif vessel:
+        h["vessel"] = vessel
+
+    items = []
+    for m3 in _MAERSK_VN_CARRIER_ITEM_RE.finditer(text):
+        unit_en = "Container" if "CÔNG TEN" in m3.group("unit") else "B/L"
+        items.append({
+            "description": m3.group("desc").strip(),
+            "amount": _vn_pdf_num(m3.group("amount")), "vat": _vn_pdf_num(m3.group("tax")),
+            "volume": f"{m3.group('qty')} x {unit_en}",
+        })
+    return {"header": h, "items": items or [{"description": None, "amount": None, "vat": None}]}
+
+
+_MAERSK_VN_CARRIER_TOTAL_RE = re.compile(r"\(Total\):\s*([\d,.]+)\s+([\d,.]+)\s+([\d,.]+)")
+
+
 def _maersk_vn_total(text: str):
+    if _maersk_vn_is_carrier(text):
+        m = _MAERSK_VN_CARRIER_TOTAL_RE.search(text)
+        return _vn_pdf_num(m.group(1)) if m else None
     return _vn_pdf_num(_search(r"\(Subtotal\):\s*([\d,.]+)", text))
 
 
 def _maersk_vn_grand(text: str):
+    if _maersk_vn_is_carrier(text):
+        m = _MAERSK_VN_CARRIER_TOTAL_RE.search(text)
+        return _vn_pdf_num(m.group(3)) if m else None
     return _vn_pdf_num(_search(r"\(Total amount\):\s*([\d,.]+)", text))
 
 

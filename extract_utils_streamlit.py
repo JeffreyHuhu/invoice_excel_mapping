@@ -947,6 +947,15 @@ _EN_FULL = {
     # VN03 RỒNG Á CHÂU：CSHT 英文備註暫定寫法 (使用者 2026-11-09 答案，之後依
     # 統一費用對照表更新)
     "CSHT": "Port Infrastructure Fee",
+    # VN07 MAERSK (大檔 PDF，使用者 2026-11-09 答案；整句比對避免跟其他供應商片語誤觸)
+    "PHI PHAT HANH FCR": "FCR Issuance Fee",
+    "PHI CAU CANG": "Wharfage Fee",
+    "PHI KHAI BAO TONG TRONG LUONG (VGM)": "VGM Declaration Fee",
+    "PHI QUAN LY CHUNG TU": "Documentation Management Fee",
+    # VN07 MAERSK VIỆT NAM (船公司代收頁)
+    "PHI XEP DO HANG - CANG DI": "Origin Terminal Handling Charge",
+    "PHI DICH VU HANG XUAT KHAU": "Export Service Fee",
+    "PHI LUU CONG TEN NO - HANG XUAT": "Export Container Storage Fee",
 }
 # 詞組對照 (由長到短套用；越南文、印尼文常見帳單用語)
 _EN_PHRASES = (
@@ -2324,10 +2333,15 @@ def audit_invoice_totals(
             # {發票號碼: 總額}，逐票勾稽
             norm = [{normalize_value(k): v for k, v in t.items()} if isinstance(t, dict)
                     else {} for t in totals]
+            # 每票各自勾稽也要套用這一頁的容許誤差 (越南 VND 帳單是 ±100，不是
+            # 預設 ±1)，之前漏掉，DSV_VN 每週帳每票常見 ±1~2 VND 的四捨五入
+            # 誤差被誤判成 ERROR (使用者 2026-11-09 抽查 DSV_VN「BY WEEKLY」批次)
+            tol = _tolerance_of(text)
             for key, group_rows in _group_rows_by_invoice(rows).items():
                 picked = [n.get(key) for n in norm]
                 if group_rows and any(v is not None for v in picked):
-                    results.append(_build_result(group_rows, *picked))
+                    results.append(_build_result(group_rows, *picked, grand_tolerance=tol,
+                                                   final_tolerance=tol, net_tolerance=tol))
             return results
         if (invoice_total is not None or grand_total is not None or final_total is not None) and rows:
             tol = _tolerance_of(text)
