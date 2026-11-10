@@ -546,6 +546,22 @@ def _stamp_only_scan(page, text: str) -> bool:
                for img in page.images)
 
 
+def _remap_symbol_font_pua(text: str) -> str:
+    """部分供應商的 PDF 用了把字元編碼位移到 Private Use Area 的符號字型
+    (碼位 = 0xF000 + 原始 ASCII 碼，例如 'D' 0x44 變成 U+F044)，pdfplumber
+    會原樣讀出這些碼位，肉眼看起來像空白、detect_supplier() 也比對不到任何
+    關鍵字。整頁文字大半落在這個位移範圍 (U+F020~U+F07E) 時才換回原本的
+    ASCII；正常文件不會用到這個區段，換回來不影響其他供應商。
+    (2026-11-10 抽樣 VN04 DHL-VNPT「IB TARIFF OF DHL SERVICES」月結單)
+    """
+    if not text:
+        return text
+    shifted = sum(1 for ch in text if 0xF020 <= ord(ch) <= 0xF07E)
+    if shifted < len(text) * 0.5:
+        return text
+    return "".join(chr(ord(ch) - 0xF000) if 0xF020 <= ord(ch) <= 0xF07E else ch for ch in text)
+
+
 def extract_pages_from_pdf(pdf_path: str, **pdfplumber_kwargs) -> List[str]:
     """跟 extract_text_from_pdf() 一樣，但個別回傳『每一頁』的文字 (不合併成
     一個字串)。給 multi_page 供應商 (一份 PDF 裡有好幾張各自獨立的發票，
@@ -566,7 +582,7 @@ def extract_pages_from_pdf(pdf_path: str, **pdfplumber_kwargs) -> List[str]:
     with pdfplumber.open(pdf_path) as pdf:
         scanned = []
         for i, page in enumerate(limited_pages(pdf)):
-            text = page.extract_text(**pdfplumber_kwargs) or ""
+            text = _remap_symbol_font_pua(page.extract_text(**pdfplumber_kwargs) or "")
             if not text.strip() or _stamp_only_scan(page, text):
                 scanned.append(i)
                 text = ""
