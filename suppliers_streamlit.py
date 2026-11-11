@@ -8713,7 +8713,13 @@ def _cw_invoice_no(text: str) -> Optional[str]:
     if inv:
         fixed = re.sub(r"^([A-Z]+?)O+(?=\d{7,}$)", r"\1", inv)
         inv = fixed if fixed != inv and re.fullmatch(r"[A-Z]{3,5}\d{7,}", fixed) else inv
-    return inv
+        return inv
+    # 畫質太差的掃描頁，整行 "SHIPMENT SEDC1846196" 常被 OCR 讀成亂碼，連
+    # SHIPMENT 這個字都認不出來：FLIGHT / DATE & REFERENCE 那一行的 HAWB 通常
+    # 就是 SHIPMENT 號碼去掉開頭的 "S" (使用者 2026-11-11 回報 DSV_VN JUN.2026/
+    # JUL.2026 混掃描檔的批次，SEDC1846196~99 這幾頁的抬頭整行讀壞)
+    hawb = _search(r"FLIGHT / DATE[^\n]*\n[^\n]*?\s([A-Z]{2,5}\d{6,})\s*$", text)
+    return f"S{hawb}" if hawb else None
 
 
 def _cw_docs(text: str) -> List[str]:
@@ -8727,18 +8733,36 @@ def _cw_docs(text: str) -> List[str]:
     if len(pages) <= 1:
         return [text.replace(_CW_PAGE_MARK, "")]
     docs: List[List[str]] = []
+    doc_inv: List[Optional[str]] = []
     current = None
     for page in pages:
         inv = _cw_invoice_no(page)
-        first_page = re.search(r"\bPage 1 of \d+", page)
+        # 畫質太差的掃描頁常連 "Page 1 of N" 都讀不出來，但 "SHIPMENT DETAILS
+        # PRINTED BY" / "GOODS DESCRIPTION" 這兩個區塊只會出現在第一頁 (總額頁
+        # 沒有)，可以當作沒讀到頁碼時的備援判斷 (使用者 2026-11-11 回報 DSV_VN
+        # JUN.2026/JUL.2026 混掃描檔批次：同一個 SHIPMENT 開兩張發票，沒有這個
+        # 判斷，第二張會被誤併進第一張)
+        first_page = bool(re.search(r"\bPage 1 of \d+", page)) or (
+            not re.search(r"\bPage \d+ of \d+", page)
+            and ("SHIPMENT DETAILS PRINTED BY" in page or "GOODS DESCRIPTION" in page))
         if inv is None and not re.search(r"\bPage \d+ of \d+", page):
             continue
         # "Page 2 of N" 以後一定是上一張的續頁 (掃描頁 OCR 號碼可能讀錯，不能只靠號碼)
         later_page = re.search(r"\bPage (?:[2-9]|\d{2,}) of \d+", page)
-        if docs and not first_page and (inv is None or inv == current or later_page):
+        # 跳頁：續頁的 SHIPMENT 號碼跟目前這一張不同，但前面已經開過同號碼的一張
+        # (中間夾著別的發票)，要接回那一張，不能誤接到目前這一張 (使用者 2026-11-11
+        # 回報 DSV_VN APR.2026 SSGN0439661 第 1 頁在第 113 頁，第 2 頁 (TOTAL) 被排到
+        # 第 131 頁，中間夾了 17 頁其他發票；沒接回去的話 SSGN0439661 抓不到 TOTAL，
+        # 第 131 頁又被誤併進第 131 頁前一張 SSGN0441871)
+        jump_target = (next((i for i in range(len(docs) - 1, -1, -1) if doc_inv[i] == inv), None)
+                       if inv and inv != current and not first_page else None)
+        if jump_target is not None:
+            docs[jump_target].append(page)
+        elif docs and not first_page and (inv is None or inv == current or later_page):
             docs[-1].append(page)
         else:
             docs.append([page])
+            doc_inv.append(inv)
             current = inv
     # 同一張單據掃描兩次 (號碼與 TOTAL 都相同) 只留一張 (使用者 2026-10-28：DHL 合輯第 19、20 頁
     # S2601526262)。同號碼但總額不同的是另一張發票 (YUSEN SSGN0316461)，照常保留
