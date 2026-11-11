@@ -10554,9 +10554,13 @@ _VT_TRANS_WAGON = [
     # 2026-10-28 抽樣的另外兩種版面 (工作表名稱不固定，用表頭判斷)：
     # (a) FREIGHT STATEMENT：每列一項費用 (費用名稱在 Rate 欄：DO/THC/CFS/O/FRT)，
     #     同一張發票 (Invoice No) 好幾列，只有第一列寫發票號碼與合計
+    # 簡化版表頭沒有 "TOTAL(VND) NOT VAT LOCAL" / "TOTAL(VND) VAT LOCAL CHARGE" 欄，
+    # 只有裸的 "VND" (費用欄本身) 與 "Total Amount included VAT" (2026-11-11 抽樣
+    # "CONG NO T01-25 POU LI"：原本找不到這兩欄，整張沒有總額可勾稽)
     (r"(?!)", {"header": "BOOKING NO", "key": ["=INVOICE NO", "BOOKING NO"], "carry": True,
                "fees": [("=VND", "@RATE")], "vat": "VAT (8%)", "vat_desc": "VAT 8%",
-               "total": "TOTAL(VND) NOT VAT LOCAL", "grand": "=TOTAL(VND) VAT LOCAL CHARGE",
+               "total": ("TOTAL(VND) NOT VAT LOCAL", "=VND"),
+               "grand": ("=TOTAL(VND) VAT LOCAL CHARGE", "=TOTAL AMOUNT INCLUDED VAT"),
                "boxes": {"20": "MEASUREMENT 20'", "40": "MEASUREMENT 40'"}, "cbm": "MEASUREMENT CMB",
                "fields": {"bl_no": "BOOKING NO"}}),
     # (b) TỔNG：每票一列，每項費用 USD / VND 兩欄 (取 VND)，GRAND TOTAL = 當地費用含稅 + O/F + EXWORK
