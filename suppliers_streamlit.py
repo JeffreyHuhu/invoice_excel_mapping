@@ -12370,18 +12370,37 @@ def _parse_maersk_vn_carrier(text: str) -> Dict:
 _MAERSK_VN_CARRIER_TOTAL_RE = re.compile(r"\(Total\):\s*([\d,.]+)\s+([\d,.]+)\s+([\d,.]+)")
 
 
+def _maersk_vn_invoice_no(text: str) -> Optional[str]:
+    series = _search(r"\(Symbol No\. & Serial No\.\):\s*(\S+)", text)
+    number = _search(r"\(Invoice No\.\):\s*(\d+)", text)
+    return f"{series}-{number}" if series and number else number
+
+
 def _maersk_vn_total(text: str):
     if _maersk_vn_is_carrier(text):
         m = _MAERSK_VN_CARRIER_TOTAL_RE.search(text)
-        return _vn_pdf_num(m.group(1)) if m else None
-    return _vn_pdf_num(_search(r"\(Subtotal\):\s*([\d,.]+)", text))
+        value = _vn_pdf_num(m.group(1)) if m else None
+    else:
+        value = _vn_pdf_num(_search(r"\(Subtotal\):\s*([\d,.]+)", text))
+    if value is None:
+        return None
+    # 這一頁的總額要歸給這一頁的發票：發票號碼 = Symbol No. & Serial No. + Invoice No.，
+    # 原文把兩者印在不同行，合併字串找不到完整比對，用字典 {發票號碼: 總額} 直接指定歸屬
+    # (2026-11-11 修正：171 張全部誤判成「沒有可勾稽的總額」)
+    inv_no = _maersk_vn_invoice_no(text)
+    return {inv_no: value} if inv_no else value
 
 
 def _maersk_vn_grand(text: str):
     if _maersk_vn_is_carrier(text):
         m = _MAERSK_VN_CARRIER_TOTAL_RE.search(text)
-        return _vn_pdf_num(m.group(3)) if m else None
-    return _vn_pdf_num(_search(r"\(Total amount\):\s*([\d,.]+)", text))
+        value = _vn_pdf_num(m.group(3)) if m else None
+    else:
+        value = _vn_pdf_num(_search(r"\(Total amount\):\s*([\d,.]+)", text))
+    if value is None:
+        return None
+    inv_no = _maersk_vn_invoice_no(text)
+    return {inv_no: value} if inv_no else value
 
 
 # 每列的 VAT 寫在費用同一列 (vat_same_row)；日期用每列 INVOICE DATE 欄 (只有日月時年份取工作表標題)
@@ -12572,7 +12591,18 @@ def _kn_vn_totals(text: str):
     if rows:
         return ({r["file"]: r["total"] for r in rows}, {r["file"]: r["total"] + r["vat"] for r in rows})
     m = re.search(r"Tổng cộng tiền thanh toán\s*\n\s*([\d,.]+)\s+([\d,.]+)\s+([\d,.]+)", text)
-    return (_vn_pdf_num(m.group(1)), _vn_pdf_num(m.group(3))) if m else (None, None)
+    if not m:
+        return (None, None)
+    total, grand = _vn_pdf_num(m.group(1)), _vn_pdf_num(m.group(3))
+    # 這一頁的總額要歸給這一頁的發票：發票號碼 = Series + Invoice No.，原文把兩者印在
+    # 不同行，合併字串找不到完整比對，用字典 {發票號碼: 總額} 直接指定歸屬
+    # (2026-11-11 修正：108 張全部誤判成「沒有可勾稽的總額」)
+    series = _search(r"\(Series\):\s*(\S+)", text)
+    number = _search(r"\(Invoice No\.\):\s*(\S+)", text)
+    inv_no = f"{series}-{number}" if series and number else number
+    if not inv_no:
+        return (total, grand)
+    return ({inv_no: total}, {inv_no: grand})
 
 
 register_supplier(
@@ -12866,6 +12896,20 @@ _APL_VN_ITEM_RE = re.compile(
     r"^\d+\s+(?P<desc>.+?)\s+(?P<unit>[A-Z]{2,4})\s+(?P<qty>[\d.,]+)\s+(?P<price>[\d.]+)\s+"
     # 稅率欄也可能印 "X" (代收代付 Thu hộ，2026-10-28 抽樣 "APL_APR.2026_LOCAL CHARGES" 第 1 頁)
     r"(?P<amount>[\d.]+)\s+(?P<rate>\d+%|KCT|X)\s+(?P<tax>[\d.]+)\s+(?P<total>[\d.]+)$", re.MULTILINE)
+# 描述太長會換成三行：描述前半 (獨立一行)、序號+單位+數字 (描述整個漏掉)、描述後半
+# (獨立一行)，例如 "Phí điều hành bến bãi cho nguyên công-" / "4 CTR 1 ..." / "tơ-nơ"
+# (2026-11-11 修正：這筆費用原本整筆漏抓，造成該張發票未稅總額勾稽對不上)。
+# 比對前先補回成一行，前後兩行不可以是 "Chứng từ số:"/"Thu hộ" 這類標籤行。
+_APL_VN_WRAPPED_DESC_RE = re.compile(
+    r"\n(?P<prefix>(?!Chứng từ|Thu hộ)[^\n\d][^\n]*)\n(?P<num>\d+)\s+(?P<unit>CTR|FCR|CBM|KGS)\s+"
+    r"(?P<rest>[\d.,]+\s+[\d.,]+\s+[\d.,]+\s+(?:\d+%|KCT|X)\s+[\d.,]+\s+[\d.,]+)\n"
+    r"(?P<suffix>(?!Chứng từ|Thu hộ)[^\n\d]+)\n")
+
+
+def _apl_vn_fix_wrapped_desc(text: str) -> str:
+    return _APL_VN_WRAPPED_DESC_RE.sub(
+        lambda m: f"\n{m.group('num')} {m.group('prefix').strip()}{m.group('suffix').strip()} "
+                  f"{m.group('unit')} {m.group('rest')}\n", text)
 
 
 def detect_apl_vn(text: str) -> bool:
@@ -12876,6 +12920,7 @@ def detect_apl_vn(text: str) -> bool:
 
 
 def parse_apl_vn(text: str) -> Dict:
+    text = _apl_vn_fix_wrapped_desc(text)
     h: Dict[str, Optional[str]] = {"supplier": "APL Logistics Vietnam Co., Ltd"}
     series = _search(r"\(Serial\):\s*(\S+)", text)
     number = _search(r"S[ốo] \(No\.\):\s*(\d+)", text)
@@ -12980,7 +13025,18 @@ def parse_apl_vn(text: str) -> Dict:
 
 def _apl_vn_totals(text: str):
     m = re.search(r"Tổng cộng \(Total\):\s*([\d.]+)\s+([\d.]+)\s+([\d.]+)", text)
-    return (_dsv_vn_dot_amount(m.group(1)), _dsv_vn_dot_amount(m.group(3))) if m else (None, None)
+    if not m:
+        return (None, None)
+    total, grand = _dsv_vn_dot_amount(m.group(1)), _dsv_vn_dot_amount(m.group(3))
+    # 這一頁的總額要歸給這一頁的發票：發票號碼 = 字軌(Serial) + 號碼(No.)，但原文把
+    # 兩者印在不同行，合併後的字串找不到完整比對，用字典 {發票號碼: 總額} 直接指定
+    # 歸屬，不靠原文字串比對 (2026-11-11 修正：117 張全部誤判成「沒有可勾稽的總額」)
+    series = _search(r"\(Serial\):\s*(\S+)", text)
+    number = _search(r"S[ốo] \(No\.\):\s*(\d+)", text)
+    inv_no = f"{series}-{number}" if series and number else number
+    if not inv_no:
+        return (total, grand)
+    return ({inv_no: total}, {inv_no: grand})
 
 
 def _apl_vn_pages(pdf_path: str) -> List[str]:
