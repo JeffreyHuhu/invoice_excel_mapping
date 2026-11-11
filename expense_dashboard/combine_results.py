@@ -129,15 +129,17 @@ def _ticket_key(row: dict):
     return ("INV", inv.upper()) if inv and inv.upper() != "N/A" else None
 
 
-def compute_totals(rows: List[dict], fx_folder: Path):
+def compute_totals(rows: List[dict], fx_folder: Path, default_currency: str = None):
     """依幣別加總 -> ([(幣別, 總票數 (不重複), 費用, VAT, TOTAL, 1 USD 兌換數或 None)], 匯率檔名)。
-    幣別判斷跟資料庫一樣：帳單幣別 > 供應商 > 國家資料夾。"""
+    幣別判斷跟資料庫一樣：帳單幣別 > 供應商 > 國家資料夾 (供應商資料夾不在
+    D:\\帳單辨識資料庫(已轉檔) 底下時，國家資料夾判斷不出來，用 default_currency
+    頂替，見 invoice-progress-update 的 --country)。"""
     from collections import OrderedDict
     import fx
     sums = OrderedDict()
     for row in rows:
         cur = detect_currency(row.get("amount"), row.get("supplier"),
-                              folder_currency(row.get("_path")),
+                              folder_currency(row.get("_path")) or default_currency,
                               description=row.get("description")) or "(未知)"
         s = sums.setdefault(cur, [set(), 0.0, 0.0])
         key = _ticket_key(row)
@@ -269,11 +271,12 @@ def write_workbook(rows: List[dict], out_path: Path, totals=None, supplier_key: 
 
 
 def run(out_path: Path, roots: Sequence[Path], levels: Sequence[str] = ("高", "中"),
-        totals_fx_folder: Path = None, supplier_key: str = None) -> Path:
+        totals_fx_folder: Path = None, supplier_key: str = None, default_currency: str = None) -> Path:
     """totals_fx_folder：放作帳匯率檔的資料夾；有給就加「費用總和」工作表。
-    supplier_key：個別供應商的 KEY，放進「費用總和」標題 (例如 VN-05 CONG_THANH)。"""
+    supplier_key：個別供應商的 KEY，放進「費用總和」標題 (例如 VN-05 CONG_THANH)。
+    default_currency：國家資料夾判斷不出來時的頂替幣別 (供應商資料夾不在資料庫底下時用)。"""
     rows, stats = collect_rows(roots, levels)
-    summary = compute_totals(rows, totals_fx_folder) if totals_fx_folder else None
+    summary = compute_totals(rows, totals_fx_folder, default_currency) if totals_fx_folder else None
     write_workbook(rows, out_path, summary, supplier_key)
     print(f"已整合轉檔結果 Excel：{out_path}")
     for lv in levels:
