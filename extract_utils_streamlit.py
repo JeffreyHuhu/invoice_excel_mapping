@@ -1017,6 +1017,8 @@ _EN_PHRASES = (
     ("DET - NEO NHA MAY", "Detention at Factory"),
     # 越南文
     ("PHU PHI XANG DAU", "Fuel Surcharge"), ("PHI VAN CHUYEN", "Transportation fee"),
+    # 越南 SAIGON_TRANSPORT (VN18) OBC 費用名稱 "Cước vận chuyển (OBC)" (2026-11-11)
+    ("CUOC VAN CHUYEN", "Transportation fee"),
     ("PHI DICH VU", "Service fee"), ("PHAT SINH", "Additional Charge"),
     ("PT HA BAI SOM", "Early drop-off fee"), ("NANG HA", "Lift-On/Off Fee"),
     ("LUU BAI", "Storage"), ("LUU CONT", "Container detention"),

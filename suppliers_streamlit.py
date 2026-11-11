@@ -32,7 +32,7 @@ from typing import Dict, List, Optional, Tuple
 
 from extract_utils_streamlit import (
     _ocr_page_with_psm, _scanned_page_indexes, extract_pages_from_pdf,
-    limited_pages, register_supplier, set_supplier_number, SUPPLIER_REGISTRY,
+    limited_pages, register_supplier, set_supplier_number, SUPPLIER_REGISTRY, SheetBook,
 )
 
 # 印尼文月份對照表 (DWIHARTA 帳單用印尼文寫月份)
@@ -11802,8 +11802,48 @@ def detect_saigon_transport(text: str) -> bool:
             or all(k in norm for k in ("HAWB NO", "RED INVOICE", "LOCAL CHARGE (VND)")))
 
 
-_vt_register("SAIGON_TRANSPORT", "CÔNG TY TNHH DỊCH VỤ VẬN CHUYỂN SÀI GÒN", detect_saigon_transport,
-             "SAI GON AIR & OCEAN FREIGHT SCE.CO.LTD", _VT_SAIGON)  # 供應商用英文名稱 (2026-11-05 答案)
+def _saigon_fill_vnd_gap(rows: List[list]) -> List[list]:
+    """OBC 對帳表 (NHAP/XUAT) 的 "THÀNH TIỀN VND" 欄是公式 (USD 金額 × 匯率)；
+    帳單沒存計算結果時 calamine 讀成空白 (2026-11-11 POU SUNG 09-SAIF 抽樣，兩張
+    工作表都是空白，整張發票讀不到金額)。自己用表頭上方 "EX RATE" 小表的 USD
+    匯率算出來，跟 Excel 開啟後會顯示的值一樣。沒有這個版面、或已經有金額時
+    不改動 (維持其他樣本的既有行為)。"""
+    h = _vt_header_row(rows, "SO BILL")
+    if h is None:
+        return rows
+    labels = _vt_labels(rows, h)
+    vnd_c, usd_c = _vt_col(labels, "THANH TIEN VND"), _vt_col(labels, "THANH TIEN USD")
+    if vnd_c is None or usd_c is None:
+        return rows
+    data_rows = rows[h + 2:]
+    if any(_vn_num(_vn_cell(row, vnd_c)) for row in data_rows):
+        return rows      # 已經有金額 (公式有存檔)，不用補
+    rate = None
+    for row in rows[:h]:
+        for i, cell in enumerate(row):
+            if _vt_norm(cell) == "USD":
+                rate = next((v for v in (_vn_num(c) for c in row[i + 1:]) if v), None)
+        if rate:
+            break
+    if not rate:
+        return rows
+    out = [list(row) for row in rows]
+    for row in out[h + 2:]:
+        usd_val = _vn_num(_vn_cell(row, usd_c))
+        if usd_val and vnd_c < len(row):
+            row[vnd_c] = round(usd_val * rate)
+    return out
+
+
+def _saigon_sheets(book: SheetBook) -> SheetBook:
+    return SheetBook(book.path, [(name, _saigon_fill_vnd_gap(rows)) for name, rows in book.sheets])
+
+
+_saigon_parse, _saigon_totals = _vt_make("SAI GON AIR & OCEAN FREIGHT SCE.CO.LTD", _VT_SAIGON)
+register_supplier(
+    "SAIGON_TRANSPORT", "CÔNG TY TNHH DỊCH VỤ VẬN CHUYỂN SÀI GÒN", detect_saigon_transport, None,
+    sheet_parse=lambda book: _saigon_parse(_saigon_sheets(book)),
+    sheet_totals=lambda book: _saigon_totals(_saigon_sheets(book)))
 
 
 # --- VN19 IMX EXPRESS (CÔNG TY TNHH DỊCH VỤ CHUYỂN PHÁT NHANH IMX，MST 0315868311) --
