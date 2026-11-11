@@ -11154,7 +11154,7 @@ _VT_VHL_ANSWER = [
                   # 跟其他費用的備註加在最後面不一樣，寫入層的 english_note() 沒辦法產生
                   # 這種中間插入的格式，所以直接在這裡寫死 (_EN_PHRASES 另有 "PHI NEO XE"
                   # 片語對照，讓 english_note() 認得這裡已經加過備註，不會重複加)
-                  "fees": [("=TONG CONG", "PHÍ NEO XE (Truck Detention Fee) x {days} ngày")],
+                  "fees": [("=TONG CONG", "PHÍ NEO XE (Detention Fee-Truck) x {days} ngày")],
                   # 舊編碼 "SOÁ NGÀY NEO" 讀出來的 "Ø" 不是一般的 "O"，用結尾 "Y NEO" 來配對
                   "days_label": ("NGAY NEO", "Y NEO"),
                   "grand": "=TONG CONG"}),

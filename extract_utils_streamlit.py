@@ -952,17 +952,25 @@ _EN_FULL = {
     "PHI HA SOM": "Early Lift-Off Fee",
     "PHI HA CONT SOM": "Early Lift-Off Fee",
     "PHI HA BAI SOM": "Early Lift-Off Fee",
+    "HA BAI SOM": "Early Lift-Off Fee",
     "VSC": "Container Cleaning Fee",
     "PHI D/O VSC": "D/O & Container Cleaning Fee",
     "HO TRO PHI CO SO HA TANG": "Port Infrastructure Fee Support",
     "PTCC": "Container Weighing Surcharge",
     "CAN": "Container Weighing Fee",
     "PHU THU": "Container Weighing Surcharge",
+    "PHU THU CAN CONTAINER": "Container Weighing Surcharge",
     "CHI HO CAN": "Container Weighing Fee - Paid on Behalf",
-    "PHI NEO XE": "Truck Detention Fee",
-    # VN03 RỒNG Á CHÂU：CSHT 英文備註暫定寫法 (使用者 2026-11-09 答案，之後依
-    # 統一費用對照表更新)
+    "PHI NEO XE": "Detention Fee-Truck",
+    # VN03 RỒNG Á CHÂU：CSHT 英文備註暫定寫法 (使用者 2026-11-09 答案；統一費用對照表
+    # 沒有這個縮寫的項目，暫時維持原樣)
     "CSHT": "Port Infrastructure Fee",
+    # VN06 BÌNH TÂN 費用名稱 (統一費用對照表，2026-11-11)
+    "2%": "Invoice fee",
+    "SO TIEN PHU THU": "Fuel Surcharge",
+    # VN11 APL：整句剛好只是「Phí dịch vụ」時用這個 (覆蓋通用詞組 "Service fee"；
+    # 其他供應商句子裡帶「dịch vụ」仍照通用詞組比對，不受影響)
+    "PHI DICH VU": "Handling fee",
     # VN07 MAERSK (大檔 PDF，使用者 2026-11-09 答案；整句比對避免跟其他供應商片語誤觸)
     "PHI PHAT HANH FCR": "FCR Issuance Fee",
     "PHI CAU CANG": "Wharfage Fee",
@@ -972,17 +980,45 @@ _EN_FULL = {
     "PHI XEP DO HANG - CANG DI": "Origin Terminal Handling Charge",
     "PHI DICH VU HANG XUAT KHAU": "Export Service Fee",
     "PHI LUU CONG TEN NO - HANG XUAT": "Export Container Storage Fee",
+    # VN10 KUEHNE + NAGEL 費用名稱 (統一費用對照表，2026-11-11；帳單上費用名稱後面的
+    # 數字是供應商自己的費用代碼，固定接在名稱後面，整句比對)
+    "PHI CO SO HA TANG CANG XUAT": "Port Infrastructure Fee-Export",
+    "PHI DEM/DET - 415": "DEM/DET Fee",
+    "PHI BIEN NHAN HANG DUONG BIEN - 215": "Cargo Receipt Fee",
+    "PHI E-VGM - 347": "VGM Fee",
+    "PHI KHAI MANIFEST TAI NOI DI": "Manifest Filing Fee-Origin",
+    "PHI LAO VU TAI NOI DI": "Sercurity surcharge",
+    "PHI LAM HANG LE - 428": "Handling Fee-LCL",
+    "PHI LAM HANG NGOAI GIO - 411": "Overtime Handling Fee",
+    "PHI LAM HANG TAI NOI DI": "Origin Handling Fee",
+    "PHI LUU KHO HANG XUAT - 410": "Storage Fee-Export",
+    "PHI SOI MAY": "X-ray Screening Fee",
+    "PHI SAP XEP HANG XUAT - 417": "Cargo Arrangement Fee-Export",
+    "PHI XEP DO TAI CANG DI - 400": "Terminal Handling Fee-Origin",
+    # VN16 SONG TRIỀU 費用名稱 (統一費用對照表，2026-11-11；描述照抄表上欄名)
+    "CUOC VC CHUA TANG": "Trucking Freight",
+    "CUOC VAN CHUYEN CHUA TANG": "Trucking Freight",
+    "NEO XE": "Detention Fee-Truck",
+    "NEO": "Detention Fee-Truck",
+    "PHI BOC XEP": "Loading/Unloading Fee",
+    "PHI CAN": "Weighing Fee",
+    "PHI KHAC": "Other Fee",
+    "TROUBLE": "Trouble Fee",
 }
 # 詞組對照 (由長到短套用；越南文、印尼文常見帳單用語)
 _EN_PHRASES = (
     # VN02 VĨNH HƯNG LONG 的 "PHÍ NEO XE (Truck Detention Fee) x N ngày" 是直接在
     # parse_xxx() 寫死備註 (位置在中間，不是句尾，english_note() 自動加不出來)，這裡
     # 用片語比對讓 english_note() 認得已經加過備註，不要再重複加一次
-    ("PHI NEO XE", "Truck Detention Fee"),
+    ("PHI NEO XE", "Detention Fee-Truck"),
+    # 越南 APL (VN11) 延滯費 "DET - Neo kho/nhà máy N ngày" (備註欄文字接在後面，
+    # 統一費用對照表，2026-11-11)
+    ("DET - NEO KHO", "Detention at Warehouse"),
+    ("DET - NEO NHA MAY", "Detention at Factory"),
     # 越南文
-    ("PHU PHI XANG DAU", "Fuel surcharge"), ("PHI VAN CHUYEN", "Transportation fee"),
-    ("PHI DICH VU", "Service fee"), ("PHAT SINH", "Incurred charge"),
-    ("PT HA BAI SOM", "Early drop-off fee"), ("NANG HA", "Lift on/off"),
+    ("PHU PHI XANG DAU", "Fuel Surcharge"), ("PHI VAN CHUYEN", "Transportation fee"),
+    ("PHI DICH VU", "Service fee"), ("PHAT SINH", "Additional Charge"),
+    ("PT HA BAI SOM", "Early drop-off fee"), ("NANG HA", "Lift-On/Off Fee"),
     ("LUU BAI", "Storage"), ("LUU CONT", "Container detention"),
     ("VE SINH CONT", "Container cleaning"),
     # CONG THANH 額外費用項目
@@ -992,10 +1028,16 @@ _EN_PHRASES = (
     ("KHAI BO SUNG", "Supplementary declaration"), ("DAN TEM", "Label sticking"),
     ("XIN GIU GAC VA DAN TEM", "Guard keeping and label sticking"),
     ("GIU GAC", "Guard keeping"),
-    # 越南 DSV 費用名稱 (使用者 2026-10 正確答案)
-    ("PHI LAO VU - HANG XUAT", "Export Service Fee"),
-    ("PHI QUAN LY HANG XUAT", "Export Cargo Management Fee"),
+    # 越南 DSV 費用名稱 (統一費用對照表，2026-11-11 更新；原為使用者 2026-10 答案
+    # "Export Service Fee"/"Export Cargo Management Fee"，依對照表改成下列寫法)
+    ("PHI LAO VU - HANG XUAT", "Terminal handling fee"),
+    ("PHI QUAN LY HANG XUAT", "Cargo Management Fee-Export"),
     ("PHI KHAI BAO AMS", "AMS Filing Fee"), ("PHI VAN DON", "Bill of Lading Fee"),
+    # 越南 ORIENTAL (VN14) PDF 電子發票費用名稱 (使用者 2026-11-10 答案)：原文已經帶英文
+    # 備註的三項 (D/O Fee、CFS、THC) 讓 english_note() 認得已經加過，不要重複加；"PHI XEP
+    # DO TAI CANG" 要放在比較籠統的 "PHI XEP DO" (MOL 費用) 前面，才不會被那條先比對掉
+    ("PHI CHUNG TU", "D/O Fee"), ("PHI KHO BAI", "CFS"), ("PHI XEP DO TAI CANG", "THC"),
+    ("PHI PHU TROI HANG NHAP", "Import Surcharge"),
     # 越南 MOL 費用名稱
     ("PHI NIEM CHI", "Seal Fee"), ("PHI KHAI AFR", "AFR Filing Fee"),
     ("PHI XEP DO", "Terminal Handling / Loading-Unloading Fee"), ("PHI LAM HANG", "Handling Fee"),
@@ -1004,32 +1046,35 @@ _EN_PHRASES = (
     # 越南 MOL LOGISTICS 空運 Debit Note 費用名稱 (VN09，使用者 2026-11-10 答案)
     ("PHI VAN DON HANG KHONG", "Air Waybill Fee"), ("PHI AMS", "AMS Filing Fee"),
     ("PHI SOI CHIEU", "X-ray Screening Fee"),
-    # 越南 APL (VN11) 費用名稱 (使用者 2026-11-10 答案；櫃型/天數等後綴照原文接在英文後面)
-    ("PHI SAP XEP HANG LE", "LCL Cargo Arrangement Fee"),
-    ("PHI SAP XEP HANG NGUYEN CONG-TO-NO", "FCL Cargo Arrangement Fee"),
+    # 越南 APL (VN11) 費用名稱 (統一費用對照表，2026-11-11 更新；櫃型/天數等後綴照原文
+    # 接在英文後面)
+    ("PHI SAP XEP HANG LE", "Handling Fee-LCL"),
+    ("PHI SAP XEP HANG NGUYEN CONG-TO-NO", "Handling Fee-FCL"),
     ("PHI QUAN LY VAN TAI HANG HOA", "Freight Management Fee"),
     ("PHI GIAY CHUNG NHAN NHAN HANG", "Forwarder Cargo Receipt (FCR) Fee"),
     ("PHI NIEM PHONG CHI", "Seal Fee"),
-    ("PHI DIEU HANH BEN BAI CHO HANG LE", "LCL Terminal Handling Fee"),
-    ("PHI DIEU HANH BEN BAI CONG-TO-NO", "Container Terminal Handling Fee"),
+    ("PHI DIEU HANH BEN BAI CHO HANG LE", "Terminal Handling Fee-LCL"),
+    ("PHI DIEU HANH BEN BAI CONG-TO-NO", "Terminal Handling Fee-FCL"),
     ("PHI KHAI BAO TRONG LUONG HANG HOA", "VGM Declaration Fee"),
     ("PHI VAN DON HANG MAY BAY", "Air Waybill Fee"),
     ("PHI KHAI BAO HANG HOA THEO HE THONG AMS", "AMS Filing Fee"),
-    ("PHI SOI HANG MAY BAY", "Air Cargo X-ray Screening Fee"),
-    ("PHI DIEU HANH BEN BAI HANG MAY BAY", "Air Cargo Terminal Handling Fee"),
-    ("PHI KHAC (THU HO/ CHI HO KH)", "Other Fee (Collected/Paid on behalf of Customer)"),
+    ("PHI SOI HANG MAY BAY", "X-ray Screening Fee"),
+    ("PHI DIEU HANH BEN BAI HANG MAY BAY", "Terminal Handling Fee-Air"),
+    ("PHI KHAC (THU HO/ CHI HO KH)", "Forwarder Handling Charge"),
     ("PHI LUU BAI", "Storage Fee"), ("PHI NGOAI GIO", "Overtime Fee"),
-    # 越南 APL (VN11) 暫定翻譯 (使用者 2026-11-10 同意先套用，之後統一費用對照表
-    # 更新時再通知修改)
-    ("PHI DIEU HANH BEN BAI CHO NGUYEN CONG-TO-NO", "FCL Terminal Handling Fee"),
+    ("PHI DIEU HANH BEN BAI CHO NGUYEN CONG-TO-NO", "Terminal Handling Fee-FCL"),
     ("PHU PHI HA TANG CANG BIEN", "Seaport Infrastructure Surcharge"),
     ("PHI DIEN GIAO HANG", "Telex Release Fee"),
     # 越南 MAERSK (VN07) 費用名稱 (使用者 2026-11-06 答案)
-    ("PHI XEP DO HANG HOA", "Cargo Handling Fee"), ("PHI NIEM CHI HANG TAU", "Carrier Seal Fee"),
-    ("PHI CHUNG TU - CANG DI", "Origin Documentation Fee"),
+    ("PHI XEP DO HANG HOA", "Cargo Handling Fee-CFS"), ("PHI NIEM CHI HANG TAU", "Seal Fee-Carrier"),
+    ("PHI CHUNG TU - CANG DI", "Documentation Fee-Origin"),
     ("PHI DICH VU QUAN LY KHACH HANG", "Customer Service Management Fee"),
-    ("PHI XEP DO CONTAINER TAI CANG DI", "Origin Container Handling Fee"),
+    ("PHI XEP DO CONTAINER TAI CANG DI", "Container Handling Fee-Origin"),
     ("THUE 8% VAT", "VAT 8%"), ("THUE 10% VAT", "VAT 10%"),
+    # 越南 VN16 SONG TRIỀU Cont 表「PHÍ NÂNG/PHÍ HẠ/PHÍ CÂN (SHĐ ...)」後面接憑證號碼，
+    # 用詞組比對 (統一費用對照表，2026-11-11)
+    ("SO TIEN % TANG", "Freight Charges Increase (%)"),
+    ("PHI NANG", "Lift-On Fee"), ("PHI HA", "Lift-Off Fee"), ("PHI CAN", "Weighing Fee"),
     # 印尼文
     ("TOTAL BIAYA EKSTERNAL", "Total external cost"), ("TOTAL BIAYA REIMBURSEMENT",
                                                        "Total reimbursement cost"),
