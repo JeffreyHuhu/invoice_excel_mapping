@@ -136,5 +136,41 @@
   "SONG_TRIEU": {
     "config": {},
     "score": 1.0
+  },
+  "SAIGON_TRANSPORT": {
+    "config": {},
+    "score": 1.0
+  },
+  "APL_VN": {
+    "config": {},
+    "score": 1.0
+  },
+  "KN_VN": {
+    "config": {},
+    "score": 1.0
+  },
+  "NGUYEN_HUONG": {
+    "config": {},
+    "score": 1.0
+  },
+  "TIMES_CARGO": {
+    "config": {},
+    "score": 1.0
+  },
+  "VINH_HUNG_LONG": {
+    "config": {},
+    "score": 1.0
+  },
+  "IMX": {
+    "config": {},
+    "score": 1.0
+  },
+  "ORIENTAL_MULTIMODAL": {
+    "config": {},
+    "score": 1.0
+  },
+  "ORIENTAL_USD": {
+    "config": {},
+    "score": 1.0
   }
 }
