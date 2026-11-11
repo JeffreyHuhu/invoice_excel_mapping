@@ -19,3 +19,7 @@ test_samples/EXPEDITORS/
 test_samples/DHL_EXPRESS_VN/sample13.pdf
 test_samples/DHL_EXPRESS_VN/sample13_ref.xlsx
 test_samples/SONG_TRIEU/
+test_samples/TRANS_WAGON/sample7.xls
+test_samples/TRANS_WAGON/sample7_ref.xlsx
+test_samples/TRANS_WAGON/sample8.xls
+test_samples/TRANS_WAGON/sample8_ref.xlsx

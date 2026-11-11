@@ -10918,12 +10918,17 @@ def _tw_bang_ke_sheets(book) -> Tuple[List[Dict], List[Dict]]:
 # --- VN01 TRANS WAGON：FREIGHT STATEMENT (EXPORT/IMPORT) (工作表 TONG，2026-11-09 使用者
 # 答案) --------------------------------------------------------------------------------
 # 一列一票 (BILL No.)：所有 TOTAL(VND) 欄的公式都沒有存值，VND 自己用 USD × XRATE 算。
-# D/O、H/D、CIC、CFS、THC、VSC、EQUIP、(進口多一欄 OTHER) 是有 VAT 的 Local Charge；
-# A/F、O/F、EXWORK 沒有 VAT。VAT 用每個 Local Charge 各自 ROUND(VND×8%)，不用「總額
-# 先四捨五入再分攤尾差」：驗算發現來源公式偶有手動 +1 (例如 08SEA2609077)，逐項各自
-# 四捨五入剛好跟來源的手動調整值一致，不需另外處理。
+# D/O、H/D、CIC、CFS、THC、VSC、EQUIP、(出口多一欄 LC、進口多一欄 OTHER) 是有 VAT 的
+# Local Charge；A/F、O/F、EXWORK 沒有 VAT。VAT 用每個 Local Charge 各自 ROUND(VND×8%)，
+# 不用「總額先四捨五入再分攤尾差」：驗算發現來源公式偶有手動 +1 (例如 08SEA2609077)，
+# 逐項各自四捨五入剛好跟來源的手動調整值一致，不需另外處理。
 # 進口版有 EXW 工作表：這票的 EXWORK 改用 EXW 明細逐筆列出 (不列 TONG 的 EXWORK 一列)。
-_TW_LOCAL_FEES = ("D/O", "H/D", "CIC", "CFS", "THC", "VSC", "EQUIP", "OTHER")
+# 2026-11-12：出口版多一欄 "LC" (跟 D/O 等同屬 Local Charge，不是 _TW_NOVAT_FEES)，沒加
+# 進這個清單時會整欄被跳過、不列入 total/grand_total，但本身自我比對又會「剛好一致」
+# 不會被稽核抓到 (因為 total 是用同一份已濾掉 LC 的欄位重新加總，不是讀帳單自己的小計
+# 格)；驗算來源 "TOTAL(VND) not VAT Local Charge"/VAT/GRAND TOTAL 三欄，加回 LC 後三欄
+# 都剛好對得上 (sample7 9HCMHKG604N3：636704+50936=687640)，才確認 LC 要當 Local Charge。
+_TW_LOCAL_FEES = ("D/O", "H/D", "CIC", "CFS", "THC", "VSC", "EQUIP", "OTHER", "LC")
 _TW_NOVAT_FEES = ("A/F", "O/F", "EXWORK")
 
 
@@ -10944,9 +10949,13 @@ def _tw_fee_label(cell) -> str:
     return _tw_header_first_line(cell)
 
 
-def _tw_header_col(header_row: list, label: str) -> Optional[int]:
+def _tw_header_col(header_row: list, label) -> Optional[int]:
+    """label 可以是單一字串，也可以是多個候選字串 (同一欄位各月份標籤不同時用，
+    例如出口版 "ETD"、進口版 "Ngay tau den"、舊樣本 "ATD")。比對去聲調、不分大小寫。"""
+    labels = {label} if isinstance(label, str) else set(label)
+    norm_labels = {_vt_norm(lb) for lb in labels}
     for c, cell in enumerate(header_row):
-        if _tw_header_first_line(cell).upper() == label:
+        if _tw_header_first_line(cell).upper() in labels or _vt_norm(cell) in norm_labels:
             return c
     return None
 
@@ -10991,17 +11000,24 @@ def _tw_exw_sheet(rows: List[list]) -> Optional[int]:
 
 
 def _tw_exw_details(book) -> Dict[str, List[Tuple[str, float]]]:
-    """進口版 EXW 工作表：{Bill No: [(明細名稱, USD), …]}；沒有這張表時回傳空字典。"""
+    """進口版 EXW 工作表：{Bill No: [(明細名稱, USD), …]}；沒有這張表時回傳空字典。
+    欄位位置用表頭文字找，不固定寫欄號：有些月份 "Bill No" 前面多一欄序號
+    (例如 "No:")，固定欄號會整欄錯位抓到空白/文字 (2026-11 批次抽樣)。"""
     details: Dict[str, List[Tuple[str, float]]] = {}
     for _, rows in book.sheets:
         h = _tw_exw_sheet(rows)
         if h is None:
             continue
+        header_row = rows[h]
+        bill_c_found = _tw_header_col(header_row, "BILL NO")
+        bill_c = bill_c_found if bill_c_found is not None else 0
+        label_c = next((c for c, cell in enumerate(header_row) if _tw_key(cell) == "EXW/FCADETAIL"), 2)
+        usd_c = label_c + 1
         current = None
         for row in rows[h + 1:]:
-            bill = _vn_text(_vn_cell(row, 0))
-            label = _vn_text(_vn_cell(row, 2))
-            usd = _vn_num(_vn_cell(row, 3))
+            bill = _vn_text(_vn_cell(row, bill_c))
+            label = _vn_text(_vn_cell(row, label_c))
+            usd = _vn_num(_vn_cell(row, usd_c))
             if bill:
                 current = bill
             if current and label and usd:
@@ -11021,9 +11037,15 @@ def _tw_tong_sheets(book) -> Tuple[List[Dict], List[Dict]]:
         header_row = rows[head]
         fee_cols = _tw_tong_fee_cols(header_row)
         bill_c = _tw_header_col(header_row, "BILL NO.")
-        atd_c = _tw_header_col(header_row, "ATD")
+        # 日期欄標籤依月份不同："ATD"(舊樣本)、"ETD"(出口版)、"Ngay tau den"(進口版)
+        atd_c = _tw_header_col(header_row, ("ATD", "ETD", "NGAY TAU DEN"))
         rate_c = _tw_header_col(header_row, "XRATE")
         note_c = _tw_header_col(header_row, "NOTE PORT OF LOADING/DISCHARGE")
+        # 稽核用帳單自己的 VAT / GRAND TOTAL 欄 (不是逐項重新加總)，才能抓到「表頭
+        # 多了一種沒處理過的費用欄位」這種漏算 (2026-11-12：出口版 "LC" 欄漏掉時，
+        # 逐項重新加總自己跟自己比對一定一致，抓不到少算了一欄)
+        vat_c = _tw_header_col(header_row, "VAT")
+        grand_c = _tw_header_col(header_row, "GRAND TOTAL")
         sub = rows[head + 1] if head + 1 < len(rows) else []
         col20 = next((c for c, v in enumerate(sub) if _vn_text(v).strip("'").upper() == "20"), None)
         col40 = next((c for c, v in enumerate(sub) if _vn_text(v).strip("'").upper() == "40"), None)
@@ -11076,8 +11098,13 @@ def _tw_tong_sheets(book) -> Tuple[List[Dict], List[Dict]]:
                     items.append({**base, "description": f"{label} (USD {_tw_usd_text(usd)})",
                                   "amount": vnd, "vat": 0})
                     novat_vnd += vnd
-            totals.append({"invoice_no": bill, "total": local_vnd + novat_vnd,
-                           "grand_total": local_vnd + vat_vnd + novat_vnd})
+            grand_cell = _vn_num(_vn_cell(row, grand_c)) if grand_c is not None else None
+            vat_cell = _vn_num(_vn_cell(row, vat_c)) if vat_c is not None else None
+            total_cell = (grand_cell - vat_cell) if grand_cell is not None and vat_cell is not None else None
+            totals.append({
+                "invoice_no": bill,
+                "total": total_cell if total_cell is not None else local_vnd + novat_vnd,
+                "grand_total": grand_cell if grand_cell is not None else local_vnd + vat_vnd + novat_vnd})
     return items, totals
 
 
