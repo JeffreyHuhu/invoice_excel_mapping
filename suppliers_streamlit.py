@@ -9732,7 +9732,8 @@ def _vt_parse_sheet(name: str, rows: List[list], cfg: Dict, supplier: str,
         return _vt_col(labels, *(v if isinstance(v, (list, tuple)) else (v,)))
 
     col = {k: find(v) for k, v in cfg.items()
-           if k in ("total", "total_add", "grand", "vat", "date", "cbm", "kg", "port", "group_col", "base_key")}
+           if k in ("total", "total_add", "total_check", "grand", "vat", "date", "cbm", "kg", "port",
+                     "group_col", "base_key")}
     keys = [_vt_col(labels, k) for k in cfg["key"]]
     # inv_col：整張沒有單一發票號碼 (doc_key) 時，改用這一欄當每一列的發票號碼 (VN APL
     # Inv# 欄，原文照填包含 "+" 連接符號)；這一欄不存在 (例如 POUYUEN DN 沒有 Inv# 欄) 時
@@ -9947,11 +9948,13 @@ def _vt_parse_sheet(name: str, rows: List[list], cfg: Dict, supplier: str,
     bill_month = _vt_bill_month(rows) if cfg.get("date_dm_swap") else None
     for row in rows[start:end]:
         key = next((_vn_text(_vn_cell(row, k)) for k in keys if _vn_text(_vn_cell(row, k))), "")
+        multi_key = False
         if cfg.get("key_comma") and key:
             # key_comma：一格裡換行的多個號碼用 ", " 連接 (VN16 SONG TRIỀU 答案，2026-11-05)
             raw_key = next(str(_vn_cell(row, k)) for k in keys if _vn_text(_vn_cell(row, k)))
             lines = [ln.strip() for ln in raw_key.split("\n") if ln.strip()]
             key = ", ".join(lines) if lines else key
+            multi_key = len(lines) > 1
         # 一格裡換行的好幾個號碼 ("102001\n270960") 也拆開
         joined = list(dict.fromkeys(
             v for k in join_keys if k is not None
@@ -10156,12 +10159,33 @@ def _vt_parse_sheet(name: str, rows: List[list], cfg: Dict, supplier: str,
         if not row_items:
             continue
         items += row_items
+        # total_skip_multi_key：合併好幾個發票號碼的列 (key_comma 的多行儲存格)，
+        # 帳單自己的 TỔNG 常常是舊值沒跟著更新 (VN16 Chuyển kho xe cont 沒有
+        # TOTAL PLV CHECK 核對欄可以交叉比對，使用者 2026-11-11 確認不稽核這種列，
+        # 避免把帳單本身的殘留舊值誤判成擷取錯誤)
+        if multi_key and cfg.get("total_skip_multi_key"):
+            continue
         # 合計欄空白 (公式沒有存計算結果) 時當成沒有合計，不是 0
         t = totals.setdefault(key, [None, None])
         # total_add：另一個幣別的合計 (VN14 費用有 USD 也有 VND，使用者 2026-10-27 要求
         # 兩種都稽核)：USD 合計 + VND 合計 = 兩種費用的加總，任一幣別對不上都會不通過
         for i, name_ in ((0, "total"), (0, "total_add"), (1, "grand")):
             value = _vn_num(_vn_cell(row, col[name_])) if col.get(name_) is not None else None
+            if name_ == "total" and col.get("total_check") is not None:
+                # total_check：帳單另外有一欄自己核對明細加總用 (VN16 TOTAL PLV
+                # CHECK)，優先採用；跟 TỔNG 常常各自有缺漏、彼此對不上
+                # (2026-11-11 使用者確認)。費用加總符合核對欄或 TỔNG 任一個就算
+                # 通過；核對欄這一列空白 (沒有可信基準) 就不稽核這張發票；核對欄
+                # 有值但兩邊都對不上，保留 TỔNG 讓稽核照常抓出不一致 (真的異常)
+                row_sum = round(sum(it.get("amount") or 0 for it in row_items), 2)
+                check_val = _vn_num(_vn_cell(row, col["total_check"]))
+                if check_val is not None:
+                    if abs(row_sum - check_val) <= 1 or (value is not None and abs(row_sum - value) <= 1):
+                        value = row_sum
+                    else:
+                        value = check_val
+                else:
+                    value = None
             if value is not None:
                 t[i] = (t[i] or 0) + value
     if cfg.get("merge_no_fee"):
@@ -11629,13 +11653,26 @@ _VT_ST_COMMON = {"date": "=NGAY", "port": None, "cbm": "SO LUONG CBM",
                  "fields": {"vessel": "SO XE", "container_no": ("SO CONTAINER", "SO XE"),
                             "port_of_loading": ("DIEM DI", "DIEM DI"), "port_of_discharge": "DIEM DEN"}}
 _VT_SONG_TRIEU = [
+    # 新版 (2026 年起)：有 SO XE/DIEM DI/DIEM DEN/% TANG 欄。name_require 擋住
+    # 舊版 (2025 年，沒有 SO XE)，才會往下試舊版設定 (2026-11-11 抽樣 T03.2025)
     (r"XE TAI", {**_VT_ST_COMMON, "header": "SO XE", "key": ["SO INV"], "order_is_key": True,
+                 "name_require": "SO XE",
                  "fees": [("PHI BOC", None), ("NEO XE", None), ("PHAT SINH", None),
                           ("CUOC VAN CHUYEN CHUA TANG", None), ("SO TIEN % TANG", "SỐ TIỀN % TĂNG {pct}%")]}),
+    # 舊版：沒有車號/起迄點/漲價欄，運費就是最終金額，沒有 TỔNG 欄可以勾稽
+    # (2026-11-11 抽樣 T03.2025 "Hang Xe Tai")
+    (r"XE TAI", {**_VT_ST_COMMON, "header": "SO INV", "key": ["SO INV"], "order_is_key": True,
+                 "total": None,
+                 "fees": [("PHI BOC", None), ("PHAT SINH", None), ("CUOC VAN CHUYEN", None)]}),
     (r"CHUYEN KHO", {**_VT_ST_COMMON, "header": "SO CONTAINER", "key": ["SO INV", "SO CONTAINER"], "order_is_key": True,
+                     "total_skip_multi_key": True,
                      "fees": [("TROUBLE", None), ("=NEO", None), ("CUOC VAN CHUYEN CHUA TANG", None),
                               ("SO TIEN % TANG", "SỐ TIỀN % TĂNG {pct}%")]}),
     (r"CONT (XUAT|NHAP)", {**_VT_ST_COMMON, "header": "SO CONTAINER", "key": ["=SO LO", "SO CONTAINER"], "bl_is_key": True,
+                           # total_check / TOTAL PLV CHECK：帳單自己核對明細加總用的欄 (2026
+                           # 年版才有，舊版 2025 樣本沒有這欄)；跟 TỔNG 常常各自缺漏、對不上，
+                           # 符合任一欄就算通過 (2026-11-11 使用者確認，見 _vt_parse_sheet)
+                           "total_check": "TOTAL PLV CHECK",
                            "fees": [("CUOC VC CHUA TANG", None), ("SO TIEN % TANG", "SỐ TIỀN % TĂNG {pct}%"),
                                     ("BD NANG", None), (("PHI KHAC PHI", "PHI KHAC SO TIEN"), None),
                                     (("PHI NANG/HA NANG", "PHI NANG / HA NANG"), "PHÍ NÂNG (SHĐ {shd})"),
