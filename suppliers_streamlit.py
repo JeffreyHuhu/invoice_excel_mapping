@@ -12381,6 +12381,109 @@ def _ct_is_pouchen(book) -> bool:
     return any(re.match(r"^P\.?\s?CHEN", _vt_norm(n)) for n, _ in book.sheets)
 
 
+def _ct_pc_invoice_list_sheets(book) -> List[Tuple[str, list]]:
+    """POU CHEN 批次裡，代墊吊櫃費工作表有時叫 "PHI…" (配 _VT_CT_POUCHEN 的
+    "^PHI" 設定)，有時叫別的名稱 (例如 "CH PC")：名稱比對抓不到，整張代墊
+    資料 (含可勾稽的每票 AMOUNT) 被跳過 (2026-11-12 使用者回報 TU 12-17.10.26
+    「沒有可勾稽的總額」才發現：P.CHEN 表本身這期沒有 TOTAL 列可勾稽，但真正
+    的問題是 CH PC 這張代墊表整張被漏掉，裡面本來就有逐票 AMOUNT 可查核)。
+    改用內容判斷 (跟 _ct_paid_on_behalf 一致的 "INVOICE LIST" 標記)，不限制
+    工作表名稱；"^PHI" 名稱比對到的表已經由 _VT_CT_POUCHEN 處理，這裡排除。"""
+    out = []
+    for name, rows in book.sheets:
+        if re.match(r"^PHI", _vt_norm(name)):
+            continue
+        top = " ".join(_vn_label(v) for r in rows[:15] for v in r if _vn_label(v))
+        if "INVOICE LIST" in top:
+            out.append((name, rows))
+    return out
+
+
+def _ct_pc_batch_ref(rows: List[list]) -> Optional[str]:
+    """P.CHEN 表抬頭的對帳單批次號 ("Số BK: 12-17/10/26")，給沒有發票號碼的
+    整批調整費用當發票號碼用 (見 _ct_pc_extra_notes)。"""
+    text = "\n".join(" | ".join(_vn_text(v) for v in r if _vn_text(v)) for r in rows[:15])
+    return _search(r"S[ốO]\s*BK\s*:\s*([\w./-]+)", text)
+
+
+def _ct_pc_extra_notes(book) -> List[Dict]:
+    """P.CHEN 表明細列結束、TOTAL 列之前，偶爾有沒有發票號碼、只用一段文字
+    說明原因的整批調整費用 (例如 "17/10: vào kho TBS thay nắp hộp giày…
+    2,000,000")，不屬於任何一張出貨發票。_vt_make 的明細列比對要靠 INVOICE #
+    欄分組，這種列抓不到發票號碼就被跳過 (2026-11-12 使用者回報 TU 12-17.10.26
+    金額查核差了剛好這兩筆的合計才發現：P.CHEN 自己的 TOTAL 列已經把這兩筆
+    算進去，明細卻漏了，所以 whole-file 勾稽對不起來)。
+    使用者 2026-11-12 確認：這種列算在對帳單批次號 (Số BK) 底下，不併入任何
+    一張出貨發票。"""
+    items: List[Dict] = []
+    for name, rows in book.sheets:
+        if not re.match(r"^P\.?\s?CHEN", _vt_norm(name)):
+            continue
+        head_i = next((i for i, row in enumerate(rows[:20])
+                        if _vt_col(_vt_labels(rows, i, two_rows=False), "INVOICE") is not None), None)
+        if head_i is None:
+            continue
+        labels = _vt_labels(rows, head_i, two_rows=False)
+        idx_inv = _vt_col(labels, "INVOICE")
+        idx_fees = [(c, fee_name) for c, fee_name in (
+            (_vt_col(labels, "PHI DICH VU"), "PHÍ DỊCH VỤ"),
+            (_vt_col(labels, "PHI VAN TAI"), "PHÍ VẬN TẢI"),
+            (_vt_col(labels, "PHI LUU CONT"), "Phi Luu cont")) if c is not None]
+        batch_ref = _ct_pc_batch_ref(rows)
+        for row in rows[head_i + 1:]:
+            if _vn_label(_vn_cell(row, 0)).startswith("TOTAL"):
+                break
+            if _vn_text(_vn_cell(row, idx_inv)):
+                continue   # 一般明細列 (有發票號碼)，_ct_pc_parse 已經處理
+            note = _vn_text(_vn_cell(row, 0))
+            for c, fee_name in idx_fees:
+                amount = _vn_num(_vn_cell(row, c))
+                if amount:
+                    items.append({
+                        "description": note or fee_name, "amount": amount, "vat": None,
+                        "invoice_no": batch_ref, "supplier": "CTY TNHHDV GN VT VA TM CONG THANH",
+                        "port_of_loading": "VIETNAM", "port_of_discharge": "VIETNAM",
+                        "consignee": "POU CHEN",
+                    })
+    return items
+
+
+def _ct_pc_parse_all(book) -> List[Dict]:
+    parsed = _ct_pc_parse(book)
+    extra_notes = _ct_pc_extra_notes(book)
+    if extra_notes:
+        parsed.append({"header": {}, "items": extra_notes})
+    for _name, rows in _ct_pc_invoice_list_sheets(book):
+        extra = _ct_paid_on_behalf(rows)
+        if extra and extra["items"]:
+            parsed.append({"header": extra["header"], "items": extra["items"]})
+    return parsed
+
+
+def _ct_pc_totals_all(book) -> List[Dict]:
+    """P.CHEN 本身的 TOTAL 列 (whole-file 勾稽) 沒有把代墊吊櫃費 (CH PC/PHI
+    表) 算進去——兩者是獨立費用，各自開票，只是同一份檔案。直接把 CH PC 的
+    稽核結果加進來會讓 P.CHEN 原本就對得上的 whole-file 勾稽多算一筆、變成
+    「不一致」(2026-11-12)：whole-file 的未稅合計要把 CH PC 的未稅合計也加
+    進去，才會等於全部明細 (P.CHEN + CH PC) 的加總。"""
+    totals = _ct_pc_totals(book)
+    extra_entries: List[Dict] = []
+    extra_net = 0.0
+    has_extra = False
+    for _name, rows in _ct_pc_invoice_list_sheets(book):
+        extra = _ct_paid_on_behalf(rows)
+        if not extra:
+            continue
+        extra_entries += extra.get("audit", [])
+        extra_net += sum(it.get("amount") or 0 for it in extra["items"])
+        has_extra = True
+    if has_extra:
+        for t in totals:
+            if t.get("invoice_no") is None and t.get("total") is not None:
+                t["total"] += extra_net
+    return totals + extra_entries
+
+
 def detect_cong_thanh_any(text: str) -> bool:
     # 2025 年的 POU CHEN 對帳表抬頭沒有 CONG THANH 稅號：用壓車表標題辨識
     return detect_cong_thanh(text) or "SAVED CHASSIS TRAILER LIST" in text.upper()
@@ -12388,8 +12491,8 @@ def detect_cong_thanh_any(text: str) -> bool:
 
 register_supplier(
     "CONG_THANH", "CTY TNHHDV GN VT VA TM CONG THANH", detect_cong_thanh_any, None,
-    sheet_parse=lambda book: _ct_pc_parse(book) if _ct_is_pouchen(book) else parse_cong_thanh_sheets(book),
-    sheet_totals=lambda book: _ct_pc_totals(book) if _ct_is_pouchen(book) else _cong_thanh_totals(book),
+    sheet_parse=lambda book: _ct_pc_parse_all(book) if _ct_is_pouchen(book) else parse_cong_thanh_sheets(book),
+    sheet_totals=lambda book: _ct_pc_totals_all(book) if _ct_is_pouchen(book) else _cong_thanh_totals(book),
 )
 
 
