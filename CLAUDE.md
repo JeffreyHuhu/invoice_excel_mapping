@@ -13,6 +13,7 @@
 3. **錯誤處理**：若遇到格式不符或損壞的檔案，必須妥善捕捉 exception，紀錄到 log 檔中，不得中斷整體流程。
 4. **極簡修改**：修改程式碼時，只動必要的模組，盡量保持現有邏輯的穩定性。
 5. **缺發票日期不是重大 ERROR**：`validation_streamlit.py` 的 `_check_header()` 缺 `invoice_date` 只標 WARN (信心等級最多「中」)，不判定為 ERROR、不直接打成「低」。所有供應商都適用 (2026-11-12)。其餘必填欄位 (INVOICE NO/SUPPLIER/CONSIGNEE/Description/AMOUNT) 不受影響，仍是 ERROR。
+6. **未勾稽一律列為「低」**：`validation_streamlit.py` 的 `_level()`，發票完全沒有金額勾稽 (`NO_TOTAL_AUDIT`：帳單找不到總額，或供應商還沒有稽核規則) 時，信心等級直接降為「低」，不管其他問題為何。所有供應商都適用 (2026-11-12)。原因：未勾稽代表金額沒有被查核過，不該算「高」信心。
 
 # 專案架構 (Project Structure)
 - `extract_utils_streamlit.py`：與供應商無關的共用核心引擎 (PDF 文字擷取/OCR、供應商註冊表、標準欄位、比對評分、VAT/總額稽核、Excel 讀寫)。

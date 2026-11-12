@@ -15,11 +15,14 @@ validation_streamlit.py
      CREDIT 字樣的折讓不計入)。
   3. 金額勾稽：沿用 audit_invoice_totals() 的三項稽核 (未稅加總=未稅總額、
      未稅+稅額=含稅總額、含稅-代扣稅=實付金額)，任何一項不一致就是錯誤。
+     完全沒有勾稽 (NO_TOTAL_AUDIT，帳單找不到總額或供應商還沒有稽核規則)：
+     金額沒有被查核過，信心等級直接降為「低」(2026-11-12 使用者規定，
+     所有供應商適用)。
 
 每個問題分三種嚴重度：
   ERROR  幾乎確定抓錯，一定要人工複查 (信心等級直接降為「低」)
   WARN   可疑，建議複查
-  INFO   不是錯誤，但降低信心 (例如這家供應商還沒有總額稽核規則可以交叉確認)
+  INFO   不是錯誤，但降低信心 (NO_TOTAL_AUDIT 例外：見上方第 3 點，直接降為「低」)
 
 每張發票算出一個 0~1 的信心度與「高/中/低」信心等級，低信心的發票會觸發
 fallback_streamlit.py 的備援擷取，並列入異常清單 (Exceptions)。
@@ -415,6 +418,10 @@ def _confidence(issues: List[Dict]) -> float:
 
 def _level(issues: List[Dict], confidence: float) -> str:
     if any(i["severity"] == ERROR for i in issues):
+        return LEVEL_LOW
+    # 未勾稽代表金額沒有被查核過，不管其他問題為何都列為「低」
+    # (使用者 2026-11-12 規定，所有供應商適用)
+    if any(i["rule"] == "NO_TOTAL_AUDIT" for i in issues):
         return LEVEL_LOW
     # 有任何 WARN (含 LLM 擷取的「需人工複查」) 就至少是「中」，才會列入異常清單
     if any(i["severity"] == WARN for i in issues):
