@@ -26,3 +26,5 @@ test_samples/TRANS_WAGON/sample8.xls
 test_samples/TRANS_WAGON/sample8_ref.xlsx
 test_samples/IMX/sample2.xls
 test_samples/IMX/sample2_ref.xlsx
+test_samples/CONG_THANH/sample4.xlsx
+test_samples/CONG_THANH/sample4_ref.xlsx
