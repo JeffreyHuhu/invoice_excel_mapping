@@ -8,8 +8,9 @@ validation_streamlit.py
 每一份帳單都人工做正確答案 Excel。所以這裡改用「帳單本身就該成立的規則」
 自動檢查擷取結果合不合理，不需要正確答案：
 
-  1. 必填欄位缺失 (ERROR)：INVOICE DATE、INVOICE NO、SUPPLIER、CONSIGNEE、
-     Description、AMOUNT (使用者指定的六個必要欄位)。
+  1. 必填欄位缺失 (ERROR)：INVOICE NO、SUPPLIER、CONSIGNEE、Description、AMOUNT。
+     INVOICE DATE 缺值例外，只標 WARN，不算重大錯誤 (2026-11-12 使用者最高規則，
+     所有供應商適用：原帳單本身常漏填發票日期，不該整張發票被打成低信心)。
   2. 格式檢查：金額/稅額不是數字、日期格式認不得、金額為負數 (帳單有
      CREDIT 字樣的折讓不計入)。
   3. 金額勾稽：沿用 audit_invoice_totals() 的三項稽核 (未稅加總=未稅總額、
@@ -203,7 +204,12 @@ def _check_header(row: Dict, supplier_key: Optional[str] = None) -> List[Dict]:
     issues = []
     for code in REQUIRED_HEADER_FIELDS:
         if _is_blank(row.get(code)):
-            issues.append(_issue(ERROR, code, "MISSING_REQUIRED",
+            # 缺發票日期不算重大錯誤，只標 WARN (信心等級最多「中」)，不直接判定「低」。
+            # 2026-11-12 使用者最高規則：所有供應商都適用，原帳單本身常漏填發票日期，
+            # 不該整張發票被打成低信心。其餘必填欄位 (INVOICE NO/SUPPLIER/CONSIGNEE)
+            # 不受影響，仍是 ERROR。
+            severity = WARN if code == "invoice_date" else ERROR
+            issues.append(_issue(severity, code, "MISSING_REQUIRED",
                                  f"必填欄位「{FIELD_LABELS[code]}」抓不到值"))
     applies = SUPPLIER_REQUIRED_WHEN.get(supplier_key or "", lambda _row: True)(row)
     for code, level in (SUPPLIER_REQUIRED_FIELDS.get(supplier_key or "", {}) if applies else {}).items():
