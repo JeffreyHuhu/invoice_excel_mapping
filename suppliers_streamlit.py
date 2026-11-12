@@ -10535,7 +10535,10 @@ def _vt_make(supplier: str, cfgs: List[Tuple[str, Dict]]):
         merged: Dict[str, List[float]] = {}
         has_total = has_grand = False
         for name, rows, cfg in _vt_sheets(book, cfgs):
-            has_total |= "total" in cfg or "sheet_total" in cfg
+            # sum_row 也會算出一個可勾稽的未稅合計 (表尾 TOTAL 列各費用欄加總)，不是只有
+            # "total"/"sheet_total" 才算有總額可勾稽 (2026-11-12 發現：VN18 SAIGON_TRANSPORT
+            # 等好幾家供應商只設定 sum_row，這裡漏了判斷，整份一直顯示「沒有可勾稽的總額」)
+            has_total |= "total" in cfg or "sheet_total" in cfg or "sum_row" in cfg
             has_grand |= "grand" in cfg or bool(cfg.get("sheet_total", (None, None))[1])
             for key, pair in _vt_parse_sheet(name, rows, cfg, supplier, _vt_year(book))[1].items():
                 m = merged.setdefault(key, [None, None])
@@ -12003,7 +12006,10 @@ register_supplier(
 # 每列一票：空運費 A/F (USD 與換算後 VND)、Local Charge、Break Bulk (都是 VND)，
 # 各有自己的紅色發票號碼 (Red invoice no.)。使用者 2026-10-27：發票號碼用 Red invoice no.
 # (每項費用取自己右邊那一欄；空白才用 HAWB)。日期欄是
-# "26/08/2026 - 146 KGS" 這種文字。沒有逐列合計，不做逐張勾稽。
+# "26/08/2026 - 146 KGS" 這種文字。
+# 整張表沒有逐列合計 (每列只是一票)，但表尾有 "TOTAL" 列 (各費用欄合計) +
+# "TOTAL AMOUNT :" (全部合計)：用 sum_row 跟整張表費用加總勾稽
+# (2026-11-12 使用者回報「沒有可勾稽的總額」才發現這張表其實有合計列)。
 _VT_SAIGON = [
     # OBC 快遞的 BẢNG KÊ CÔNG NỢ (2026-10-28 抽樣，工作表 "POU SUNG-寶崧-NHAP")：每列一張提單 (Số Bill)，
     # THÀNH TIỀN VND 是金額 (已含其他費用)
@@ -12015,13 +12021,17 @@ _VT_SAIGON = [
             # A/F 費用名稱 "A/F (USD 59.52)"：USD 原幣金額取 A/F (USD) 欄，只加在 A/F 列 (2026-11-05 POUYUEN 答案)
             "fees": [("AMOUNT (VND)", "A/F", "RED INVOICE NO"),
                      ("LOCAL CHARGE (VND)", "Local Charge", "<RED INVOICE NO"),
-                     ("BREAK BULK", "Break Bulk", "RED INVOICE NO")],
+                     # 有些月份這欄標題打成 "Break AWB" (不是 "Break Bulk")，意思相同，欄位名稱要兩個都認
+                     # (2026-11-12 抽樣：APRIL-2026/FEBRUARY-2026/BK 012025 都是 "Break AWB"，
+                     # 原本只認 "Break Bulk" 會漏抓這筆費用，整張金額少了這一欄)
+                     (("BREAK BULK", "BREAK AWB"), "Break Bulk", "RED INVOICE NO")],
             "desc_usd": "USD", "desc_usd_only": "A/F",
             # 集團公司名稱用英文名稱列表的寫法 (答案 "POUYUEN VIETNAM COMPANY LIMITED"，帳單抬頭 "POU YUEN VN ENT LTD")
             "const": {"consignee": "POUYUEN VIETNAM COMPANY LIMITED"},
             # 同一 MAWB 的後續列日期空白，沿用上一列日期 (答案表頭說明，2026-11-05)
             "ffill_date": True,
             "date": ("INV DATE", "DATE INV"), "kg": "CHARGEABLE WEIGHT",
+            "sum_row": r"^TOTAL$",
             "fields": {"bl_no": "HAWB NO", "mbl_no": "MAWB NO"}}),
 ]
 
