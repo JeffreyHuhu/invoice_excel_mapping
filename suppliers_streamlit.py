@@ -8722,20 +8722,34 @@ def _cw_invoice_no(text: str) -> Optional[str]:
     return f"S{hawb}" if hawb else None
 
 
-def _cw_docs(text: str) -> List[str]:
+def _cw_docs(text: str, page_nums: Optional[List[int]] = None):
     """一份 PDF 有好幾張發票時切開：每頁抬頭都有 SHIPMENT 號碼，連續幾頁號碼
     相同 (或續頁讀不到號碼) 就是同一張；"Page 1 of N" 一定是新的一張 (同一個
     SHIPMENT 可能開兩張，例如 YUSEN SSGN0316461 另有一張貨櫃延滯費)。沒有號碼
     也沒有頁碼的頁 (疊印的附件頁) 不算。沒有分頁記號 (非 _cargowise_pages
-    擷取) 時整份當一張。先修 OCR 的數字空白 ("8%=64 . 000"、"1100000 ,00")。"""
+    擷取) 時整份當一張。先修 OCR 的數字空白 ("8%=64 . 000"、"1100000 ,00")。
+
+    page_nums (可選)：跟 text 分頁記號一一對應的原始 PDF 頁碼 (0 起算)，給
+    cargowise_invoice_pages() 用，算出每張發票對應到原始 PDF 的頁碼範圍 (本機
+    轉檔工具拆檔用)。沒有傳就跟以前一樣只回傳文字 list，不影響既有行為；有傳
+    時回傳 (文字 list, 對應頁碼 list)。"""
     text = re.sub(r"(?<=\d) *([.,]) *(?=\d)", r"\1", text)
-    pages = [p for p in text.split(_CW_PAGE_MARK) if p.strip()]
+    raw = text.split(_CW_PAGE_MARK)
+    if page_nums is not None:
+        pairs = [(p, n) for p, n in zip(raw, page_nums) if p.strip()]
+        pages = [p for p, _ in pairs]
+        nums: List[Optional[int]] = [n for _, n in pairs]
+    else:
+        pages = [p for p in raw if p.strip()]
+        nums = [None] * len(pages)
     if len(pages) <= 1:
-        return [text.replace(_CW_PAGE_MARK, "")]
+        single = [text.replace(_CW_PAGE_MARK, "")]
+        return (single, [nums]) if page_nums is not None else single
     docs: List[List[str]] = []
+    doc_pages: List[List[Optional[int]]] = []
     doc_inv: List[Optional[str]] = []
     current = None
-    for page in pages:
+    for page, num in zip(pages, nums):
         inv = _cw_invoice_no(page)
         # 畫質太差的掃描頁常連 "Page 1 of N" 都讀不出來，但 "SHIPMENT DETAILS
         # PRINTED BY" / "GOODS DESCRIPTION" 這兩個區塊只會出現在第一頁 (總額頁
@@ -8758,23 +8772,60 @@ def _cw_docs(text: str) -> List[str]:
                        if inv and inv != current and not first_page else None)
         if jump_target is not None:
             docs[jump_target].append(page)
+            doc_pages[jump_target].append(num)
         elif docs and not first_page and (inv is None or inv == current or later_page):
             docs[-1].append(page)
+            doc_pages[-1].append(num)
         else:
             docs.append([page])
+            doc_pages.append([num])
             doc_inv.append(inv)
             current = inv
     # 同一張單據掃描兩次 (號碼與 TOTAL 都相同) 只留一張 (使用者 2026-10-28：DHL 合輯第 19、20 頁
     # S2601526262)。同號碼但總額不同的是另一張發票 (YUSEN SSGN0316461)，照常保留
-    out, seen = [], set()
-    for d in ("\n".join(d) for d in docs):
+    out, out_pages, seen = [], [], set()
+    for d, nums_d in zip(("\n".join(d) for d in docs), doc_pages):
         total = re.findall(r"(?m)^[\s|\"'`]*TOTAL\b[^\n]*?(\d[\d.,]*\d)\s*$", d)
         key = (_cw_invoice_no(d), total[-1] if total else None)
         if key[0] and key[1] and key in seen:
             continue
         seen.add(key)
         out.append(d)
-    return out or [text]
+        out_pages.append(nums_d)
+    if not out:
+        out, out_pages = [text], [nums]
+    return (out, out_pages) if page_nums is not None else out
+
+
+def cargowise_invoice_pages(pdf_path: str, key: str) -> Dict[str, List[int]]:
+    """DSV_VN/MOL/DHL_VN/YUSEN 專用：回傳這份 PDF 每張發票 (SHIPMENT 號碼)
+    對應到原始 PDF 的頁碼 (1 起算)。跟 invoice_text()/_cw_docs() 用同一套切法，
+    只是多記頁碼，給本機轉檔工具 (pdf_to_excel.exe) 判斷能不能把信心等級低的
+    發票拆成另一份 PDF，不影響原本的擷取結果。算不出頁碼對應時回傳空 dict
+    (呼叫端退回整份一起歸檔的舊行為)。"""
+    from extract_utils_streamlit import supplier_pages
+    entry = SUPPLIER_REGISTRY.get(key)
+    if not entry:
+        return {}
+    pages = supplier_pages(pdf_path, key)
+    check = entry.get("invoice_page")
+    keep = [i for i, p in enumerate(pages) if check(p)] if check else list(range(len(pages)))
+    if not keep:
+        keep = list(range(len(pages)))
+    text = "\n".join(pages[i] for i in keep)
+    docs, doc_pages = _cw_docs(text, page_nums=keep)
+    result: Dict[str, List[int]] = {}
+    for doc_text, nums in zip(docs, doc_pages):
+        inv = _cw_invoice_no(doc_text)
+        if not inv:
+            continue
+        bucket = result.setdefault(inv, [])
+        for n in nums:
+            if n is not None and (n + 1) not in bucket:
+                bucket.append(n + 1)  # 1 起算，給 pypdf 拆檔用
+    for inv in result:
+        result[inv].sort()
+    return result
 
 
 def _cw_after(text: str, header_re: str, line_re: str, look: int = 4):
@@ -8978,6 +9029,7 @@ register_supplier(
     # 使用者 2026-10-28，JUL.2026_BY SHIPMENT 第 176 頁)。整份只有電子發票時一頁都
     # 不符合，invoice_text() 會改用全部頁面，照常擷取
     invoice_page=lambda page: not _is_dsv_vn_einvoice(page),
+    invoice_page_map=lambda p: cargowise_invoice_pages(p, "DSV_VN"),
 )
 
 
@@ -9187,6 +9239,7 @@ register_supplier(
     "DHL_VN", _DHL_VN_SUPPLIER, detect_dhl_vn, parse_dhl_vn,
     extract_total=_dhl_vn_extract_total,
     extract_grand_total=_dhl_vn_extract_grand_total, page_text=_cargowise_pages,
+    invoice_page_map=lambda p: cargowise_invoice_pages(p, "DHL_VN"),
 )
 
 
@@ -9210,6 +9263,7 @@ register_supplier(
     "YUSEN", "YUSEN LOGISTICS (VIETNAM) CO., LTD.", detect_yusen, parse_yusen,
     extract_total=_cw_extract_total, extract_grand_total=_cw_extract_grand_total,
     page_text=_cargowise_pages,
+    invoice_page_map=lambda p: cargowise_invoice_pages(p, "YUSEN"),
 )
 
 
@@ -9473,6 +9527,7 @@ register_supplier(
     extract_total=lambda t: _mol_totals(t, r"Total before VAT") if _is_molcs(t) else None,
     extract_grand_total=_mol_grand_total,
     page_text=_cargowise_pages,
+    invoice_page_map=lambda p: cargowise_invoice_pages(p, "MOL"),
 )
 
 

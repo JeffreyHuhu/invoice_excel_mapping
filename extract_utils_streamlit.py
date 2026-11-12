@@ -1240,7 +1240,8 @@ def register_supplier(key: str, label: str,
                        ocr_psm_if: Optional[Callable[[str], bool]] = None,
                        page_text: Optional[Callable[[str], List[str]]] = None,
                        ocr_attachments: bool = True,
-                       audit_tolerance_fn: Optional[Callable[[str], float]] = None) -> None:
+                       audit_tolerance_fn: Optional[Callable[[str], float]] = None,
+                       invoice_page_map: Optional[Callable[[str], Dict[str, List[int]]]] = None) -> None:
     """註冊一家供應商。
 
     ocr_attachments (可選，要搭配 invoice_page)：False 時，文字層已經有這家的
@@ -1325,6 +1326,12 @@ def register_supplier(key: str, label: str,
     extract_pages_from_pdf_force_ocr())，取代文字層，避免把亂碼數字
     悄悄寫進 Excel。目前只對 multi_page=True 的供應商生效 (透過
     _parse_multi_page_pdf())。
+
+    invoice_page_map (可選，一份 PDF 可能有好幾張發票的供應商用，目前只有
+    DSV_VN/MOL/DHL_VN/YUSEN)：傳入 PDF 路徑，回傳 {發票號碼: [原始頁碼 (1
+    起算), ...]}。本機轉檔工具 (pdf_to_excel.exe) 用它判斷一份 PDF 裡信心
+    等級低的發票對應哪些原始頁，決定能不能拆成另一份 PDF，不影響擷取結果，
+    其他供應商不用實作。
     """
     SUPPLIER_REGISTRY[key] = {
         "label": label, "detect": detect_fn, "parse": parse_fn, "multi_page": multi_page,
@@ -1335,6 +1342,7 @@ def register_supplier(key: str, label: str,
         "extract_vat_total": extract_vat_total, "invoice_page": invoice_page,
         "ocr_psm": ocr_psm, "ocr_psm_if": ocr_psm_if, "page_text": page_text, "multi_page_pdf": multi_page,
         "ocr_attachments": ocr_attachments, "audit_tolerance_fn": audit_tolerance_fn,
+        "invoice_page_map": invoice_page_map,
         # Excel 供應商一份檔案可能有好幾張對帳單，比對時跟 multi_page 一樣用
         # invoice_no 分組
         "multi_page": multi_page or sheet_parse is not None,
