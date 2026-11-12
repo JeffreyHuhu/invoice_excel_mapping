@@ -12212,8 +12212,104 @@ def detect_imx(text: str) -> bool:
             or ("MA BANG KE" in norm and "AWB.NO" in norm and "D/O FEE" in norm))
 
 
-_vt_register("IMX", "CÔNG TY TNHH DỊCH VỤ CHUYỂN PHÁT NHANH IMX", detect_imx,
-             "IMX EXPRESS SERVICE COMPANY LIMITED", _VT_IMX)  # 供應商用英文名稱 (答案 2026-11-05)
+# --- VN19 IMX 舊版 (2025) AIR FREIGHT CHARGE INVOICE：單一工作表，費用只有 USD，沒有
+# VAT、沒有發票號碼 (用 AWB.No)。整張表只有 1 個 EX. RATE 與 1 個 TOTAL (VND)：每列每個
+# 費用 = ROUND(USD × EX.RATE)，四捨五入的尾差加在最後一筆費用，讓合計 = TOTAL (VND)
+# (答案 POU HUNG-AIR-APR-2025，2026-11-12 使用者確認)。版型跟新版 (D.O FEE/AIR FREIGHT
+# 兩張表、VND 直接列出) 完全不同，不套用 _VT_IMX 那組 DSL 設定。
+def _imx_old_sheet(book) -> Optional[List[list]]:
+    for _, rows in book.sheets:
+        if any(_vn_text(_vn_cell(row, 0)).upper() == "AIR FREIGHT CHARGE INVOICE" for row in rows[:10]):
+            return rows
+    return None
+
+
+def _imx_old_items(rows: List[list]) -> Tuple[List[Dict], Optional[float]]:
+    header_idx = next((i for i, row in enumerate(rows) if _vn_text(_vn_cell(row, 0)) == "No."), None)
+    if header_idx is None:
+        return [], None
+    header = rows[header_idx]
+
+    def col(*keywords):
+        return next((i for i, v in enumerate(header) if all(k in _vn_label(v) for k in keywords)), None)
+
+    c_date, c_awb, c_shipper, c_consignee = col("DATE"), col("AWB"), col("SHIPPER"), col("CONSIGNEE")
+    c_weight = col("WEIGHT")
+    c_af, c_fuel, c_pu, c_handling = col("A/F", "CHARGE"), col("FUEL"), col("P/U"), col("HANDLING")
+    c_port_load = c_shipper + 1 if c_shipper is not None else None
+    c_port_disc = c_consignee + 1 if c_consignee is not None else None
+
+    # 舊版表頭 CONSIGNEE 是舊字型編碼 ("COÂNG TY TNHH POU HUNG VIEÄT NAM")，重音字母
+    # 常normalize 不掉：直接比對明文關鍵字 "POU HUNG"/"POUYUEN" (使用者 2026-11-12 確認)
+    consignee_raw = (_vt_consignee(rows) or "").upper()
+    consignee = ("POU HUNG VIETNAM COMPANY LIMITED" if "POU HUNG" in consignee_raw
+                 else "POUYUEN VIETNAM COMPANY LIMITED" if "POUYUEN" in consignee_raw else None)
+    rate = total_vnd = None
+    data_rows = []
+    for row in rows[header_idx + 2:]:
+        label = _vn_label(_vn_cell(row, 0))
+        if label.startswith("EX. RATE") or label.startswith("EX RATE"):
+            rate = next((v for v in row if isinstance(v, (int, float))), None)
+        elif label.startswith("TOTAL (VND)"):
+            total_vnd = next((v for v in row if isinstance(v, (int, float))), None)
+        elif isinstance(_vn_cell(row, 0), (int, float)):
+            data_rows.append(row)
+
+    items: List[Dict] = []
+    for row in data_rows:
+        awb = _vn_text(_vn_cell(row, c_awb))
+        kg_val = _vn_num(_vn_cell(row, c_weight)) if c_weight is not None else None
+        head = {
+            "supplier": "IMX EXPRESS SERVICE COMPANY LIMITED", "consignee": consignee,
+            "invoice_no": awb, "invoice_date": _vn_date(_vn_cell(row, c_date)), "bl_no": awb,
+            "shipper": _vn_text(_vn_cell(row, c_shipper)) or None,
+            "port_of_loading": _vn_text(_vn_cell(row, c_port_load)) or None,
+            "port_of_discharge": _vn_text(_vn_cell(row, c_port_disc)) or None,
+            "volume": _fmt_volume(kg=f"{round(kg_val, 3):g}" if kg_val else None),
+        }
+        for c, label in ((c_af, "A/F CHARGE"), (c_fuel, "FUEL"), (c_pu, "P/U"), (c_handling, "HANDLING")):
+            usd = _vn_num(_vn_cell(row, c)) if c is not None else None
+            if not usd:
+                continue
+            # 千分位逗號、小數照原樣 (同 desc_usd 的慣例，答案 "(USD 2,872.55)")；
+            # ":,.3f" 順便去掉 Excel 浮點誤差 (7.199999999999999 -> "7.200" -> "7.2")
+            usd_note = f"USD {usd:,.3f}".rstrip("0").rstrip(".")
+            items.append({**head, "description": f"{label} ({usd_note})",
+                          "amount": round(usd * rate) if rate else None, "vat": None})
+    if rate and total_vnd is not None and items:
+        items[-1]["amount"] += round(total_vnd) - sum(it["amount"] for it in items)
+    return items, (round(total_vnd) if total_vnd is not None else None)
+
+
+def _parse_imx_old(book) -> List[Dict]:
+    rows = _imx_old_sheet(book)
+    items, _ = _imx_old_items(rows) if rows else ([], None)
+    return [{"header": {}, "items": items or [{"description": None, "amount": None}]}]
+
+
+def _imx_old_totals(book) -> List[Dict]:
+    rows = _imx_old_sheet(book)
+    if not rows:
+        return []
+    _, total_vnd = _imx_old_items(rows)
+    return [{"invoice_no": None, "total": total_vnd}] if total_vnd is not None else []
+
+
+_imx_new_parse, _imx_new_totals = _vt_make("IMX EXPRESS SERVICE COMPANY LIMITED", _VT_IMX)
+
+
+def _imx_sheet_parse(book):
+    return _parse_imx_old(book) if _imx_old_sheet(book) else _imx_new_parse(book)
+
+
+def _imx_sheet_totals(book):
+    return _imx_old_totals(book) if _imx_old_sheet(book) else _imx_new_totals(book)
+
+
+register_supplier(
+    "IMX", "CÔNG TY TNHH DỊCH VỤ CHUYỂN PHÁT NHANH IMX", detect_imx, None,
+    sheet_parse=_imx_sheet_parse, sheet_totals=_imx_sheet_totals,
+)  # 供應商用英文名稱 (答案 2026-11-05)
 
 
 # --- VN15 EXPEDITORS 的 Excel 對帳表 (AIR IMP) -----------------------------------
