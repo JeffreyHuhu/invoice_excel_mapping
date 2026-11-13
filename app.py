@@ -34,8 +34,9 @@ learned_configs.json 也提交回 GitHub)。
     pip install streamlit pdfplumber openpyxl pandas
     streamlit run app.py
 
-擴充：要支援第 21 家供應商，去 suppliers_streamlit.py 加一組 detect_xxx()/parse_xxx()
-並呼叫 register_supplier() 即可，這支 app.py 完全不用改。
+擴充：要支援新供應商，去該國家的檔案 (suppliers_indonesia_streamlit.py /
+suppliers_vietnam_streamlit.py) 加一組 detect_xxx()/parse_xxx() 並呼叫
+register_supplier() 即可，這支 app.py 完全不用改。
 """
 
 import datetime
@@ -177,7 +178,8 @@ with st.expander(f"🏷️ 目前系統已支援 {len(registered)} 家供應商�
         number = f"{s['number']} " if s["number"] else ""
         vendor = f"，廠商代號 {s['vendor_code']}" if s["vendor_code"] else ""
         st.write(f"- **{number}{s['label']}** (代碼: `{s['key']}`{vendor})")
-    st.caption("要新增供應商，請在 suppliers_streamlit.py 增加一組辨識/擷取規則並註冊，不用改這個網頁程式。")
+    st.caption("要新增供應商，請在該國家的檔案 (suppliers_indonesia_streamlit.py / "
+               "suppliers_vietnam_streamlit.py) 增加一組辨識/擷取規則並註冊，不用改這個網頁程式。")
 
 st.markdown(
     """
@@ -581,7 +583,8 @@ fallback_log = bundle.get("fallback_log", [])
 if unknown_files:
     st.warning(
         "⚠️ 以下檔案無法辨識供應商 (未命中任何已註冊的規則)，欄位皆以 N/A 填入。"
-        "請到 suppliers_streamlit.py 新增這家供應商的辨識/擷取規則：\n\n"
+        "請到該國家的檔案 (suppliers_indonesia_streamlit.py / suppliers_vietnam_streamlit.py) "
+        "新增這家供應商的辨識/擷取規則：\n\n"
         + "\n".join(f"- {name}" for name in unknown_files)
     )
 

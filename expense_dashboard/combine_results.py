@@ -158,7 +158,9 @@ def compute_totals(rows: List[dict], fx_folder: Path, default_currency: str = No
 
 def supplier_label(key: str) -> str:
     """費用總和標題用的「VN-05 CONG_THANH」：編號取 suppliers(_streamlit).py 的
-    SUPPLIER_NUMBERS (用 ast 讀，不載入 PDF 套件)；找不到編號就只用 KEY。"""
+    SUPPLIER_NUMBERS (用 ast 讀，不載入 PDF 套件)；找不到編號就只用 KEY。
+    SUPPLIER_NUMBERS 放在 suppliers_streamlit.py (雲端) / suppliers.py (本機)，
+    這兩支檔案是依國家拆分後的統一入口 (印尼/越南規則在另外的檔案)。"""
     import ast
     import re
     for name in ("suppliers_streamlit.py", "suppliers.py"):

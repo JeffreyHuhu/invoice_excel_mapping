@@ -17,9 +17,13 @@
 
 # 專案架構 (Project Structure)
 - `extract_utils_streamlit.py`：與供應商無關的共用核心引擎 (PDF 文字擷取/OCR、供應商註冊表、標準欄位、比對評分、VAT/總額稽核、Excel 讀寫)。
-- `suppliers_streamlit.py`：各供應商專屬的 `detect_xxx()` / `parse_xxx()`，以 `register_supplier()` 註冊。新增或修正供應商只改這支檔案；`detect_supplier()` 依註冊順序比對，關鍵字較寬鬆的規則要放後面。
+- `suppliers_streamlit.py`：供應商規則的統一入口 (薄檔案)。只放：`import` 觸發各國檔案註冊、`SUPPLIER_NUMBERS`、`VN_ENGLISH_NAMES`。其他程式 (`app.py`/`verify_app.py`/`run_regression.py` 等) 只要 `import suppliers_streamlit`，不用管底下怎麼拆檔案。
+  - 供應商規則依國家拆成獨立檔案：`suppliers_indonesia_streamlit.py` (印尼)、`suppliers_vietnam_streamlit.py` (越南)。各自的 `detect_xxx()` / `parse_xxx()` 以 `register_supplier()` 註冊；`detect_supplier()` 依註冊順序比對，關鍵字較寬鬆的規則要放後面 (國家之間的註冊順序不影響判斷，因為各國關鍵字不會互相誤判；Excel 帳單供應商另有獨立的 `sheet_text()` 比對管道，見下)。
+  - `suppliers_common_streamlit.py`：跨國共用的小工具函式 (日期格式、材積格式等)，給印尼/越南檔案共用 import。只放純工具函式，不放任何供應商專屬邏輯。
+  - 新增或修正某一家供應商，只改該國家那一支檔案 (`suppliers_indonesia_streamlit.py` 或 `suppliers_vietnam_streamlit.py`)。
+  - 日後新增柬埔寨/孟加拉/緬甸/中國時，各建一支新檔案 `suppliers_<country>_streamlit.py` (仿照印尼/越南的寫法)，在 `suppliers_streamlit.py` 加一行 `import` 觸發註冊；本機同步時 `release_local.py` 的 `CORE`/`RENAMES` 也要各加一筆 (仿照既有印尼/越南那兩筆)。
   - Excel 帳單供應商 (越南 VN03 RỒNG Á CHÂU、VN05 CONG THANH)：用 `register_supplier(..., sheet_parse=, sheet_totals=)` 註冊；核心只交出「顯示中」的工作表 (`read_spreadsheet()`，隱藏的是供應商的工作副本)，detect 吃 `sheet_text()` (以 `SHEET_TEXT_MARK` 開頭，只跟 Excel 供應商比對)，`sheet_totals` 取帳單本身合計列做金額勾稽。
-  - 供應商編號 `SUPPLIER_NUMBERS`：印尼 ID01~ (Top15 + 同一份金額排名)、越南 VN01~VN20 (Vietnam Supplier Top 20)。
+  - 供應商編號 `SUPPLIER_NUMBERS` (在 `suppliers_streamlit.py` 裡)：印尼 ID01~ (Top15 + 同一份金額排名)、越南 VN01~VN20 (Vietnam Supplier Top 20)。
 - `app.py`：Streamlit 自動比對網頁 (上傳 PDF + 正確答案 Excel → 逐欄比對、計算正確率)。
 - `verify_app.py`：Streamlit 人工查核網頁 (只上傳 PDF → 逐欄標記錯誤、收集回報)。
 - `run_regression.py`：回歸測試，樣本放在 `test_samples/<SUPPLIER_KEY>/sampleN.pdf` + `sampleN_ref.xlsx`。
@@ -38,7 +42,7 @@
 
 必須記住的重點：
 - 三個位置：GitHub `main`、`D:\資誠local執行\`、`D:\資誠streamlit程式碼\`。兩個 D: 資料夾都要更新。少一個，就會「雲端正常，本機全部 N/A」。
-- 本機版檔名不帶 `_streamlit` (`extract_utils.py`、`suppliers.py`、`validation.py`、`logger.py`)。`import xxx_streamlit` 改成 `import xxx`。本機版沒有用到 fallback，所以不需要 `fallback.py`。
+- 本機版檔名不帶 `_streamlit` (`extract_utils.py`、`suppliers.py`、`suppliers_common.py`、`suppliers_indonesia.py`、`suppliers_vietnam.py`、`validation.py`、`logger.py`)。`import xxx_streamlit` 改成 `import xxx`。本機版沒有用到 fallback，所以不需要 `fallback.py`。
 - 本機版檔名不可加進 git。repo 是公開的，不可 commit 任何客戶帳單資料。
 - `D:\資誠local執行\` 是基準。先寫入並驗證它，再寫入另一邊。兩邊不一致時，以它為準。不確定時，先問我。
 - 只覆蓋 `.py` 不會更新 `.exe`。要重新打包 `pdf_to_excel.exe`、`local_batch_process.exe`。改到儀表板時，也要打包 `expense_dashboard.exe`。PyInstaller 一律用 onedir，不可用 onefile。
@@ -62,16 +66,16 @@
 1. 前置分析：逐頁看 PDF 原文。確認是否混有多種單據、是掃描檔還是可編輯 PDF、是一份一張發票還是多張發票。
 2. 寫 `detect_xxx()`：用該供應商獨有的關鍵字。不要用太短的字。曾經 `"MAERSK"` 誤判船名 `JOSEPHINE MAERSK`。同一供應商有多種版型時，各寫一個 detect/parse，再用外層函式匯整。
 3. 寫 `parse_xxx()`：回傳 `{"header": {...}, "items": [...]}`。抓不到的欄位填 `None`。
-4. 在 `suppliers_streamlit.py` 最後用 `register_supplier()` 註冊。寬鬆的判斷式放後面。
+4. 在該國家的檔案 (`suppliers_indonesia_streamlit.py` 或 `suppliers_vietnam_streamlit.py`) 最後用 `register_supplier()` 註冊。寬鬆的判斷式放後面。
 5. 跑回歸測試到 100%：`python run_regression.py <SUPPLIER_KEY>`。同一供應商的所有樣本都要跑。
-6. 改到共用邏輯 (`extract_utils_streamlit.py`、寬鬆的 detect、`normalize_value()`) 時，跑全部 `test_samples/*/`。
+6. 改到共用邏輯 (`extract_utils_streamlit.py`、`suppliers_common_streamlit.py`、寬鬆的 detect、`normalize_value()`) 時，跑全部 `test_samples/*/`。
 7. 依「同步規則」用 `invoice-release` skill 發佈。
 
 ## 沒有達到 100% 時
 - 先判斷：是程式的問題，還是正確答案 Excel 的問題。
 - 程式問題：修 `detect_xxx`/`parse_xxx`。
 - 正確答案有錯：不要為了配合錯誤答案改程式。要列出「哪一列、哪一欄、PDF 寫什麼、Excel 寫什麼」，問我確認，再更新 `sampleN_ref.xlsx`。
-- 「雲端正常，本機全部 N/A」：先確認兩個 D: 資料夾的 `suppliers.py` 是否缺新函式。
+- 「雲端正常，本機全部 N/A」：先確認兩個 D: 資料夾的 `suppliers.py`/`suppliers_indonesia.py`/`suppliers_vietnam.py`/`suppliers_common.py` 是否缺新函式。
 
 ## 正確答案 Excel 的提示列
 - 表頭上方可能有「提示列」，例如 `判斷帳單類型 key word`、`擷取key word`。這些只用來寫規則。
@@ -105,7 +109,7 @@
 - 金額稽核沒通過，一律是 ERROR。原因在原帳單時也不降級，只加上原因說明。
 - 不可把 `TOTAL_*_MISMATCH` 或公式錯誤放進 `KNOWN_SOURCE_ISSUES` 或 `SUPPLIER_EXEMPTIONS`。通過金額稽核的項目不標錯誤。
 - 使用者確認過的原帳單問題，放進 `validation_streamlit.py` 的 `KNOWN_SOURCE_ISSUES`。等級是 INFO，不是 WARN，也不標紅，不扣信心分。這只適用不影響金額的欄位。
-- `KNOWN_SOURCE_ISSUES` 的限定原始值要盡量窄 (例如 ETA 只在值為 `--` 時才算)。也要在 `suppliers_streamlit.py` 該供應商區塊加註解，提醒不要改擷取規則。
+- `KNOWN_SOURCE_ISSUES` 的限定原始值要盡量窄 (例如 ETA 只在值為 `--` 時才算)。也要在該供應商所在檔案 (`suppliers_indonesia_streamlit.py`/`suppliers_vietnam_streamlit.py`) 的區塊加註解，提醒不要改擷取規則。
 - 使用者說某項目對某供應商「可以例外」時，登記到 `SUPPLIER_EXEMPTIONS`。這些項目完全不列出。
 
 ## 「獨立一列稅金」的 Description
