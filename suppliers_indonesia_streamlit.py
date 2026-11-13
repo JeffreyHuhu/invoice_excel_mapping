@@ -1118,6 +1118,10 @@ _MAERSK_LABEL_WORDS = [
     r"Place\s*of\s*Receipt", r"Place\s*of\s*Delivery", r"SHPR", r"CNEE",
     r"POL", r"POD", r"ETD", r"ETA", r"Sold\s*to", r"Total\s*Packages",
     r"Weight", r"Volume", r"Units",
+    # 2026-11 新版面：POD 欄位右邊緊接著另一欄「Carrier Place of Delivery:」
+    # 欄位標籤 (本身沒有值)，只隔一個空白，不加這個字會被併入 POD 的值裡
+    # (例如 "Rotterdam Carrier")。
+    r"Carrier\s*Place\s*of\s*Delivery",
 ]
 _MAERSK_NEXT = "(?:" + "|".join(_MAERSK_LABEL_WORDS) + ")"
 # 跟 INDOPROSTIME 一樣：並排欄位只隔一個空白，靠「下一個已知欄位關鍵字」
@@ -1171,13 +1175,22 @@ def _maersk_clean_amount(text: Optional[str]) -> Optional[int]:
 # 掃描檔 OCR 常把項次讀成 "3." (多一個句點)，所以句點設為選填
 _MAERSK_ITEM_START_PATTERN = re.compile(
     # qty 可能有千分位逗號 (例如 "2,416.000 KG")，沒有允許的話整行不會被當成項次
+    # UOM 後面可能直接接金額 ("... M3 1,677,125")，也可能是新版面多了
+    # "Curr Unit Price ROE" 三欄 ("... EA USD 439.70 18,311.870 8,051,729")，
+    # 用貪婪 ".*" 吃掉中間多出來的欄位，只取整行最後一個數字當金額。
     r"^(?P<num>\d+)\.?\s+(?P<desc>.+?)\s+(?P<qty>[\d,]+(?:\.\d+)?)\s+"
-    r"(?P<uom>[A-Za-z][A-Za-z0-9]*)(?:\s+(?P<amount>[\d,]+))?\s*$"
+    r"(?P<uom>[A-Za-z][A-Za-z0-9]*)(?:\s+(?:.*\s+)?(?P<amount>[\d,]+))?\s*$"
 )
-_MAERSK_VAT_LINE_PATTERN = re.compile(r"^VAT\s+([\d,]+)\s*$")
+# 標籤前可能多一段稅率 ("11% VAT 885,690")，稅率設為選填
+_MAERSK_VAT_LINE_PATTERN = re.compile(r"^(?:\d+%\s*)?VAT\s+([\d,]+)\s*$")
 _MAERSK_MIN_PRICE_PATTERN = re.compile(r"^Min\.?\s*Quantity\s*Price\b.*?([\d,]+)\s*$")
-# 費用表格最後的區塊小計：整行只有一個數字
-_MAERSK_TABLE_END_PATTERN = re.compile(r"^[\d,]+$")
+# 費用表格最後的區塊小計：整行只有一個數字 (多位數+千分位逗號)。
+# 不可只要求 "一個以上的數字"：2026-11 新版面金額欄小數點 ".00" 因排版位移
+# 被拆成獨立一行的 "00"，長度只有 2 位、沒有逗號，要排除掉，否則表格會被
+# 誤判提早結束 (後面的 VAT 行、小計行都讀不到)。
+_MAERSK_TABLE_END_PATTERN = re.compile(r"^[\d,]{3,}$")
+# 金額欄小數點被拆成獨立一行的雜訊 (只有 1~2 位數字，例如 "00")
+_MAERSK_STRAY_DECIMAL_PATTERN = re.compile(r"^\d{1,2}$")
 
 
 def _maersk_extract_items(block: str) -> Tuple[List[Dict], Optional[str]]:
@@ -1189,6 +1202,8 @@ def _maersk_extract_items(block: str) -> Tuple[List[Dict], Optional[str]]:
     lines = []
     for ln in m.group(1).split("\n"):
         ln = ln.strip()
+        if _MAERSK_STRAY_DECIMAL_PATTERN.match(ln):
+            continue  # 金額小數點位移雜訊，略過不當成表格結尾也不當成內容
         if _MAERSK_TABLE_END_PATTERN.match(ln):
             break
         if ln:
@@ -1274,6 +1289,9 @@ def parse_maersk(text: str) -> Dict:
     header["supplier"] = (
         _search(r"Issued by:\s*\n(.+)", text)
         or _search(r"Total\s*Packages.*\n(.+)", text)
+        # 2026-11 新版面沒有 "Issued by:"/"Total Packages"，改抓頁尾公司
+        # 名稱的字樣 (每頁都會重複印這行)。
+        or _search(r"(PT\s+Maersk\s+Logistics\s+Indonesia)", text)
     )
     header["consignee"] = _search(rf"Sold\s*to\s*:\s*(.+?){_MAERSK_STOP}", text)
     total_volume = _search(r"Volume\s*:\s*([\d.,]+)\s*m3", text)
@@ -1282,8 +1300,14 @@ def parse_maersk(text: str) -> Dict:
     for n, block in enumerate(_maersk_split_fcr_blocks(text)):
         block_items, block_volume = _maersk_extract_items(block)
         shipment = {
-            # 海運用 FCR 號碼；空運式版面沒有 FCR，改用 HAWB (使用者 2026-11-01 提示)
-            "bl_no": _search(r"^FCR\s+(\S+)", block) or _search(r"^HAWB\s+(\S+)", block),
+            # 海運用 FCR 號碼；空運式版面沒有 FCR，改用 HAWB (使用者 2026-11-01 提示)。
+            # 2026-11 新版面沒有 "FCR xxx" 標籤，只有一個無標籤的參考號碼獨立一行
+            # 緊接在 "Sold to :" 之前 (例如 "JKT3328452")，使用者確認當 B/L NO.
+            "bl_no": (
+                _search(r"^FCR\s+(\S+)", block)
+                or _search(r"^HAWB\s+(\S+)", block)
+                or _search(r"^([A-Z]{2,5}\d{5,})\s*\n\s*Sold\s*to\s*:", block)
+            ),
             # 空運式版面的航班號 "Flight Details: SQ961" 對應 Vessel 欄位 (使用者提示)
             "vessel": _search(r"Flight\s*Details\s*:\s*(\S+)", block),
             "port_of_loading": _search(rf"\bPOL\s*:\s*(.+?){_MAERSK_STOP}", block),

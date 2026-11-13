@@ -28,3 +28,5 @@ test_samples/IMX/sample2.xls
 test_samples/IMX/sample2_ref.xlsx
 test_samples/CONG_THANH/sample4.xlsx
 test_samples/CONG_THANH/sample4_ref.xlsx
+test_samples/MAERSK/sample5.pdf
+test_samples/MAERSK/sample5_ref.xlsx
