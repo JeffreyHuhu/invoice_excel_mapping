@@ -31,6 +31,7 @@ import suppliers_vietnam_streamlit  # noqa: F401  (觸發越南供應商 registe
 # 與「印尼進度管控表」占比工作表 (2025-2026 請款金額排名 + 廠商代號)。
 #   ID01~ID15 = 印尼 TOP15；TOP15 以外沿用同一份排名 (例如 FEMARIA 第 18 名
 #   = ID18)。ID08 ORIENTAL POWER LOGISTICS 的 key 是 OPL (2026-10 建立)。
+#   OPL 的美金帳單另立 key OPL_USD = ID17 (2026-11-14 建立，廠商代號跟 OPL 相同)。
 # 越南：Desktop\越南進度管控 的「Vietnam Supplier Top 20.xlsx」(01~20，資料夾
 #   名稱「編號-廠商代號 公司名」)，建好規則後一樣在這裡登記 VN01~VN20。
 # 編號只是對照資料 (顯示在網頁清單、轉檔畫面與轉檔總表)，不影響辨識順序。
@@ -45,7 +46,8 @@ SUPPLIER_NUMBERS = {
     "DSV": ("ID06", "100023151", "PT. DSV TRANSPORT INDONESIA"),
     "INDOPROSTIME_TRANSPORT": ("ID07", "100019300", "PT. INDOPROSTIME TRANSPORT"),
     "OPL": ("ID08", "100004377", "ORIENTAL POWER LOGISTICS"),
-    "OPL_USD": ("ID08-OPL(USD)", "ID08-OPL(USD)", "OPL曜捷"),
+    # 美金帳單，使用者 2026-11-14 指定獨立供應商代號 ID17 (同一家公司，廠商代號跟 OPL 相同)
+    "OPL_USD": ("ID17", "100004377", "OPL曜捷"),
     "DWIHARTA": ("ID09", "100019242", "PT. DWIHARTA LOGISTINDO"),
     "TRANS_DAYA_PRIMA": ("ID10", "100019488", "PT. TRANS DAYA PRIMA"),
     "GALUH": ("ID11", "100019600", "PT.GALUH INTI BAHARI"),
