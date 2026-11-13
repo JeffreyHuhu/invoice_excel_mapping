@@ -5436,7 +5436,10 @@ def _galuh_extract_grand_total(text: str) -> Optional[int]:
     total = _galuh_clean_amount(_search(r"^Total\s+([\d.,]+)\s*$", text))
     if total is None:
         # 掃描檔 OCR 常漏掉 Total 那行，用金額大寫 "Terbilang: ... rupiah" 換算
-        words = _search(r"Terbilang\s*:\s*\|?\s*([A-Za-z ]+?)\s+rupiah", text)
+        # 冒號後面的雜訊符號 OCR 有時讀成 "|"、有時讀成 "["（2026-11-13
+        # 樣本 0500153、0500002：ocr_psm=6 重新辨識那一頁後變成 "["，原本
+        # 只接受 "|" 會比對失敗，改成不限定符號，只要不是英文字母都跳過）
+        words = _search(r"Terbilang\s*:\s*[^A-Za-z]*([A-Za-z ]+?)\s+rupiah", text)
         total = _indo_words_to_int(words) if words else None
     return total
 
