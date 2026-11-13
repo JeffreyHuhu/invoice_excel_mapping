@@ -384,7 +384,7 @@ def _check_audit(audit: Optional[Dict], supplier_key: Optional[str]) -> List[Dic
         entry = SUPPLIER_REGISTRY.get(supplier_key) if supplier_key else None
         has_audit_rule = bool(entry and (
             entry.get("extract_total") or entry.get("extract_grand_total")
-            or entry.get("extract_final_total")))
+            or entry.get("extract_final_total") or entry.get("sheet_totals")))
         if has_audit_rule:
             message = "帳單上找不到總額，無法做金額勾稽"
         else:
