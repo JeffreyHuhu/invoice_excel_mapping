@@ -3100,8 +3100,12 @@ def _indo_extract_grand_total(text: str) -> Optional[int]:
     是『一頁』的文字。帳單上印的 "Total" 是含稅總額 (如果這張帳單有
     V.A.T. 的話，已經把 VAT 加進去了)，所以要註冊成 extract_grand_total
     (跟『擷取到的費用明細加總 + VAT 加總』互相稽核)，不是 extract_total
-    (未稅總額)——這家供應商帳單本文沒有單獨印出未稅小計。"""
-    return _indo_clean_amount(_search(r"^Total\s+([\d,]+(?:\.\d{2})?)\s*$", text))
+    (未稅總額)——這家供應商帳單本文沒有單獨印出未稅小計。
+    退款單 (CREDIT NOTE) 的 Total 印成負數 (例如 'Total -14,749,333')，
+    但費用明細改抓成正數 (_indo_credit_note_items())，這裡要去掉負號取
+    絕對值，才能跟明細加總對上，不然會被判成 NO_TOTAL_AUDIT (查無總額)。"""
+    raw = _search(r"^Total\s+(-?[\d,]+(?:\.\d{2})?)\s*$", text)
+    return _indo_clean_amount(raw.lstrip("-")) if raw else None
 
 
 def _hyper_extract_total(text: str) -> Optional[int]:
