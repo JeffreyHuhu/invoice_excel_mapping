@@ -6672,6 +6672,7 @@ def _pss_rekap_sheet(rows: List[list]) -> Optional[Tuple[Dict, Dict]]:
     # net_tolerance：未稅合計的容許誤差 (±5 IDR)，帳單合計因進位差幾元不算錯誤 (使用者 2026-10-31 確認)
     totals = {"invoice_no": header["invoice_no"], "total": None, "grand_total": None, "final_total": None,
               "net_tolerance": 5}
+    dpp_val = non_dpp_val = None
     for r in rows[letters + 1:]:
         first = _vn_text(_vn_cell(r, 0)).strip()
         nums = [x for x in (_vn_num(c) for c in r) if x is not None]
@@ -6702,6 +6703,15 @@ def _pss_rekap_sheet(rows: List[list]) -> Optional[Tuple[Dict, Dict]]:
                 totals["grand_total"] = value
             elif "TOTAL YANG DITAGIH" in text or "TOTAL YANG DIBAYAR" in text:
                 totals["final_total"] = value
+            # 表尾標籤列 "1. DPP (...)" / "3. Non DPP (G)"：這是 Excel 本身用 SUM
+            # 公式算出來的未稅小計，比各欄合計列的 JUMLAH (H) 更可靠——原帳單
+            # 偶爾在個別明細列漏加 TRUCKING (A) 到 JUMLAH，但 DPP/Non DPP 這兩個
+            # 標籤列是分別對 A~F、G 整欄 SUM，不受單列漏算影響 (使用者 2026-11-13
+            # ASICS 1079 樣本：JUMLAH 合計列比 DPP+NonDPP 少 3,420,000)。
+            if re.search(r"\bNON\s*DPP\b", text):
+                non_dpp_val = value
+            elif re.search(r"\bDPP\b", text):
+                dpp_val = value
         sign = re.search(r"JAKARTA\s*,\s*(\d{1,2})\s+([A-Za-z]+)\s+(\d{4})",
                          " ".join(_vn_text(c) for c in r if c not in (None, "")), re.I)
         if sign and INDO_MONTHS.get(sign.group(2).lower()):
@@ -6722,6 +6732,8 @@ def _pss_rekap_sheet(rows: List[list]) -> Optional[Tuple[Dict, Dict]]:
             if cell is not None:
                 header["invoice_date"] = _pss_format_date(cell.day, cell.month, cell.year)
                 break
+    if dpp_val is not None:
+        totals["total"] = dpp_val + (non_dpp_val or 0)
     return {"header": header, "items": items or [{"description": None, "amount": None, "vat": None}]}, totals
 
 
