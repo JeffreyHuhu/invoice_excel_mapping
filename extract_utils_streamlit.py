@@ -2348,10 +2348,14 @@ def audit_invoice_totals(
                     if nk in raw_invoice_no and v is not None:
                         found.setdefault(nk, v)
                 return
+            # 冒號亂跑的帳單 (例如 ECOMET) 可能把發票號碼本身切開
+            # (例如 "No C:25-01-0009")，比對前先把冒號拿掉，不影響其他
+            # 供應商 (發票號碼本身不會含冒號)。
+            page_clean = page_upper.replace(":", "")
             for inv_key, inv_raw in raw_invoice_no.items():
                 if inv_key in found or not inv_raw:
                     continue
-                if re.search(rf"(?<![A-Z0-9]){re.escape(str(inv_raw).upper())}(?![A-Z0-9])", page_upper):
+                if re.search(rf"(?<![A-Z0-9]){re.escape(str(inv_raw).upper())}(?![A-Z0-9])", page_clean):
                     found[inv_key] = value
                     break
 
