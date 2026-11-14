@@ -3892,6 +3892,17 @@ _DHL_SERVICE_NAME_PATTERN = re.compile(
     r"(?P<svc>[A-Z][A-Z /&]+[A-Z])\s+-?\d+\s+-?[\d.]+\s+-?\d+\s+"
     r"-?[\d,]+\s+-?[\d,]+\s+-?[\d,]+\s+-?[\d,]+"
 )
+# 明細頁每一組服務類型結尾都有自己的小計行，例如：
+#   "Service Sub Total - EXPRESS DOMESTIC 43.50 4 954,963 451,221 15,468 1,421,652"
+#   "Service Sub Total - EXPRESS WORLDWIDE nondoc 0.50 1 614,980 290,578 9,961 915,519"
+# 一張帳單可能混合多種服務類型 (例如 EXPRESS DOMESTIC + EXPRESS WORLDWIDE NONDOC
+# 混開在同一張發票，2026-11-14 BDOR003153885)，每票要用「這一票之後、最近一個小計行」
+# 的名稱當 Description，不能整張帳單套用同一個名稱 (之前都抓第 1 頁彙總表的第一列，
+# 混合多服務類型時後面的票會被標成前面那一種服務)。
+_DHL_SERVICE_SUBTOTAL_PATTERN = re.compile(
+    r"Service Sub Total - (?P<name>[A-Za-z][A-Za-z /&]*[A-Za-z])\s+-?[\d.]+\s+-?\d+\s+"
+    r"-?[\d,]+\s+-?[\d,]+\s+-?[\d,]+\s+-?[\d,]+"
+)
 _DHL_EXTRA_CHARGE_NAMES_PATTERN = re.compile(
     r"Analysis of Extra Charges.*?\n(?P<block>.*?)Total Extra Charges", re.DOTALL
 )
@@ -3954,6 +3965,16 @@ def _parse_dhl_regular(text: str) -> Optional[Dict]:
     svc_m = _DHL_SERVICE_NAME_PATTERN.search(text)
     service_name = svc_m.group("svc").strip() if svc_m else None
 
+    # 每票各自的服務類型：取這一票之後最近一個「Service Sub Total」小計行的
+    # 名稱；找不到 (沒有小計行的舊格式) 就退回整張帳單共用的 service_name。
+    subtotal_matches = list(_DHL_SERVICE_SUBTOTAL_PATTERN.finditer(text))
+
+    def _service_name_for(pos: int) -> Optional[str]:
+        for sm in subtotal_matches:
+            if sm.start() >= pos:
+                return sm.group("name").strip().upper()
+        return service_name
+
     whitelist = _dhl_extract_charge_name_whitelist(text)
     extra_pattern = None
     if whitelist:
@@ -3994,7 +4015,7 @@ def _parse_dhl_regular(text: str) -> Optional[Dict]:
 
         # 每筆費用自帶 VAT (使用者 2026-10-27 答案)
         items.append({
-            "description": service_name,
+            "description": _service_name_for(m.start()),
             "amount": _dhl_clean_amount(m.group("charge")),
             "vat": _dhl_clean_amount(m.group("vat") or "0"),
             **overrides,
