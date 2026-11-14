@@ -5123,27 +5123,54 @@ _APL_CREDIT_NOTE_TITLE = re.compile(r"(?mi)^\s*CREDIT\s+NOTE\s*$")
 
 
 def parse_apl_credit_note(text: str) -> Dict:
-    """APL 退款單：一張退款單 = 一列，金額為 "TOTAL" 那一行 (正數)。
+    """APL 退款單：一張退款單 = 一列 (有預扣稅扣除項時兩列)，金額照抄 PDF 正數。
     負數由 local_quality._mark_credit_note() 在寫 Excel 前統一處理。
-    Description 照抄 "Revise inv# <原發票號碼>"；Order No. 填退款單號碼 CN.xxx。"""
+    Description 照抄明細第一行 (例如 "Revise inv# <原發票號碼>"、"VOID FCR# ...")；
+    Order No. 填退款單號碼 CN.xxx。
+    同一供應商兩種版面 (2026-11 使用者樣本 POU CHEN)：
+      (a) GLOSTAR：金額有小數 ("25,579,263.00")，沒有預扣稅。
+      (b) POU CHEN：金額沒有小數 ("20,434,544")，多一筆
+          "WHT 23, 2% Deducted (368,190)" 預扣稅扣除項 (另外獨立成一列，
+          vat 填扣除金額；跟 PUTRA_SEJAHTERA_SENTOSA 的 PPH 扣除項同一種
+          表示法，2026-11-14 使用者確認)。"""
     header: Dict[str, Optional[str]] = {}
     header["supplier"] = "PT. APL LOGISTICS"
-    # "April 24th, 2025" -> 2025-04-24 (寫入時轉成日期)
+    # "April 24th, 2025" / "Oct 7th, 2026" -> 2025-04-24 (寫入時轉成日期)
     dm = re.search(r"\b([A-Za-z]{3})[A-Za-z]*\s+(\d{1,2})(?:st|nd|rd|th)?,\s*(\d{4})", text)
     header["invoice_date"] = (_format_date_en_from_month_name(dm.group(2), dm.group(1), dm.group(3))
                               if dm else None)
     # 原發票號碼：Reference 的 "DI No. 2025-0305-0018"
     header["invoice_no"] = _search(r"DI No\.\s*(\d{4}-\d{4}-\d{4})", text)
-    header["consignee"] = _search(r"(PT\.\s*GLOSTAR INDONESIA)", text)
+    # 消費者公司名稱：日期那一行後面緊接著的 "PT. XXX" (可能同一行後面還有
+    # "Credit Note Number :" 標籤，要去掉)。不寫死公司名稱，才能套用到不同客戶。
+    cm = re.search(r"\b\d{4}\s*\n\s*(PT\.[^\n]*)", text)
+    header["consignee"] = (
+        re.split(r"\s+Credit Note Number\s*:?", cm.group(1))[0].strip() if cm else None
+    )
     header["order_no"] = _search(r"(CN\.[\w/.\-]+)", text)
     header["port_of_loading"] = "Jakarta"
     for key in ("arrive_date", "onboard_date", "bl_no", "mbl_no", "port_of_discharge",
                 "volume", "vessel", "container_no", "shipper"):
         header[key] = None
+
+    # 明細第一行：描述 + 金額 (金額可能有小數也可能沒有)，在 "(in IDR)" 表頭
+    # 之後、"E & O.E. TOTAL" 總計之前。
+    item_m = re.search(
+        r"\(in IDR\)\s*\n(.+?)\s+([\d,]+(?:\.\d{2})?)\s*\n", text,
+    )
     items = [{
-        "description": _search(r"(Revise inv#\s*\S+)", text),
-        "amount": _apl_clean_amount(_search(r"\bTOTAL\s+([\d,]+\.\d{2})", text)),
+        "description": item_m.group(1).strip() if item_m else None,
+        "amount": _apl_clean_amount(item_m.group(2)) if item_m else None,
     }]
+    # 預扣稅扣除項 (只有 POU CHEN 這種版面才有)：另外獨立成一列，
+    # amount=None、vat 填扣除金額 (正數，跟其他列一樣交給 _mark_credit_note() 統一轉負數)。
+    wht_m = re.search(r"\b(WHT[^\n(]*Deducted)\s*\(([\d,]+)\)", text)
+    if wht_m:
+        items.append({
+            "description": wht_m.group(1).strip(),
+            "amount": None,
+            "vat": _apl_clean_amount(wht_m.group(2)),
+        })
     return {"header": header, "items": items}
 
 
