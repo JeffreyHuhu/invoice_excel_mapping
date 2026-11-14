@@ -7255,7 +7255,10 @@ def _opl_amount(value: Optional[str]) -> Optional[float]:
 
 
 _OPL_ITEM_RE = re.compile(
-    r"^(?P<desc>[A-Z].*?)\s+(?P<qty>[\d.]+)\s+(?P<unit>\S+)\s+(?P<rate>[\d,.]+)\s+"
+    # QTY 可能是 "MINI" (minimum charge，沒有實際數量，"O/F MINI CBM 20.000 …")；
+    # 也可能帶千分位逗號 ("AIR FREIGHT 4,335.00 KGS …")。RATE 和 CUR 之間可能沒有空格
+    # ("220.000USD"，"NCLR26030207")。
+    r"^(?P<desc>[A-Z].*?)\s+(?P<qty>MINI|[\d,.]+)\s+(?P<unit>\S+)\s+(?P<rate>[\d,.]+)\s*"
     r"(?P<cur>[A-Z]{3})\s+(?P<ex>[\d,.]+)\s+(?P<vat>[\d.]+)%\s+(?P<amount>[\d,.]+)\s*$")
 
 
@@ -7326,7 +7329,9 @@ def parse_opl(text: str) -> Dict:
         # "SALES REIMBURSEMENT" 版：標籤和值分兩行 ("CONSIGNEE :\n: PT. POU CHEN INDONESIA POL …"，
         # "NCLR26080891")
         "consignee": _opl_field(r"CONSIGNEE", text)
-        or _search(r"(?m)CONSIGNEE\s*:[ \t]*\n\s*:\s*(.+?)(?:\s+POL\b.*)?$", text),
+        or _search(r"(?m)CONSIGNEE\s*:[ \t]*\n\s*:\s*(.+?)(?:\s+POL\b.*)?$", text)
+        # CONSIGNEE 後面沒有冒號 ("CONSIGNEE PT GLOSTAR INDONESIA POL : ..."，"NCLR26030186")
+        or _search(r"(?m)^CONSIGNEE\s+(?!:)(.+?)\s+POL\s*:", text),
         "order_no": _opl_field(r"YOUR\s*REF", text),
         "arrive_date": _opl_field(r"ETA", text),
         "onboard_date": _opl_field(r"ATD", text),
