@@ -3247,7 +3247,9 @@ def _dsv_extract_total(text: str) -> Optional[int]:
     raw = _search(r"SUBTOTAL\s+(\d[\d .]{0,20}\d|\d)", text)
     nospace = re.sub(r"\s", "", raw) if raw else ""
     total = _dsv_clean_amount(nospace) if re.fullmatch(r"\d+(?:\.\d+)*", nospace) else None
-    inv = _dsv_invoice_no(_search(r"^INVOICE\s+([I1]D\d+)\b", text)) if total is not None else None
+    # CREDIT NOTE 頁也要能歸屬自己的小計 (2026-11-14 HARDASES_16OKTOBER)
+    inv = _dsv_invoice_no(
+        _search(r"^(?:INVOICE|CREDIT\s+NOTE)\s+([I1]D\d+)\b", text)) if total is not None else None
     return {inv: total} if inv else total
 
 
@@ -4657,11 +4659,14 @@ register_supplier(
 def detect_dsv(text: str) -> bool:
     """每張發票除了正本 ("INVOICE ID610286388 ORIGINAL") 還附一頁內容相同的
     副本 ("… COPY")。只有副本的頁不算 (逐頁擷取時會略過)，不然發票號碼抓
-    不到、費用也會重複算一次。"""
+    不到、費用也會重複算一次。有些出貨單是「更正前一張發票」的 CREDIT NOTE
+    ("CREDIT NOTE ID620023184 ORIGINAL")，頭銜不是 INVOICE，要一併辨識
+    ORIGINAL/COPY，否則 COPY 頁也會被當成獨立發票重複計入
+    (2026-11-14 HARDASES_16OKTOBER)。"""
     if "CHARGES IN IDR" not in text.upper():
         return False
-    copy_only = (re.search(r"^INVOICE\s+\S+\s+COPY\b", text, re.MULTILINE)
-                 and not re.search(r"^INVOICE\s+\S+\s+ORIGINAL\b", text, re.MULTILINE))
+    copy_only = (re.search(r"^(?:INVOICE|CREDIT\s+NOTE)\s+\S+\s+COPY\b", text, re.MULTILINE)
+                 and not re.search(r"^(?:INVOICE|CREDIT\s+NOTE)\s+\S+\s+ORIGINAL\b", text, re.MULTILINE))
     return not copy_only
 
 
@@ -4756,7 +4761,9 @@ def parse_dsv(text: str) -> Dict:
     header: Dict[str, Optional[str]] = {}
 
     header["supplier"] = "PT DSV Transport Indonesia"
-    header["invoice_no"] = _dsv_invoice_no(_search(r"INVOICE\s+(\S+)\s+ORIGINAL", text))
+    # CREDIT NOTE (更正前一張發票的單據) 也用自己的編號當發票號碼 (2026-11-14 HARDASES_16OKTOBER)
+    header["invoice_no"] = _dsv_invoice_no(
+        _search(r"(?:INVOICE|CREDIT\s+NOTE)\s+(\S+)\s+ORIGINAL", text))
 
     # 掃描檔的標籤可能變成 "INVOICEDATE" 或前面多一個 "["：("PT. HARDASES ABADI INDONESIA [INVOICEDATE 23-Apr-26"，
     # 2026-11-02 掃描 INV000000484196)
