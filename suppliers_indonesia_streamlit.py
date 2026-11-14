@@ -3244,7 +3244,10 @@ def _dsv_extract_total(text: str) -> Optional[int]:
     出現的發票號碼」歸屬時會配錯張 (2026-10-30 GLOSTAR_12DECEMBER：705 的小計配給 704)。"""
     # 掃描檔的數字間可能有空白 ("SUBTOTAL 240 . 067"、"SUBTOTAL 2 5 8 .12 3"、"SUBTOTAL 1.2 50 421"，
     # 2026-11-02 掃描 EDC1103787/EDC1107472/EDC1591126)：抓數字、空白、點，去掉空白後要是「數字與點」才採用
-    raw = _search(r"SUBTOTAL\s+(\d[\d .]{0,20}\d|\d)", text)
+    # 標籤跟數字之間可能有表格框線雜訊 ("SUBTOTAL| 1.526.656"、"SUBTOTAL] 1.150.000")，
+    # 結尾的 "L" 也可能整個漏讀 ("SUBTOTA 900.000"，2026-11-15 掃描 EDC1591119/EDC1591125/
+    # EDC1591126/RAF0492357 第 2 頁)：標籤只要求到 "SUBTOTA"，"L" 跟雜訊字元都當作選填。
+    raw = _search(r"SUBTOTAL?[^\d\n]{0,3}(\d[\d .]{0,20}\d|\d)", text)
     nospace = re.sub(r"\s", "", raw) if raw else ""
     total = _dsv_clean_amount(nospace) if re.fullmatch(r"\d+(?:\.\d+)*", nospace) else None
     # CREDIT NOTE 頁也要能歸屬自己的小計 (2026-11-14 HARDASES_16OKTOBER)
@@ -4768,10 +4771,23 @@ def _dsv_extract_items(text: str) -> List[Dict]:
         })
     # 金額讀不出來的費用行：照列，金額 N/A，讓驗證層標出來 (2026-11-02 EDC1591119 Customs EDI Fee)
     if sec:
+        # 已經被上面的 dash/plain 格式抓到的整行不要再比對一次，否則費用說明裡
+        # 剛好有「數字 + 英文字」的片段 (例如 "Seal - Security Seal @IDR 10.000 X
+        # 500 PCS 550.000 5.000.000" 的 "10.000 X") 會被誤認成另一筆讀不出金額的
+        # 費用，多出一筆重複的 None 列 (2026-11-15 抽樣 ID610210169)。
+        already = {m.group(0) for m in matches}
         for m in _DSV_UNREADABLE_ITEM_PATTERN.finditer(sec.group(1)):
+            if m.group(0) in already:
+                continue
+            desc = m.group("desc").strip()
+            # "Total CTN : 78"、"Total CBM : 6.174 CBM" 是費用表後面附的件數/材積
+            # 小計，不是費用列 (2026-11-15 抽樣 NIKOMAS_08SEPTEMBER)，不要當成金額
+            # 讀不出來的費用列出
+            if re.match(r"^Total\s+(?:CTN|CBM)\b", desc, re.IGNORECASE):
+                continue
             # VAT 也不填：金額與稅額都 N/A 才會被驗證層判為缺漏 (有稅額的 N/A 金額會被當成稅金列)
             items.append({
-                "description": re.split(r"\s+-\s+|\s+IDR\s", m.group("desc").strip())[0],
+                "description": re.split(r"\s+-\s+|\s+IDR\s", desc)[0],
                 "amount": None,
                 "vat": None,
             })
