@@ -3908,11 +3908,12 @@ _DHL_EXTRA_CHARGE_NAME_LINE = re.compile(r"^([A-Z][A-Z /&-]+[A-Z])\s+-?[\d,]+\s*
 _DHL_MAIN_LINE_PATTERN = re.compile(
     # AWB 和日期中間是 Shippers Reference (可能沒有)
     r"^(?P<awb>\d{6,12})(?:\s+(?P<ref>\S.*?))?\s+(?P<date>\d{1,2}-\d{1,2}-\d{4})\s+"
-    # 地名可能有括號、句點、撇號、連字號 ("MAA, CHENNAI (MADRAS)"，2026-10-27 抽樣)
-    r"(?P<ocode>[A-Z]{2,4}),\s*(?P<oregion>[A-Za-z][A-Za-z ().'\-]*?)\s+"
+    # 地名可能有括號、句點、撇號、連字號 ("MAA, CHENNAI (MADRAS)"，2026-10-27 抽樣)、
+    # 也可能有 "&" ("SZV, SUZHOU & SURROUNDING"，2026-11-14 BDOR003153885)
+    r"(?P<ocode>[A-Z]{2,4}),\s*(?P<oregion>[A-Za-z][A-Za-z ().'\-&]*?)\s+"
     # 進口關稅類 (INBOUND REGULAR INVOICE) 的服務名稱是 "DUTIES & TAXES"，名稱可能在換行處斷開
     # (2026-11-03 BDOIR00049351)，所以 DUTIES 那一行只剩 "DUTIES &"
-    r"(?P<dcode>[A-Z]{2,4}),\s*(?P<dregion>[A-Za-z][A-Za-z ().'\-]*?)\s+(?:EXPRESS\s+|DUTIES\s*&\s*(?:TAXES\s+)?)"
+    r"(?P<dcode>[A-Z]{2,4}),\s*(?P<dregion>[A-Za-z][A-Za-z ().'\-&]*?)\s+(?:EXPRESS\s+|DUTIES\s*&\s*(?:TAXES\s+)?)"
     r"(?P<weight>-?[\d.]+)\s*[A-Z]?\s+(?P<items>-?\d+)\s+"
     # VAT 欄可能沒有 (DUTIES & TAXES 行只有 "Z" 代碼，例如 "0.00 0 0 Z 0")，沒有就當 0
     r"(?P<charge>-?[\d,]+)\s+(?:(?P<vat>-?[\d,]+)\s+)?[A-Z]\s+(?P<total>-?[\d,]+)\s*$",
