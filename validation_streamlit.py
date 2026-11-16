@@ -66,7 +66,10 @@ REQUIRED_HEADER_FIELDS = ("invoice_date", "invoice_no", "supplier", "consignee")
 # 櫃費) 本身沒有發票字軌，程式故意填 N/A (suppliers_vietnam_streamlit.py 的
 # doc_const="N/A")，不是抓錯，INVOICE NO 缺值降為 WARN。只適用這家供應商；其他
 # 供應商的 INVOICE NO 缺值仍是 ERROR。
-SUPPLIER_WARN_ONLY_HEADER_FIELDS = {"VINH_HUNG_LONG": {"invoice_no"}}
+# 使用者 2026-11-16 規定：VN11 APL_VN 的 POUYUEN DN 系列工作表本身沒有 Inv# 欄
+# (suppliers_vietnam_streamlit.py 的 inv_col 找不到該欄，填 N/A)，不是抓錯，
+# INVOICE NO 缺值降為 WARN。只適用這家供應商。
+SUPPLIER_WARN_ONLY_HEADER_FIELDS = {"VINH_HUNG_LONG": {"invoice_no"}, "APL_VN": {"invoice_no"}}
 
 # 個別供應商另外的必要欄位 (使用者在答案 Excel 提示列標「(必要)」的欄位)：
 # {供應商: {欄位: 缺值時的等級}}。"container_no" 只在整櫃 (材積是「數量X櫃型」) 時才必要。

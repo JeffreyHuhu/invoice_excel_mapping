@@ -1151,7 +1151,9 @@ _CW_CHARGE_RE = re.compile(
     # 優先當整段是完整金額；只有剝開頭數字後才湊得成完整金額時，才當原因編號
     # (DHL "0% 1.655.100" 本身就是合法金額 1,655,100，不可誤剝成 "1." + 655.100
     # ；2026-11-16 抽查 DEC.2025 S2505430837)
-    r"|0%\s+(?:(?=\d{1,3}(?:\.\d{3})*(?:,\d{1,2})?$)|\d\.\s?|\*\s))\s*"
+    # OCR 把表格邊線讀成直線符號 "|"，混進 "0%" 跟金額中間 ("0% | 110.846.208"，
+    # 2026-11-16 抽查 APR.2026 S2601536402 第 18 頁)
+    r"|0%\s+(?:(?=\d{1,3}(?:\.\d{3})*(?:,\d{1,2})?$)|\d\.\s?|\*\s|\|\s*))\s*"
     r"(?P<amount>\d{1,3}(?:\.\d{3})*(?:,\d{1,2})?)$", re.MULTILINE)
 # 費用名稱裡夾著外幣單價跟匯率 ("Org. Terminal Handling-Forwarder USD 108,96 @"、
 # "Freight USD 2.911,35 @ 25698,000000"：匯率可能接在同一行的 "@" 後面，也可能印在
@@ -6289,6 +6291,71 @@ def apl_vn_invoice_page(page: str) -> bool:
     return "HÓA ĐƠN GIÁ TRỊ GIA TĂNG" in page.upper() and "APL" in page.upper()
 
 
+def _apl_vn_needs_com_recalc(book) -> bool:
+    """POU HUNG「APL-PHÍ NEO CONT+NEO KHO」對帳表：整張都是公式，原始檔案沒有
+    存計算結果，calamine 讀出來金額全部空白 (使用者 2026-11-16 確認，Excel
+    開檔才會重算出數字)。靠這張表特有的「Total Net amount in VND」標籤判斷，
+    而且緊接的儲存格真的是空的才觸發，避免拖慢其他正常 (有存值) 的 Excel 帳單。"""
+    for _name, rows in book.sheets:
+        for row in rows:
+            for i, cell in enumerate(row):
+                if isinstance(cell, str) and "Total Net amount in VND" in cell:
+                    if not any(c not in (None, "") for c in row[i + 1:]):
+                        return True
+    return False
+
+
+def _apl_vn_com_cell(v):
+    """Excel COM 的日期是 pywintypes.datetime，轉成跟 calamine 一樣的 datetime.date。"""
+    if not isinstance(v, (str, int, float)) and hasattr(v, "year") and hasattr(v, "day"):
+        try:
+            return datetime.date(v.year, v.month, v.day)
+        except Exception:
+            return v
+    return v
+
+
+def _apl_vn_com_recalc(path: str, book) -> "SheetBook":
+    """用 Excel COM 開檔強制重算，照 calamine 讀到的同樣列數/欄數重新讀值
+    (保持欄位位置一致，既有規則不用改)。獨立程序開檔，不影響使用者自己開著
+    的 Excel；只讀不存。"""
+    import win32com.client
+    xl = win32com.client.DispatchEx("Excel.Application")
+    xl.Visible = False
+    xl.DisplayAlerts = False
+    try:
+        wb = xl.Workbooks.Open(os.path.abspath(path), ReadOnly=True, UpdateLinks=0)
+        xl.CalculateFullRebuild()
+        sheets = []
+        for name, rows in book.sheets:
+            n_rows, n_cols = len(rows), max((len(r) for r in rows), default=0)
+            if n_rows == 0 or n_cols == 0:
+                sheets.append((name, rows))
+                continue
+            ws = wb.Worksheets(name)
+            raw = ws.Range(ws.Cells(1, 1), ws.Cells(n_rows, n_cols)).Value
+            if n_rows == 1:
+                raw = (raw,)
+            sheets.append((name, [[_apl_vn_com_cell(c) for c in r] for r in raw]))
+        return SheetBook(path, sheets)
+    finally:
+        wb.Close(SaveChanges=False)
+        xl.Quit()
+
+
+_APL_VN_COM_CACHE: Dict[str, "SheetBook"] = {}
+
+
+def _apl_vn_maybe_recalc(book):
+    if not _apl_vn_needs_com_recalc(book):
+        return book
+    cached = _APL_VN_COM_CACHE.get(book.path)
+    if cached is None:
+        cached = _apl_vn_com_recalc(book.path, book)
+        _APL_VN_COM_CACHE[book.path] = cached
+    return cached
+
+
 _APL_VN_SHEET = [
     # POU HUNG 對帳表 (VND 工作表，2026-11-06 新答案)：只取 DET 欄，費用名稱 = "DET - " + 備註；
     # 發票號碼 = Invoice No. (整張，表尾固定在同一欄，見 doc_key_col)；沒有 Invoice No. 時改用
@@ -6314,7 +6381,16 @@ _APL_VN_SHEET = [
             "vat_na_fields": ("bl_no", "volume", "container_no", "port_of_loading", "port_of_discharge",
                               "vessel", "shipper", "onboard_date", "arrive_date")}),
 ]
-_apl_vn_sheet_parse, _apl_vn_sheet_totals = _vt_make("APL Logistics Vietnam Co., Ltd", _APL_VN_SHEET)
+_apl_vn_sheet_parse_raw, _apl_vn_sheet_totals_raw = _vt_make("APL Logistics Vietnam Co., Ltd", _APL_VN_SHEET)
+
+
+def _apl_vn_sheet_parse(book):
+    return _apl_vn_sheet_parse_raw(_apl_vn_maybe_recalc(book))
+
+
+def _apl_vn_sheet_totals(book):
+    return _apl_vn_sheet_totals_raw(_apl_vn_maybe_recalc(book))
+
 
 register_supplier(
     "APL_VN", "CÔNG TY TNHH APL LOGISTICS VIỆT NAM", detect_apl_vn, parse_apl_vn, multi_page=True,
