@@ -60,6 +60,13 @@ _SEVERITY_PENALTY = {ERROR: 0.35, WARN: 0.1, INFO: 0.05}
 # 異常 (選填欄位不做格式檢查)。
 REQUIRED_HEADER_FIELDS = ("invoice_date", "invoice_no", "supplier", "consignee")
 
+# 個別供應商：必填欄位缺值只標 WARN (等級最多「中」)，不直接判定 ERROR/低。
+# 使用者 2026-11-16 規定：VN02 VĨNH HƯNG LONG 的「DỤ ĐỨC CHI HỘ」工作表 (代墊吊
+# 櫃費) 本身沒有發票字軌，程式故意填 N/A (suppliers_vietnam_streamlit.py 的
+# doc_const="N/A")，不是抓錯，INVOICE NO 缺值降為 WARN。只適用這家供應商；其他
+# 供應商的 INVOICE NO 缺值仍是 ERROR。
+SUPPLIER_WARN_ONLY_HEADER_FIELDS = {"VINH_HUNG_LONG": {"invoice_no"}}
+
 # 個別供應商另外的必要欄位 (使用者在答案 Excel 提示列標「(必要)」的欄位)：
 # {供應商: {欄位: 缺值時的等級}}。"container_no" 只在整櫃 (材積是「數量X櫃型」) 時才必要。
 # - KUEHNE_NAGEL (使用者 2026-10-31，樣本 JKT1521476)：Volume 缺值先列 WARN；貨櫃號碼非必要 (2026-11-02 使用者規定：
@@ -211,7 +218,8 @@ def _check_header(row: Dict, supplier_key: Optional[str] = None) -> List[Dict]:
             # 2026-11-12 使用者最高規則：所有供應商都適用，原帳單本身常漏填發票日期，
             # 不該整張發票被打成低信心。其餘必填欄位 (INVOICE NO/SUPPLIER/CONSIGNEE)
             # 不受影響，仍是 ERROR。
-            severity = WARN if code == "invoice_date" else ERROR
+            warn_only = code == "invoice_date" or code in SUPPLIER_WARN_ONLY_HEADER_FIELDS.get(supplier_key or "", ())
+            severity = WARN if warn_only else ERROR
             issues.append(_issue(severity, code, "MISSING_REQUIRED",
                                  f"必填欄位「{FIELD_LABELS[code]}」抓不到值"))
     applies = SUPPLIER_REQUIRED_WHEN.get(supplier_key or "", lambda _row: True)(row)
