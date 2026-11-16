@@ -3453,6 +3453,20 @@ def _tw_file_consignee(file_name: str) -> Optional[str]:
     return None
 
 
+def _tw_name_month_end(book) -> Optional[str]:
+    """檔名月份的最後一天。除了 _vt_name_month() 認得的寫法，也認 TRANS_WAGON 的
+    兩位數年份 "T01-25" (Cong no T01-25(Wagon) …，2026-11-16)。"""
+    found = _vt_name_month_end(book)
+    if found:
+        return found
+    base = os.path.basename(getattr(book, "path", "") or "")
+    m = re.search(r"\bT(\d{1,2})[.\-](\d{2})(?!\d)", base, re.I)
+    if not m or not 1 <= int(m.group(1)) <= 12:
+        return None
+    year, month = 2000 + int(m.group(2)), int(m.group(1))
+    return _format_date_en(calendar.monthrange(year, month)[1], month, year)
+
+
 def _tw_usd_text(usd: float) -> str:
     """費用名稱括號裡的美金金額：75 -> "75"、40.6 -> "40.6"。"""
     return f"{usd:,.2f}".rstrip("0").rstrip(".")
@@ -3751,8 +3765,11 @@ def _tw_tong_sheets(book) -> Tuple[List[Dict], List[Dict]]:
             date_text = _vn_date(_vn_cell(row, atd_c))
             volume = _tw_box_cbm_volume(_vn_num(_vn_cell(row, col20)), _vn_num(_vn_cell(row, col40)),
                                          _vn_num(_vn_cell(row, colcmb)))
+            # 日期欄空白或寫文字 (例如 "LÔ PS THÊM" 追加的一票) 時，發票日期用檔名月份的最後一天
+            # (使用者 2026-11-16 指定，沿用 VN06 的月底慣例)；ETA/ATD 是船期，不用檔名補
             base = {"supplier": _TW_SUPPLIER_SPACE, "consignee": consignee, "invoice_no": bill,
-                    "invoice_date": date_text, "onboard_date": date_text, "bl_no": bill,
+                    "invoice_date": date_text or _tw_name_month_end(book),
+                    "onboard_date": date_text, "bl_no": bill,
                     "port_of_loading": pol, "port_of_discharge": pod, "volume": volume}
             exw_bill = exw.get(bill)
             local_vnd = vat_vnd = novat_vnd = 0
