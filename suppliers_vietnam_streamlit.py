@@ -1148,7 +1148,10 @@ _CW_CHARGE_RE = re.compile(
     # OCR 頁的原因編號可能讀成 "*" 或 "1." 後面多一個空白 ("0% * 46.695.655")；
     # 原因編號也可能整個不印，"0%" 後面直接接金額 ("0% 74.815.872"，2026-11-10
     # 抽查 DHL_VN BY SHIPMENT 批次 S2501377271)
-    r"|0%\s+(?:(?:\d\.\s?|\*\s))?(?=\d{1,3}(?:\.\d{3})*(?:,\d{1,2})?$))\s*"
+    # 優先當整段是完整金額；只有剝開頭數字後才湊得成完整金額時，才當原因編號
+    # (DHL "0% 1.655.100" 本身就是合法金額 1,655,100，不可誤剝成 "1." + 655.100
+    # ；2026-11-16 抽查 DEC.2025 S2505430837)
+    r"|0%\s+(?:(?=\d{1,3}(?:\.\d{3})*(?:,\d{1,2})?$)|\d\.\s?|\*\s))\s*"
     r"(?P<amount>\d{1,3}(?:\.\d{3})*(?:,\d{1,2})?)$", re.MULTILINE)
 # 費用名稱裡夾著外幣單價跟匯率 ("Org. Terminal Handling-Forwarder USD 108,96 @"、
 # "Freight USD 2.911,35 @ 25698,000000"：匯率可能接在同一行的 "@" 後面，也可能印在
@@ -1336,6 +1339,52 @@ def cargowise_invoice_pages(pdf_path: str, key: str) -> Dict[str, List[int]]:
     return result
 
 
+def _molcs_invoice_pages(pdf_path: str) -> Dict[str, List[int]]:
+    """MOL CONSOLIDATION SERVICE 發票 (一頁或跨 2 頁，見 _molcs_pages() 說明)
+    各自對應到原始 PDF 頁碼。只有 MOL 自己呼叫，跟 cargowise_invoice_pages()
+    各管各的格式 (CargoWise SHIPMENT 發票 vs. MOLCS 增值稅發票)，兩邊結果在
+    _mol_invoice_page_map() 合併。key 跟 _group_rows_by_invoice()/_mol_totals()
+    用同一套規則：草稿發票 (Số 空白，共用 Ký hiệu) 要帶 Order No. 才能分清楚
+    (使用者 2026-11-16 回報「整份 MOL 月結單還是全部低」：沒有這份頁碼對應，
+    拆檔機制找不到草稿發票的頁碼，只能整份一起歸檔)。"""
+    from extract_utils_streamlit import supplier_pages
+    pages = supplier_pages(pdf_path, "MOL")
+    result: Dict[str, List[int]] = {}
+    buf_pages: List[int] = []
+    buf_text: List[str] = []
+    for i, page_text in enumerate(pages, start=1):
+        if not _is_molcs(page_text):
+            continue
+        buf_text.append(page_text)
+        buf_pages.append(i)
+        if "Cộng tiền hàng" in page_text:
+            rows = _molcs_parse_page("\n".join(buf_text))
+            if rows:
+                inv = normalize_value(rows[0].get("invoice_no"))
+                key = inv
+                if _mol_is_draft_series(inv):
+                    order = normalize_value(rows[0].get("order_no"))
+                    if order not in ("N/A", "", None):
+                        key = f"{inv}#{order}"
+                bucket = result.setdefault(key, [])
+                bucket.extend(p for p in buf_pages if p not in bucket)
+            buf_text, buf_pages = [], []
+    return result
+
+
+def _mol_invoice_page_map(pdf_path: str) -> Dict[str, List[int]]:
+    """MOL 專用 invoice_page_map：CargoWise Debit Note + MOLCS 增值稅發票兩種
+    格式都會出現在同一份 PDF，各自用對應的切法算頁碼再合併 (見
+    cargowise_invoice_pages()/_molcs_invoice_pages())。"""
+    result = dict(cargowise_invoice_pages(pdf_path, "MOL"))
+    for key, pages in _molcs_invoice_pages(pdf_path).items():
+        bucket = result.setdefault(key, [])
+        bucket.extend(p for p in pages if p not in bucket)
+    for key in result:
+        result[key].sort()
+    return result
+
+
 def _cw_after(text: str, header_re: str, line_re: str, look: int = 4):
     """在 header_re 那一行之後幾行內，找第一行符合 line_re 的。"""
     lines = text.split("\n")
@@ -1515,7 +1564,11 @@ def _cw_totals(text: str, patterns, conv=_cw_vn_number, key_fn=_cw_invoice_no):
 def _cw_extract_total(text: str):
     # 掃描頁 OCR 可能漏掉 "SUBTOTAL" 標籤，金額仍接在 "discrepancies." 後面 (YUSEN_SEP.2026)
     return _cw_totals(text, [r"SUBTOTAL[ \t]+(\d[\d.]*(?:,\d+)?)",
-                             r"discrepancies\.[ \t]+(\d{1,3}(?:\.\d{3})+(?:,\d+)?)[ \t]*$"])
+                             r"discrepancies\.[ \t]+(\d{1,3}(?:\.\d{3})+(?:,\d+)?)[ \t]*$",
+                             # "Charge Sheet" 版面 (_cw_charge_sheet_items()) 沒有 SUBTOTAL，
+                             # 用 "Job Total" 這一列的第一個數字 (未稅加總，2026-11-16 抽查
+                             # DHL_VN OCT.2026)
+                             r"^Job Total[ \t]+(\d{1,3}(?:\.\d{3})*(?:,\d+)?)"])
 
 
 def _cw_extract_grand_total(text: str):
@@ -1524,7 +1577,11 @@ def _cw_extract_grand_total(text: str):
     return (_cw_totals(text, [r"^TOTAL[ \t]+(?:VND|USD)[ \t]+(\d[\d.]*(?:,\d+)?)",
                               r"^(\d[\d.]*(?:,\d+)?)[ \t]*\nTOTAL[ \t]+(?:VND|USD)\s*$",
                               # 掃描頁 OCR 漏掉 "TOTAL VND" 標籤時，用頁尾 "Invoiced VND 7.171.200"
-                              r"Invoiced[ \t]+(?:VND|USD)[ \t]+(\d{1,3}(?:\.\d{3})+(?:,\d+)?)\b"])
+                              r"Invoiced[ \t]+(?:VND|USD)[ \t]+(\d{1,3}(?:\.\d{3})+(?:,\d+)?)\b",
+                              # "Charge Sheet" 版面沒有 "TOTAL VND"，用 "Job Total" 這一列最後
+                              # 一個數字 (含稅總額，2026-11-16 抽查 DHL_VN OCT.2026)
+                              r"^Job Total[ \t]+\d{1,3}(?:\.\d{3})*(?:,\d+)?[ \t]+"
+                              r"\d{1,3}(?:\.\d{3})*(?:,\d+)?[ \t]+(\d{1,3}(?:\.\d{3})*(?:,\d+)?)\s*$"])
             or _cw_totals(text, [r"GRAND TOTAL for [A-Z]{3}[ \t]+(\d[\d,]*(?:\.\d+)?)"],
                           conv=_cw_comma_number))
 
@@ -1712,7 +1769,11 @@ def _dhl_vn_extract_total(text: str):
     if _is_dhl_vn_charge_sheet(text):
         return None
     out = _cw_totals(text, [r"SUBTOTAL[ \t]+(\d[\d.]*(?:,\d+)?)",
-                            r"discrepancies\.[ \t]+(\d{1,3}(?:\.\d{3})+(?:,\d+)?)[ \t]*$"],
+                            r"discrepancies\.[ \t]+(\d{1,3}(?:\.\d{3})+(?:,\d+)?)[ \t]*$",
+                            # "Air Freight Departure Charge Sheet" 版面 (_cw_charge_sheet_items())
+                            # 沒有 SUBTOTAL，用 "Job Total" 這一列的第一個數字 (未稅加總，
+                            # 2026-11-16 抽查 OCT.2026 S2604933241)
+                            r"^Job Total[ \t]+(\d{1,3}(?:\.\d{3})*(?:,\d+)?)"],
                      key_fn=_dhl_vn_doc_key)
     for doc in _dhl_vn_vat_docs(text):
         net, _grand = _dhl_vn_vat_totals(doc)
@@ -1731,7 +1792,12 @@ def _dhl_vn_extract_grand_total(text: str):
                              r"Invoiced[ \t]+(?:VND|USD)[ \t]+(\d{1,3}(?:\.\d{3})+(?:,\d+)?)\b",
                              # DHL 版面 "TOTAL VND" 常跟左欄的銀行轉帳說明擠在同一行，不是行首
                              # (VN13 答案，2026-11-10)
-                             r"TOTAL[ \t]+(?:VND|USD)[ \t]+(\d[\d.]*(?:,\d+)?)\s*$"],
+                             r"TOTAL[ \t]+(?:VND|USD)[ \t]+(\d[\d.]*(?:,\d+)?)\s*$",
+                             # "Air Freight Departure Charge Sheet" 版面沒有 "TOTAL VND"，用
+                             # "Job Total" 這一列最後一個數字 (含稅總額，2026-11-16 抽查
+                             # OCT.2026 S2604933241)
+                             r"^Job Total[ \t]+\d{1,3}(?:\.\d{3})*(?:,\d+)?[ \t]+"
+                             r"\d{1,3}(?:\.\d{3})*(?:,\d+)?[ \t]+(\d{1,3}(?:\.\d{3})*(?:,\d+)?)\s*$"],
                       key_fn=_dhl_vn_doc_key)
            or _cw_totals(text, [r"GRAND TOTAL for [A-Z]{3}[ \t]+(\d[\d,]*(?:\.\d+)?)"],
                          conv=_cw_comma_number, key_fn=_dhl_vn_doc_key))
@@ -2051,7 +2117,7 @@ register_supplier(
     extract_total=lambda t: _mol_totals(t, r"Total before VAT") if _is_molcs(t) else None,
     extract_grand_total=_mol_grand_total,
     page_text=_cargowise_pages,
-    invoice_page_map=lambda p: cargowise_invoice_pages(p, "MOL"),
+    invoice_page_map=_mol_invoice_page_map,
 )
 
 
@@ -2882,6 +2948,14 @@ def _vt_parse_sheet(name: str, rows: List[list], cfg: Dict, supplier: str,
         # 兩種都稽核)：USD 合計 + VND 合計 = 兩種費用的加總，任一幣別對不上都會不通過
         for i, name_ in ((0, "total"), (0, "total_add"), (1, "grand")):
             value = _vn_num(_vn_cell(row, col[name_])) if col.get(name_) is not None else None
+            if name_ == "grand" and value is None and col.get("grand") is not None and row_items:
+                # 這一列有費用但「TỔNG」欄留空 (例如補差額的調整列，只填在費用欄，
+                # 沒有另外算進每列合計)：用這一列的費用加總 (含稅) 當這一列對合計的
+                # 貢獻，不然會漏掉這一列，造成勾稽基準比實際擷取加總多 (2026-11-16
+                # 抽查 "THÁNG 2 (LẦN 1) - CƯỚC VC POU YUEN"「Bù trừ chênh lệch giá
+                # cước của cont 40 và cont 20...」調整列：TỔNG 欄空白，但 CƯỚC VC
+                # TRONG TPHCM 欄填了 -446,040)
+                value = round(sum((it.get("amount") or 0) + (it.get("vat") or 0) for it in row_items), 2)
             if name_ == "grand" and cfg.get("vat_of_amount") and value is not None:
                 # vat_of_amount：每個品項的 VAT 是另外算的 8% (沒有算進帳單這欄的「未稅」
                 # 合計)，勾稽基準也要加回 8% 才會跟含稅後的品項加總一致 (2026-11-16 抽查
@@ -5375,8 +5449,11 @@ def _vn_pdf_date(text: Optional[str]) -> Optional[str]:
 #  (C) MAERSK VIỆT NAM (船公司代收運費) 頁，表頭/費用列完全不同版型，見 _maersk_vn_carrier()。
 # Excel：Late come charge 對帳表，每列有自己的發票號碼 (INVOICE NO.)。
 _MAERSK_VN_ITEM_RE = re.compile(
-    # 參考號碼也可能數字開頭 ("26HCM0018482"，2026-10-28 抽樣)
-    r"^(?P<desc>.+?)\s+(?P<ref>FCR\d+|[A-Z]{3,}\d{5,}|\d{2}[A-Z]{2,4}\d{5,})\s+(?P<cur>[A-Z]{3})\s+(?P<unit>\S+)\s+"
+    # 參考號碼也可能數字開頭 ("26HCM0018482"，2026-10-28 抽樣)。參考號碼欄位可選：
+    # 有些發票整欄是純文字佔位 ("AIRSAMPLE"，沒有數字) 或完全沒印這一欄 (2026-11-16
+    # 抽樣 JAN.2026/OCT.2025 兩份發票)，這種情況讓這段文字併入 desc，不當作參考號碼，
+    # bl_no 填不到值 (N/A)，不影響金額擷取。
+    r"^(?P<desc>.+?)\s+(?:(?P<ref>FCR\d+|[A-Z]{3,}\d{5,}|\d{2}[A-Z]{2,4}\d{5,})\s+)?(?P<cur>[A-Z]{3})\s+(?P<unit>\S+)\s+"
     r"(?P<qty>[\d,.]+)\s+(?P<price>[\d,.]+)\s+(?P<rate>\d+%|KCT)\s+(?P<amount>[\d,.]+)$", re.MULTILINE)
 
 # (B) 字型缺字頁的品名修正字典：key 是「去掉 (cid:NN)、只留字母」的比對鍵 (例如 "Phí xếp dỡ
@@ -5475,8 +5552,11 @@ def _parse_maersk_vn_logistics(text: str) -> Dict:
 # 未稅金額[跟稅率黏在一起無空白]、稅率、稅額、含稅金額)，每筆費用自帶稅額 (不另外產生 VAT 列)。
 # 單位只有 2 種 (使用者指定)：CÔNG TEN NƠ = Container、VẬN ĐƠN = B/L。
 _MAERSK_VN_CARRIER_ITEM_RE = re.compile(
+    # 未稅金額跟稅率之間，有的版面黏在一起沒有空白、印 "KHAC:" (例如 "3,050,000KHAC:5.26%")，
+    # 有的版面兩者之間有空白、不印 "KHAC:" (例如 "500,000 0%"，2026-11-16 抽樣
+    # FEB.2026 調整發票)，"KHAC:" 跟前面的空白都改成可選，兩種版面都吃得到
     r"^(?P<desc>[^\n]+?)\s+(?P<qty>[\d.,]+)\s+(?P<unit>CÔNG TEN NƠ|VẬN ĐƠN)\s+(?P<cur>VND|USD)\s+"
-    r"(?P<price>[\d,.]+)\s+(?P<roe>[\d,.]+)\s+(?P<amount>[\d,.]+)KHAC:(?P<rate>[\d.]+)%\s+"
+    r"(?P<price>[\d,.]+)\s+(?P<roe>[\d,.]+)\s+(?P<amount>[\d,.]+)\s*(?:KHAC:)?(?P<rate>[\d.]+)%\s+"
     r"(?P<tax>[\d,.]+)\s+(?P<total>[\d,.]+)$", re.MULTILINE)
 _MAERSK_VN_CARRIER_POR_POD_RE = re.compile(
     r"^(?P<por>.+?,[A-Z]{2})\s(?P<pod>.+?,[A-Z]{2})\s(?P<vessel>.+)$", re.MULTILINE)
