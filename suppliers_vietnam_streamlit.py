@@ -27,9 +27,9 @@ import datetime
 from typing import Dict, List, Optional, Tuple
 
 from extract_utils_streamlit import (
-    _ocr_page_with_psm, _scanned_page_indexes, extract_pages_from_pdf,
-    limited_pages, register_supplier, set_supplier_number, SUPPLIER_REGISTRY, SheetBook,
-    VN_AUDIT_TOLERANCE,
+    _mol_is_draft_series, _ocr_page_with_psm, _scanned_page_indexes, extract_pages_from_pdf,
+    limited_pages, normalize_value, register_supplier, set_supplier_number, SUPPLIER_REGISTRY,
+    SheetBook, VN_AUDIT_TOLERANCE,
 )
 from suppliers_common_streamlit import (
     INDO_MONTHS, _search, _fmt_volume, _volume_from_text,
@@ -1886,8 +1886,12 @@ def _molcs_parse_page(page: str) -> List[Dict]:
         "bl_no": (ref_m.group(2) if ref_m else None) or "N/A",
     }
     rows = [{**common, **it} for it in items]
-    vat = (_molcs_num(_search(r"VAT amount\):\s*([\d.,]+)", page))
-           or _molcs_num(_search(r"([\d.,]+)\s*\n\s*\(VAT amount\):", page)))
+    # 0% 稅率 (VAT amount: 0) 是合法值，不能用 "or" 串接兩種標籤順序的搜尋結果
+    # (0 在 Python 是 falsy，"or" 會誤判成『沒抓到』，繼續往下一個規則找，2026-11-16
+    # 修正：VN2087794 第二張 0% 稽核發票漏了 VAT 列)
+    vat_text = (_search(r"VAT amount\):\s*([\d.,]+)", page)
+                or _search(r"([\d.,]+)\s*\n\s*\(VAT amount\):", page))
+    vat = _molcs_num(vat_text)
     if vat is not None:
         # 不要求這一頁本身要有品項列才加 VAT 列：MOL 現在逐頁辨識/擷取 (multi_page=True)，
         # 跨頁發票的合計常常印在「只有合計、沒有品項」的那一頁，兩頁各自的列最後靠
@@ -2008,6 +2012,12 @@ def parse_mol(text: str) -> Dict:
 
 
 def _mol_totals(text: str, label: str):
+    """{發票號碼: 總額}。草稿發票 (Số 空白) 全部共用同一個 Ký hiệu 當發票
+    號碼，key 要多帶 Order No. 才能跟每一張草稿各自對回 (跟
+    extract_utils_streamlit._group_rows_by_invoice() 的 MOL 專用規則一致，
+    使用者 2026-11-16 回報「辨識等級(低)」：117 張草稿被誤併成一張，
+    金額勾稽爆量)。rows[0] 一定是費用列 (VAT 列固定排最後，見
+    _molcs_parse_page())，Order No. 一定是真正的值，不是 "N/A"。"""
     out = {}
     for p in _molcs_pages(text):
         rows = _molcs_parse_page(p)
@@ -2015,7 +2025,13 @@ def _mol_totals(text: str, label: str):
             # 標籤/數值順序可能相反 (見 _molcs_parse_page() 說明)，兩種都要試。
             value = (_search(label + r"\):\s*([\d.,]+)", p)
                      or _search(r"([\d.,]+)\s*\n\s*\(" + label + r"\):", p))
-            out[rows[0]["invoice_no"]] = _molcs_num(value)
+            inv = normalize_value(rows[0]["invoice_no"])
+            key = inv
+            if _mol_is_draft_series(inv):
+                order = normalize_value(rows[0].get("order_no"))
+                if order not in ("N/A", "", None):
+                    key = f"{inv}#{order}"
+            out[key] = _molcs_num(value)
     return out
 
 
@@ -2609,6 +2625,11 @@ def _vt_parse_sheet(name: str, rows: List[list], cfg: Dict, supplier: str,
             # NO)；這張表沒有 Inv# 欄就填 N/A (VN11 答案：01-2025 TRUCK EXPORT 有 Inv# 欄、
             # POUYUEN DN 沒有，2026-11-10)
             raw_inv = _vn_text(_vn_cell(row, inv_col)) if inv_col is not None else None
+            if not raw_inv and inv_col is not None:
+                # Inv# 欄本身空白，但值誤填到右邊一欄 (同一份帳單後半段列，原帳單
+                # 手動輸入時多打一格；2026-11-16 VN11 05-2025 APL TRUCK EXPORT No.25
+                # 之後都這樣，造成整張發票號碼變 N/A)：補抓右邊一欄
+                raw_inv = _vn_text(_vn_cell(row, inv_col + 1))
             key = raw_inv.lstrip("'") if raw_inv else "N/A"
         # vat_doc_only：對帳表號只給整張的 VAT 列用，費用列用自己的號碼 (VN11 Inv#)
         else:

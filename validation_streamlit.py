@@ -44,6 +44,7 @@ from extract_utils_streamlit import (
     _coerce_to_date,
     _group_rows_by_invoice,
     _is_na,
+    _mol_is_draft_series,
     normalize_value,
 )
 from logger_streamlit import get_logger
@@ -471,8 +472,15 @@ def validate_extraction(
     """
     audit_by_invoice = {}
     for ar in audit_results or []:
-        # 跟 _group_rows_by_invoice() 用同一套正規化，才能把稽核結果對回發票
-        audit_by_invoice[normalize_value(ar.get("invoice_no"))] = ar
+        # 跟 _group_rows_by_invoice() 用同一套正規化+分組規則，才能把稽核結果
+        # 對回發票 (VN09 MOL 的草稿發票要多帶 Order No.，見 _build_result()
+        # 多回傳的 "order_no" 欄位)
+        key = normalize_value(ar.get("invoice_no"))
+        if supplier_key == "MOL" and _mol_is_draft_series(key):
+            order = normalize_value(ar.get("order_no"))
+            if order not in ("N/A", "", None):
+                key = f"{key}#{order}"
+        audit_by_invoice[key] = ar
     # 整份帳單合計的勾稽 (invoice_no 為 None)
     has_whole_audit = any(ar.get("invoice_no") is None for ar in audit_results or [])
 
@@ -482,7 +490,7 @@ def validate_extraction(
                                   "無法辨識供應商，沒有對應的擷取規則"))
 
     results = []
-    groups = _group_rows_by_invoice(rows) if rows else {"": [{}]}
+    groups = _group_rows_by_invoice(rows, supplier_key) if rows else {"": [{}]}
     for inv_key, group_rows in groups.items():
         issues = list(base_issues)
         issues.extend(_check_header(group_rows[0], supplier_key))
