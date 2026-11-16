@@ -3890,9 +3890,11 @@ def _dhl_common_header(text: str) -> Dict[str, Optional[str]]:
 # ---------------------------------------------------------------------------
 
 # 數字前面可能有負號 "-"：Credit Note 的金額、件數、重量都是負數 (2026-11-03 BDOIR00043483)
+# 服務名稱可能帶時間 ("EXPRESS 12:00 NONDOC" 保證正午送達，2026-11-16 JKTR002759007/
+# JKTR002811899/JKTR003053585 低等級)：名稱中間要容許數字跟冒號。
 _DHL_SERVICE_NAME_PATTERN = re.compile(
     r"Type of Service.*?\n(?:.*\n)*?"
-    r"(?P<svc>[A-Z][A-Z /&]+[A-Z])\s+-?\d+\s+-?[\d.]+\s+-?\d+\s+"
+    r"(?P<svc>[A-Z][A-Z0-9:/ &]+[A-Z])\s+-?\d+\s+-?[\d.]+\s+-?\d+\s+"
     r"-?[\d,]+\s+-?[\d,]+\s+-?[\d,]+\s+-?[\d,]+"
 )
 # 明細頁每一組服務類型結尾都有自己的小計行，例如：
@@ -3902,15 +3904,19 @@ _DHL_SERVICE_NAME_PATTERN = re.compile(
 # 混開在同一張發票，2026-11-14 BDOR003153885)，每票要用「這一票之後、最近一個小計行」
 # 的名稱當 Description，不能整張帳單套用同一個名稱 (之前都抓第 1 頁彙總表的第一列，
 # 混合多服務類型時後面的票會被標成前面那一種服務)。
+# 服務名稱可能帶時間 ("EXPRESS 12:00 nondoc" 保證正午送達，2026-11-16 JKTR003053585
+# 低等級)：名稱中間要容許數字跟冒號。
 _DHL_SERVICE_SUBTOTAL_PATTERN = re.compile(
-    r"Service Sub Total - (?P<name>[A-Za-z][A-Za-z /&]*[A-Za-z])\s+-?[\d.]+\s+-?\d+\s+"
+    r"Service Sub Total - (?P<name>[A-Za-z][A-Za-z0-9:/ &]*[A-Za-z])\s+-?[\d.]+\s+-?\d+\s+"
     r"-?[\d,]+\s+-?[\d,]+\s+-?[\d,]+\s+-?[\d,]+"
 )
 _DHL_EXTRA_CHARGE_NAMES_PATTERN = re.compile(
     r"Analysis of Extra Charges.*?\n(?P<block>.*?)Total Extra Charges", re.DOTALL
 )
 # 名稱可能含 "-" ("NON-CONVEYABLE PIECE - WEIGHT 700,000"，2026-11-02 BDOIR00047737)
-_DHL_EXTRA_CHARGE_NAME_LINE = re.compile(r"^([A-Z][A-Z /&-]+[A-Z])\s+-?[\d,]+\s*$", re.MULTILINE)
+# 也可能帶時間 ("PREMIUM 12:00" 正午送達加收，2026-11-16 JKTR002759007/JKTR002811899/
+# JKTR003053585 低等級)：名稱結尾可以是數字，中間容許數字跟冒號。
+_DHL_EXTRA_CHARGE_NAME_LINE = re.compile(r"^([A-Z][A-Z0-9:/ &-]*[A-Z0-9])\s+-?[\d,]+\s*$", re.MULTILINE)
 
 # 每一票主要那一行 (基本運費)，例如：
 #   "7387602585 26-12-2024 XMN, FUJIAN PROVINCE BDO, BANDUNG EXPRESS 14.50
@@ -4077,7 +4083,9 @@ def _parse_dhl_regular(text: str) -> Optional[Dict]:
 # 修正方式；之後如果遇到其他 OCR 常誤判的字元，比照這個做法在擷取後加一
 # 個修正函式即可。
 # 名稱可能含 "-" ("NON-CONVEYABLE PIECE - WEIGHT 367,500"，2026-11-03 JKTIR00983864)
-_DHL_CUSTOMS_ITEM_PATTERN = re.compile(r"^([A-Z][A-Z /-]+[A-Z])\s+([\d,]+)$")
+# 也可能帶時間 ("PREMIUM 12:00" 正午送達加收，2026-11-16 JKTR002759007/JKTR002811899
+# 低等級，只有第 1 頁彙總表時走這條路)：名稱結尾可以是數字，中間容許數字跟冒號。
+_DHL_CUSTOMS_ITEM_PATTERN = re.compile(r"^([A-Z][A-Z0-9:/ -]*[A-Z0-9])\s+([\d,]+)$")
 _DHL_CUSTOMS_AWB_ROW_PATTERN = re.compile(
     r"(\d{6,12})\s+(\d{6,12})\s+(\d{1,2}-\d{1,2}-\d{4})\s+JKT"
 )
@@ -4101,7 +4109,9 @@ _DHL_CUSTOMS_SUMMARY_LINE_PATTERN = re.compile(
     # 來，實際要取第幾個 token 由 _dhl_customs_extract_items() 依固定順序
     # (前 4 個一定是 Shipments/Weight/Items/StandardCharge) 自己判斷，
     # 不在正規表示式裡死板規定總共有幾欄。
-    r"^([A-Z][A-Z /&]+[A-Z])\s+((?:[\d.,]+|=)(?:\s+(?:[\d.,]+|=))*)\s*$"
+    # 服務名稱可能帶時間 ("EXPRESS 12:00 NONDOC" 保證正午送達，2026-11-16
+    # JKTR002759007/JKTR002811899 低等級)：名稱中間要容許數字跟冒號。
+    r"^([A-Z][A-Z0-9:/ &]+[A-Z])\s+((?:[\d.,]+|=)(?:\s+(?:[\d.,]+|=))*)\s*$"
 )
 
 # 稅號/收件資訊的行：NPWP、NITKU (OCR 會讀成 NiTKU/NITKV/NIVKU…)、Identitas、BARANG
