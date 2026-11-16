@@ -61,6 +61,13 @@ if pytesseract is not None and getattr(sys, "frozen", False) and \
     pytesseract.pytesseract.tesseract_cmd = os.path.join(_BUNDLED_TESSERACT_DIR, "tesseract.exe")
     os.environ["TESSDATA_PREFIX"] = os.path.join(_BUNDLED_TESSERACT_DIR, "tessdata")
 
+# OCR 語言模型 (2026-11-16)：本機 tessdata 只裝了 eng，掃描頁的越南文標點/字母
+# 常被誤判 (例如 "Symbol" 讀成 "Syinbol")，加裝 vie 後明顯改善 (使用者實測
+# MAERSK 掃描頁)。eng+vie 對純數字、印尼文等其他供應商沒有負面影響 (tesseract
+# 多語言模式只是多一份字典輔助辨識，不影響其他語言字元的辨識)，所有 OCR
+# 呼叫統一用這個常數，不用依供應商國家分流。
+_OCR_LANG = "eng+vie"
+
 NA = "N/A"  # 抓不到值時，一律填這個 (使用者需求)
 
 # ---------------------------------------------------------------------------
@@ -139,7 +146,7 @@ _OCR_CACHE_LOCK = threading.Lock()
 # 鍵值 = 檔案路徑 + 大小 + 修改時間 + 模式 + 頁碼。改了 OCR 前處理時把 _OCR_DISK_VERSION 加一，舊快取就不會再用。
 # 只存「有辨識出文字」的結果：OCR 失敗 (空字串) 不存，避免暫時性錯誤被永久記住。
 # 關閉：環境變數 INVOICE_OCR_DISK_CACHE=0；位置：INVOICE_OCR_CACHE_DIR (預設 使用者資料夾\.invoice_ocr_cache)。
-_OCR_DISK_VERSION = "1"
+_OCR_DISK_VERSION = "2"  # 2026-11-16：OCR 加裝 vie 語言模型 (_OCR_LANG)，舊的 eng-only 快取要失效重新 OCR
 _OCR_DISK_ON = os.environ.get("INVOICE_OCR_DISK_CACHE", "1") != "0"
 _OCR_DISK_DIR = os.environ.get("INVOICE_OCR_CACHE_DIR") or os.path.join(
     os.path.expanduser("~"), ".invoice_ocr_cache")
@@ -230,7 +237,7 @@ def _ocr_page_text(pdf_path: str, page_index: int, page) -> str:
                     rotate_by = 0
                 else:
                     image = rotated
-            text = pytesseract.image_to_string(image) or ""
+            text = pytesseract.image_to_string(image, lang=_OCR_LANG) or ""
         except Exception:
             text = ""
 
@@ -281,7 +288,7 @@ def _ocr_page_fast(pdf_path: str, page_index: int, page) -> Tuple[str, bool]:
 def _fast_ocr_image(image) -> Tuple[str, bool]:
     """低解析度影像 OCR，回傳 (文字, 是否轉向)。只做 tesseract，不碰 pdfplumber，
     可以放在執行緒裡跑。"""
-    text = pytesseract.image_to_string(image) or ""
+    text = pytesseract.image_to_string(image, lang=_OCR_LANG) or ""
     rotated = False
     # 轉向偵測每頁約 1 秒，比低解析度 OCR 還貴：只有讀出來像亂碼的頁才做
     if _looks_garbled(text):
@@ -348,7 +355,7 @@ def _ocr_page_with_psm(pdf_path: str, page_index: int, psm: int, contrast: bool 
                 # 灰階 + 自動對比 (contrast=True)：見 invoice_text() 的自我檢查
                 from PIL import ImageOps
                 image = ImageOps.autocontrast(image.convert("L"))
-            text = pytesseract.image_to_string(image, config=f"--psm {psm}") or ""
+            text = pytesseract.image_to_string(image, lang=_OCR_LANG, config=f"--psm {psm}") or ""
         except Exception:
             text = ""
     _cache_put(_OCR_PSM_CACHE, cache_key, text)
@@ -447,7 +454,7 @@ def _ocr_page_text_enhanced(pdf_path: str, page_index: int, page) -> str:
             if rotate_by:
                 image = image.rotate(-rotate_by, expand=True)
             image = ImageOps.autocontrast(image.convert("L"))
-            text = pytesseract.image_to_string(image) or ""
+            text = pytesseract.image_to_string(image, lang=_OCR_LANG) or ""
         except Exception:
             text = ""
 
@@ -2068,10 +2075,35 @@ def compare_rows(rows: List[Dict], reference_rows: pd.DataFrame) -> List[Dict]:
     return results
 
 
-def _group_rows_by_invoice(rows: List[Dict]) -> Dict[str, List[Dict]]:
+def _mol_is_draft_series(invoice_no: str) -> bool:
+    """VN09 MOL CONSOLIDATION SERVICE 的草稿發票 (使用者 2026-11-10 答案：
+    Số (No) 空白時，INVOICE NO 只填 Ký hiệu，例如 "1C25TMC")：格式是「數字
+    開頭、不含 '-'」。已核發的正式發票補了 Số 之後是 "1C25TMC-00003114"
+    (含 '-')，CargoWise Debit Note 的 SHIPMENT 號碼一定是英文字母開頭
+    (例如 "SAEM11Y00151")，兩種都不符合這個判斷，不受影響。"""
+    return bool(invoice_no) and invoice_no[0].isdigit() and "-" not in invoice_no
+
+
+def _group_rows_by_invoice(rows: List[Dict], supplier_key: Optional[str] = None) -> Dict[str, List[Dict]]:
+    """依發票號碼分組。VN09 MOL 的草稿發票 (Số 空白) 全部共用同一個 Ký hiệu
+    當發票號碼 (例如 "1C25TMC")，同一個月常有上百張不同訂艙 (Order No.)
+    各自獨立的發票：只靠發票號碼分組會把它們全部併成一張，金額勾稽會把
+    不同發票的明細加在一起 (使用者 2026-11-16 回報「辨識等級(低)」)。這裡
+    只有 MOL 的草稿發票才額外用 Order No. 細分 (VAT 列本身的 Order No.
+    是 N/A，沿用同一張發票前一筆品項列的 Order No.，見 _molcs_parse_page()
+    說明)；其他供應商、MOL 自己的正式發票/Debit Note 完全不受影響。"""
     groups: Dict[str, List[Dict]] = {}
+    last_order: Dict[str, str] = {}
     for row in rows:
         inv_no = normalize_value(row.get("invoice_no"))
+        if supplier_key == "MOL" and _mol_is_draft_series(inv_no):
+            order = normalize_value(row.get("order_no"))
+            if order in ("N/A", "", None):
+                order = last_order.get(inv_no)
+            else:
+                last_order[inv_no] = order
+            if order:
+                inv_no = f"{inv_no}#{order}"
         groups.setdefault(inv_no, []).append(row)
     return groups
 
@@ -2307,6 +2339,7 @@ def audit_invoice_totals(
         )
         result = {
             "invoice_no": group_rows[0].get("invoice_no", NA),
+            "order_no": group_rows[0].get("order_no"),  # VN09 MOL 草稿發票分組用，見 _group_rows_by_invoice()
             "extracted_sum": extracted_sum,
             "invoice_total": invoice_total,
             "diff": extracted_sum - invoice_total if invoice_total is not None else None,
@@ -2387,12 +2420,14 @@ def audit_invoice_totals(
             pages = extract_pages_from_pdf_force_ocr(pdf_path)
         else:
             pages = supplier_pages(pdf_path, supplier_key, **pdfplumber_kwargs)
-        groups = _group_rows_by_invoice(rows)
-        # key(正規化發票號碼) -> 原始發票號碼字串，用來在「不是發票抬頭頁」
-        # 的頁面裡，用文字比對的方式判斷這一頁屬於哪一張發票 (見下方)。
+        groups = _group_rows_by_invoice(rows, supplier_key)
+        # 分組 key -> 原始發票號碼字串，用來在「不是發票抬頭頁」的頁面裡，
+        # 用文字比對的方式判斷這一頁屬於哪一張發票 (見下方)。VN09 MOL 的
+        # 草稿發票分組 key 會多帶 Order No. (見 _group_rows_by_invoice())，
+        # 但帳單原文印的仍是純 Ký hiệu，所以用分組 key 對應，不要用
+        # normalize_value(invoice_no) 重算 (同一個 Ký hiệu 的草稿會互相覆蓋)。
         raw_invoice_no = {
-            normalize_value(gr[0].get("invoice_no")): gr[0].get("invoice_no")
-            for gr in groups.values() if gr
+            key: gr[0].get("invoice_no") for key, gr in groups.items() if gr
         }
 
         totals_found: Dict[str, float] = {}
