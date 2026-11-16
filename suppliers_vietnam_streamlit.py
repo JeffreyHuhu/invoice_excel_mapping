@@ -4002,10 +4002,15 @@ _VT_VHL_ANSWER = [
                # 表頭原文，不要寫死 (2026-11-16 抽查 "BK 042025/052025/062026"：整欄沒抓到，
                # 擷取加總只有帳單合計的 1/3)
                "fees": [(("=CUOC VC", "=CUOC VAN CHUYEN"), None), ("=CUOC VC TRONG TPHCM", "CƯỚC VC TRONG TPHCM"),
-                        ("=CUOC VC NGOAI TPHCM", "CƯỚC VC NGOÀI TPHCM"), ("=BD NANG, HA", "BD NÂNG, HẠ"),
+                        # "BD NÂNG, HẠ" 有時候縮寫成「BDNH」(沒有逗點)，兩種都要收 (2026-11-16
+                        # 抽查 "THÁNG 2 (LẦN 1) - CƯỚC VC POU YUEN"：漏抓這欄)
+                        ("=CUOC VC NGOAI TPHCM", "CƯỚC VC NGOÀI TPHCM"),
+                        (("=BD NANG, HA", "=BDNH"), "BD NÂNG, HẠ"),
                         ("=PHI NANG", "PHÍ NÂNG"), ("=PHI HA", "PHÍ HẠ"), ("=VSC", "VSC"),
                         ("=PHI D/O VSC", "PHÍ D/O VSC"), ("=HO TRO PHI CO SO HA TANG", None),
-                        ("=PHI HA BAI SOM", "Phí hạ bãi sớm"),
+                        # 三種寫法都要收 (跟上面 BK 對帳表那組一樣，2026-11-16 補齊)
+                        ("=PHI HA BAI SOM", "Phí hạ bãi sớm"), ("=PHI HA CONT SOM", "Phí hạ cont sớm"),
+                        ("=PHI HA SOM", "Phí hạ sớm"),
                         # "PHÍ CÂN" (過磅費) 跟 VSC 同一組、算進 TỔNG CỘNG HĐ NÂNG HẠ (2026-11-16
                         # 抽查 "POU HUNG 05-2025" XUẤT NB 表：漏抓這欄，整表少算)
                         ("=PHI CAN", None),
