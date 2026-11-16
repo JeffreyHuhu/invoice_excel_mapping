@@ -29,6 +29,7 @@ from typing import Dict, List, Optional, Tuple
 from extract_utils_streamlit import (
     _ocr_page_with_psm, _scanned_page_indexes, extract_pages_from_pdf,
     limited_pages, register_supplier, set_supplier_number, SUPPLIER_REGISTRY, SheetBook,
+    VN_AUDIT_TOLERANCE,
 )
 from suppliers_common_streamlit import (
     INDO_MONTHS, _search, _fmt_volume, _volume_from_text,
@@ -3439,6 +3440,19 @@ def _tw_header_consignee(rows: List[list]) -> Optional[str]:
     return text
 
 
+def _tw_file_consignee(file_name: str) -> Optional[str]:
+    """表頭沒有「To : …」客戶名稱時，用檔名裡的客戶簡稱對照 _VN_CONSIGNEES (使用者
+    2026-11-16 指定：AUGUST 2026 IMPORT-YUEDE.xls 的 TONG 表頭第 5 列空白，其他月份
+    都是 "To : YUE DE VIET NAM CO., LTD")。對不到就回傳 None，維持必填欄位 ERROR。"""
+    flat = re.sub(r"[^A-Z]", "", _vt_norm(os.path.splitext(file_name or "")[0]))
+    if not flat:
+        return None
+    for key, full in _VN_CONSIGNEES.items():
+        if re.sub(r"[^A-Z]", "", key) in flat:
+            return full
+    return None
+
+
 def _tw_usd_text(usd: float) -> str:
     """費用名稱括號裡的美金金額：75 -> "75"、40.6 -> "40.6"。"""
     return f"{usd:,.2f}".rstrip("0").rstrip(".")
@@ -3593,8 +3607,61 @@ def _tw_tong_fee_cols(header_row: list) -> Dict[str, List[int]]:
     out: Dict[str, List[int]] = {}
     for c, cell in enumerate(header_row):
         name = _tw_bare_fee_name(cell)
-        if name in _TW_LOCAL_FEES or name in _TW_NOVAT_FEES:
+        if name in _TW_LOCAL_FEES or name in _TW_NOVAT_FEES or _tw_is_usd_fee_col(header_row, c):
             out.setdefault(name, []).append(c)
+    return out
+
+
+def _tw_is_usd_fee_col(header_row: list, c: int) -> bool:
+    """沒列在費用代號清單、但版面是「X (USD)」+ 右邊緊接「TOTAL(VND) …」的欄，也當成
+    Local Charge 費用欄 (2026-11-16：POU HUNG / POU SUNG 的 "HANDLING (USD)"、
+    "C. CONT (USD)" 沒在清單裡，整欄漏算，金額稽核差 77~99 萬)。每月新增的費用欄
+    不用再一個一個補清單。"""
+    full = _tw_header_full(_vn_cell(header_row, c))   # "(USD)" 可能在表頭第二行
+    nxt = _tw_header_full(_vn_cell(header_row, c + 1)).upper().replace(" ", "")
+    prev = _tw_header_full(_vn_cell(header_row, c - 1)) if c > 0 else ""
+    # 左邊緊鄰也是 USD 欄時不算 (例如 "CFS (USD)" 右邊的 "CFS/1cbm (USD)" 是每 CBM 單價，
+    # 兩欄共用同一個 TOTAL(VND) 欄，2026-11-16 CONG NO T06-2026 POU HUNG)
+    return ("(USD)" in full.upper() and not full.upper().replace(" ", "").startswith("TOTAL(")
+            and nxt.startswith("TOTAL(VND)") and "(USD)" not in prev.upper())
+
+
+def _tw_header_full(cell) -> str:
+    """整格表頭文字，換行壓成一個空白。"""
+    return re.sub(r"\s+", " ", str(cell or "")).strip()
+
+
+def _tw_vnd_only_fee_cols(header_row: list, fee_cols: Dict[str, List[int]]) -> List[Tuple[int, str]]:
+    """只有 VND、沒有 USD 欄的費用 (例如 POU CHEN 版 "TOTAL(VND) OTHERS")：回傳
+    [(欄號, 費用名稱)]。跳過 USD 費用欄右邊那欄 (那是同一筆費用的 VND 換算) 和
+    小計欄 ("Local Charge"、"O/F+EXW 0%" 這類合計)。"""
+    out = []
+    for c, cell in enumerate(header_row):
+        full = _tw_header_full(cell)   # 費用名稱常在表頭第二行
+        m = re.match(r"TOTAL\s*\(VND\)\s*(.*)$", full, re.I)
+        if not m:
+            continue
+        # 往左找第一個有意義的表頭 (跳過空白與 "check" 查核欄)：是 USD 欄就代表這欄是那筆
+        # USD 費用的 VND 換算，不是獨立費用 (2026-11-16：BK 112025 IMP 的 "D/O (USD)" 和
+        # "TOTAL(VND) D/O" 中間隔一欄 "check"；EXWORK 中間隔三欄空白)
+        left = ""
+        for k in range(c - 1, -1, -1):
+            text = _tw_header_full(_vn_cell(header_row, k))
+            if text and text.upper() != "CHECK":
+                left = text
+                break
+        if "(USD)" in left.upper():
+            continue
+        if not re.match(r"TOTAL\s*\(", left, re.I) and "(VND)" in left.upper():
+            continue   # 中間多一欄 "EXWORK (VND)" (MARCH 2026 IMPORT-YUEDE)，也是同一筆費用
+        name_key = m.group(1).strip()
+        name_key = re.sub(r"^not\s+VAT\s+", "", name_key, flags=re.I).split(" ")[0].upper() if name_key else ""
+        if name_key in fee_cols:
+            continue   # 同名費用已經有 USD 欄 (例如 "TOTAL(VND) EXWORK" 對 "EXWORK (USD)")
+        name = re.sub(r"^not\s+VAT\s+", "", m.group(1).strip(), flags=re.I).strip()
+        if not name or "LOCAL CHARGE" in name.upper() or "+" in name:
+            continue
+        out.append((c, name))
     return out
 
 
@@ -3645,6 +3712,7 @@ def _tw_tong_sheets(book) -> Tuple[List[Dict], List[Dict]]:
             continue
         header_row = rows[head]
         fee_cols = _tw_tong_fee_cols(header_row)
+        vnd_only_cols = _tw_vnd_only_fee_cols(header_row, fee_cols)
         bill_c = _tw_header_col(header_row, "BILL NO.")
         # 日期欄標籤依月份不同："ATD"(舊樣本)、"ETD"(出口版)、"Ngay tau den"/"ETA"(進口版)、
         # "et"(2026-11-12：APRIL 2026 IMPORT-YUEDE 打字少打一個 D，照抄原文的誤植)
@@ -3665,7 +3733,7 @@ def _tw_tong_sheets(book) -> Tuple[List[Dict], List[Dict]]:
         col20 = next((c for c, v in enumerate(sub) if _vn_text(v).strip("'").upper() == "20"), None)
         col40 = next((c for c, v in enumerate(sub) if _vn_text(v).strip("'").upper() == "40"), None)
         colcmb = next((c for c, v in enumerate(sub) if _vn_text(v).upper() == "CMB"), None)
-        consignee = _tw_header_consignee(rows)
+        consignee = _tw_header_consignee(rows) or _tw_file_consignee(getattr(book, "file_name", ""))
         for row in rows[head + 2:]:
             if _vn_text(_vn_cell(row, 0)).upper() == "TOTAL":
                 break
@@ -3688,7 +3756,10 @@ def _tw_tong_sheets(book) -> Tuple[List[Dict], List[Dict]]:
                     "port_of_loading": pol, "port_of_discharge": pod, "volume": volume}
             exw_bill = exw.get(bill)
             local_vnd = vat_vnd = novat_vnd = 0
-            for fee in _TW_LOCAL_FEES:
+            # 清單裡的費用代號 + 自動認出的「X (USD)」費用欄 (A/F、O/F、EXWORK 以外都算 Local Charge)
+            local_fees = list(_TW_LOCAL_FEES) + [f for f in fee_cols
+                                                 if f not in _TW_LOCAL_FEES and f not in _TW_NOVAT_FEES]
+            for fee in local_fees:
                 for c in fee_cols.get(fee, []):
                     usd = _vn_num(_vn_cell(row, c))
                     if not usd:
@@ -3700,6 +3771,15 @@ def _tw_tong_sheets(book) -> Tuple[List[Dict], List[Dict]]:
                                   "amount": vnd, "vat": vat})
                     local_vnd += vnd
                     vat_vnd += vat
+            for c, fee_name in vnd_only_cols:
+                vnd = _vn_num(_vn_cell(row, c))
+                if not vnd:
+                    continue
+                vnd = int(vnd + 0.5)
+                vat = int(vnd * 0.08 + 0.5) if has_vat else 0
+                items.append({**base, "description": fee_name, "amount": vnd, "vat": vat})
+                local_vnd += vnd
+                vat_vnd += vat
             for fee in _TW_NOVAT_FEES:
                 if fee == "EXWORK" and exw_bill:
                     continue   # 這票的 EXWORK 改用 EXW 明細拆列
@@ -3728,8 +3808,9 @@ def _tw_tong_sheets(book) -> Tuple[List[Dict], List[Dict]]:
                 # 帳單自己的 GRAND TOTAL 偶有幾塊 VND 尾差 (逐欄個別四捨五入後加總，
                 # 跟帳單自己的 GRAND TOTAL 公式路徑不同)，容許到 ±5
                 # (2026-11-12：10SEA2603104 差 1.04、08SEA2501023 差 4、
-                # 11SEA2412066 差 5)。
-                "grand_tolerance": 5})
+                # 11SEA2412066 差 5)。越南 VND 帳單容許 VND 100 (使用者 2026-11-04 規則；
+                # 2026-11-16：帳單 VAT 欄比 8% 少 20~25、逐欄 USD×匯率 四捨五入差 2)。
+                "grand_tolerance": VN_AUDIT_TOLERANCE, "net_tolerance": VN_AUDIT_TOLERANCE})
     return items, totals
 
 
