@@ -1344,12 +1344,17 @@ def register_supplier(key: str, label: str,
     悄悄寫進 Excel。目前只對 multi_page=True 的供應商生效 (透過
     _parse_multi_page_pdf())。
 
-    invoice_page_map (可選，一份 PDF 可能有好幾張發票的供應商用，目前只有
-    DSV_VN/MOL/DHL_VN/YUSEN)：傳入 PDF 路徑，回傳 {發票號碼: [原始頁碼 (1
+    invoice_page_map (可選)：傳入 PDF 路徑，回傳 {發票號碼: [原始頁碼 (1
     起算), ...]}。本機轉檔工具 (pdf_to_excel.exe) 用它判斷一份 PDF 裡信心
-    等級低的發票對應哪些原始頁，決定能不能拆成另一份 PDF，不影響擷取結果，
-    其他供應商不用實作。
+    等級低的發票對應哪些原始頁，決定能不能拆成另一份 PDF，不影響擷取結果。
+    multi_page=True 時不用另外實作：預設套用
+    generic_multi_page_invoice_pages() (一頁一張發票，跟 multi_page 的定義
+    一致)。DSV_VN/MOL/DHL_VN/YUSEN 這 4 家『一張發票可能跨好幾頁』，改傳
+    cargowise_invoice_pages() 覆蓋掉預設值 (2026-11-16)。非 multi_page 供應商
+    (一份 PDF 只有一張發票) 不需要這個參數。
     """
+    if multi_page and invoice_page_map is None:
+        invoice_page_map = lambda p, _k=key: generic_multi_page_invoice_pages(p, _k)
     SUPPLIER_REGISTRY[key] = {
         "label": label, "detect": detect_fn, "parse": parse_fn, "multi_page": multi_page,
         "extract_total": extract_total, "extract_grand_total": extract_grand_total,
@@ -1617,6 +1622,38 @@ def _drop_duplicate_invoice_pages(page_rows: List[List[Dict]]) -> List[Dict]:
             seen[key] = True
         kept.extend(rows)
     return kept
+
+
+def generic_multi_page_invoice_pages(pdf_path: str, key: str) -> Dict[str, List[int]]:
+    """multi_page=True 供應商的預設 invoice_page_map (2026-11-16)：『一頁一張
+    發票』(multi_page 的定義本身就是這樣，見 register_supplier() 上方說明)，
+    跟 cargowise 系列『一張發票可能跨好幾頁』完全不同 (那 4 家改用專屬的
+    cargowise_invoice_pages())。
+
+    逐頁呼叫跟 _parse_multi_page_pdf() 完全一樣的 detect/parse/expand_to_rows，
+    只是多記下頁碼，這樣算出來的發票號碼字串才會跟 worst_level()/
+    validate_extraction() 用的完全一致 (都經過 _fill_na())。回傳
+    {發票號碼 (抓不到值時是 "N/A"): [原始頁碼 (1 起算), ...]}，交給本機
+    轉檔工具判斷能不能把信心等級低的發票拆成另一份 PDF，不影響擷取結果。
+    """
+    entry = SUPPLIER_REGISTRY.get(key)
+    if not entry:
+        return {}
+    if entry.get("force_ocr"):
+        pages = extract_pages_from_pdf_force_ocr(pdf_path)
+    else:
+        pages = supplier_pages(pdf_path, key)
+    result: Dict[str, List[int]] = {}
+    for i, page_text in enumerate(pages, start=1):
+        try:
+            if not entry["detect"](page_text):
+                continue
+            rows = expand_to_rows(entry["parse"](page_text))
+        except Exception:
+            continue
+        inv = rows[0].get("invoice_no", NA) if rows else NA
+        result.setdefault(inv, []).append(i)
+    return result
 
 
 _CUSTOM_PAGES_CACHE: "OrderedDict[tuple, List[str]]" = OrderedDict()

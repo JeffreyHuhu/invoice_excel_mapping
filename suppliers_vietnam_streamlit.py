@@ -1304,7 +1304,9 @@ def _cw_docs(text: str, page_nums: Optional[List[int]] = None):
 
 
 def cargowise_invoice_pages(pdf_path: str, key: str) -> Dict[str, List[int]]:
-    """DSV_VN/MOL/DHL_VN/YUSEN 專用：回傳這份 PDF 每張發票 (SHIPMENT 號碼)
+    """DSV_VN/MOL/DHL_VN/YUSEN 專用 (這 4 家『一張發票可能跨好幾頁』，其他
+    multi_page 供應商預設用更簡單的 generic_multi_page_invoice_pages()，
+    見 extract_utils_streamlit.py)：回傳這份 PDF 每張發票 (SHIPMENT 號碼)
     對應到原始 PDF 的頁碼 (1 起算)。跟 invoice_text()/_cw_docs() 用同一套切法，
     只是多記頁碼，給本機轉檔工具 (pdf_to_excel.exe) 判斷能不能把信心等級低的
     發票拆成另一份 PDF，不影響原本的擷取結果。算不出頁碼對應時回傳空 dict
