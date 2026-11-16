@@ -6994,6 +6994,12 @@ _OPL_DN_ITEM_RE = re.compile(
     r"^(?P<desc>[A-Z][A-Z0-9/&().\- ]*?)\s+(?:[\d.,]+\s+[A-Z]+|MINI|\d+X\d{2}'?[A-Z]{0,2})\s+USD\s+[\d,.]+\s+"
     r"(?P<amount>[\d,.]+)\s+US\$\s*[\d,.]+\s*$")
 
+# 整張帳單只有一筆整櫃包乾費用、品名欄空白 (直接從櫃型開頭，"SPOE2505038")：
+# "1X20'GP US$ 830.00 830.00 PT. POU YUEN IND US$ 830.00"
+_OPL_BLANK_DESC_ITEM_RE = re.compile(
+    r"^(?P<qty>\d+X\d{2}'?[A-Z]{0,2}|MINI)\s+U[S$]{1,2}\s*[\d,.]+\s+(?P<amount>[\d,.]+)\s+\S.*\S\s+"
+    r"[UN][ST]\$\s*[\d,.]+\s*$")
+
 
 def _is_opl_dn(text: str) -> bool:
     upper = text.upper()
@@ -7012,10 +7018,24 @@ def _opl_dn_total(text: str) -> Optional[float]:
     # 掃描檔 OCR 會多讀出 "=" / ":" ("US$ =: 1,320.00")，或在前面多讀出雜訊 ("- 7 US$ 639.20")。
     # 掃描檔有時把右邊的 PREPAID AMT 欄拆成一行一個 "US$ 435.00"，總額在最後 ("KHHJKT2511640")
     # 總額前面也會多一個 "."、"—-" 或雜字 ("a US$  . 357.75"、"HKGJKT25080662"；"US$ —- 176.00")
-    found = re.findall(r"(?m)^[^A-Za-z\n]{0,8}?(?:[a-z]{1,2}\s+){0,2}(?:TOTAL\s*:\s*)?US\$\s*[=:.\s\-—~]*?\s*(\d[\d,.]*(?:\s\.\d{2})?)\s*$",
+    # 小數點後也可能多一個空白 ("US$ 658 . 32"，"HKGJKT25030047")
+    # 文字版有些版型合計行是 "TOTAL: US$ 678.84 NT$ 22,343" (美金後面還接新台幣換算，
+    # "520825 (PT. NIKOMAS GOA 2ND)"、"SPOE2505046")：美金數字後面容許再接一段 NT$ 金額
+    found = re.findall(r"(?m)^[^A-Za-z\n]{0,8}?(?:[a-z]{1,2}\s+){0,2}(?:TOTAL\s*:\s*)?US\$\s*[=:.\s\-—~]*?\s*"
+                       r"(\d[\d,.]*(?:\s*\.\s*\d{2})?)\s*(?:NT\$\s*[\d,.]+)?\s*$",
                        text)
-    # 小數點前多一個空白 ("US$ 479 .36")
-    return _opl_amount(found[-1].replace(" ", "")) if found else None
+    if not found:
+        # 合計行被其他文字黐成一行 ("--BBAANNKK DDEETTAAIILLSS:: US$ 987.60"，"OLJKT2507006"：
+        # Remark 的 "BANK DETAILS" 跟合計行版面重疊)：退而求其次，找「整行只有一個 US$」且
+        # 結尾是乾淨數字的那一行 (明細列一定有兩個 US$：UNIT PRICE 跟 PREPAID AMT，不會誤判)
+        for line in reversed(text.splitlines()):
+            if line.count("US$") == 1:
+                m = re.search(r"US\$\s*[=:.\s\-—~]*?\s*(\d[\d,.]*(?:\s*\.\s*\d{2})?)\s*$", line)
+                if m:
+                    found = [m.group(1)]
+                    break
+    # 小數點前後多空白
+    return _opl_amount(re.sub(r"\s", "", found[-1])) if found else None
 
 
 # --- OPL 美金 Debit Note 掃描檔 (2026-10-29 OPL 資料夾 "HKGJKT25110203(NIKOMAS HKG 62ND).pdf"
@@ -7035,12 +7055,17 @@ _OPL_SCAN_ITEM_RE = re.compile(
     # 也會把 "2X40'HQ" 讀成 "2440 'HQ"、"5BLS"/"4BLS"/"10BLS" 讀成 "SBLS"/"S5BLS"/"ABLS"/"LOBLS"、
     # "1 SET" 讀成 "{ SET"/"1s SET"/"lL SET"、MINI 讀成 "MINT"/"MINTI"/"MINI]"、"KGS USD" 黏成 "KGSUSD"
     # "7X40'HQ" 讀成 "TX40'HQ"/"7K40'HQ" ("XM25100326")
-    r"(?P<qty>\d+\s*[Xx]\s*\d{2}\S*|\d+\s*4\s*\d{2}\s?'\S*|[\dTIl]?[XxK]\d{2}'\S*|[\d.,]+\s*KGS(?=USD)"
+    # 數字和引號之間多一個空白 ("1X20 'GP"，"HKGJKT24120372A")：引號前容許一個空白，
+    # 跟下面 "2440 'HQ" 那個 alt 一樣容許，否則幣別 (HKD) 判斷會被漏掉的 "'GP" 卡住
+    r"(?P<qty>\d+\s*[Xx]\s*\d{2}\s?'?\S*|\d+\s*4\s*\d{2}\s?'\S*|[\dTIl]?[XxK]\d{2}'\S*|[\d.,]+\s*KGS(?=USD)"
     r"|S?\d[\d.,]*[a-z]?\s*[A-Z]{2,5}|[|iIlt][lLI]?\s+[A-Z]{2,5}"
     # "1CNTR" 讀成 "ICNTR" ("VN25E1609"、"VN25E1682")；"1 SET" 讀成一串雜字 "=—S—s1sSSET"
     # ("JKTHCSE2509073J")：有數字、結尾是單位就算數量
     # "8 CBM" 讀成 "& CBM" ("SHKJKT25110571A")；品名本身也有 "&"，所以後面一定要接單位
-    r"|\d?[{(\[\])]\s*[A-Z]{2,5}|&\s*(?:CBM|SETS?|SHPTS?|CNTRS?)(?=\s)|[LI1]?[SOA0](?:BLS?|SETS?|SHPTS?|CBM)|MIN[ITl1]{1,2}[\]|]?\d*"
+    # bracket alt 後面加 negative lookahead：避免吃到品名續接的括號說明，例如
+    # "PARKING FEE (FM 1 SET HKD..." 的 "(FM" 被誤判成數量 ("HKGJKT24120372A" 系列)。
+    # 真正的數量括號 (例如 OCR 把 "8 CBM" 讀成 "[CBM]") 後面接的是幣別，不會是 "數字+空白"
+    r"|\d?[{(\[\])]\s*[A-Z]{2,5}(?!\s+\d)|&\s*(?:CBM|SETS?|SHPTS?|CNTRS?)(?=\s)|[LI1]?[SOA0](?:BLS?|SETS?|SHPTS?|CBM)|MIN[ITl1]{1,2}[\]|]?\d*"
     r"|[|iIl]CNTRS?|\S*\d\S*(?:SETS?|SHPTS?|CNTRS?)"
     # 數量沒有單位 ("CUSTOM CLEARANCE-WAN 1 US$ 130.00"、"PORT SECURITY-C 4.63 US$ 1.30"，
     # 文字版 "JKTHCSE2508031A"、"JKTHCSE2508057A-G")
@@ -7373,6 +7398,15 @@ def _parse_opl_dn(text: str) -> Dict:
         it.pop("_alt")
     if len(scanned) > len(items):
         items = scanned
+    if not items:
+        # 整張帳單只有一筆「整櫃包乾」費用，品名欄本身是空白，直接從櫃型開頭
+        # ("1X20'GP US$ 830.00 830.00 PT. POU YUEN IND US$ 830.00"，"SPOE2505038")：
+        # 品名留空 (照抄 PDF 原文，PDF 上本來就沒有文字)
+        for ln in text.splitlines():
+            m = _OPL_BLANK_DESC_ITEM_RE.match(ln.strip())
+            if m:
+                items = [{"description": None, "amount": _opl_amount(m.group("amount")), "vat": None}]
+                break
     return {"header": header, "items": items or [{"description": None, "amount": None, "vat": None}]}
 
 
