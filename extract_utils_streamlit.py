@@ -2325,7 +2325,14 @@ def audit_invoice_totals(
         return results
 
     if entry.get("multi_page_pdf"):
-        pages = supplier_pages(pdf_path, supplier_key, **pdfplumber_kwargs)
+        # force_ocr 供應商 (文字層亂碼，見 extract_pages_from_pdf_force_ocr())
+        # 金額稽核也要用 OCR 文字，跟 _parse_multi_page_pdf() 擷取明細用同一份
+        # 文字，否則亂碼文字層會讓 extract_total_fn 抓不到總額，誤判成
+        # NO_TOTAL_AUDIT (HANDAL 2026-11-16)。
+        if entry.get("force_ocr"):
+            pages = extract_pages_from_pdf_force_ocr(pdf_path)
+        else:
+            pages = supplier_pages(pdf_path, supplier_key, **pdfplumber_kwargs)
         groups = _group_rows_by_invoice(rows)
         # key(正規化發票號碼) -> 原始發票號碼字串，用來在「不是發票抬頭頁」
         # 的頁面裡，用文字比對的方式判斷這一頁屬於哪一張發票 (見下方)。
