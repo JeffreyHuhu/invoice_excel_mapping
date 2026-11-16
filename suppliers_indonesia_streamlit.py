@@ -6319,11 +6319,11 @@ def _handal_item_region(text: str) -> str:
     總額數字跟金額大寫不一致時，那個數字其實是最後一筆費用 (欄位分開的
     掃描版)，改在金額大寫那行切。"""
     m = _HANDAL_TOTAL_RE.search(text)
-    words = _handal_words_total(text)
+    words_m = _HANDAL_WORDS_RE.search(text)
+    words = _indo_words_to_int(words_m.group(1)) if words_m else None
     if m and (words is None or _handal_amount_to_int(m.group(1)) == words):
         return text[:m.start()]
-    m = _HANDAL_WORDS_RE.search(text)
-    return text[:m.start()] if m else text
+    return text[:words_m.start()] if words_m else text
 
 
 def _handal_pair_blocks(nums: List) -> Optional[List]:

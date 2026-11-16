@@ -457,6 +457,10 @@ def _ocr_page_text_enhanced(pdf_path: str, page_index: int, page) -> str:
     return text
 
 
+_FORCE_OCR_PAGES_CACHE: "OrderedDict[tuple, List[str]]" = OrderedDict()
+_FORCE_OCR_PAGES_CACHE_SIZE = 8
+
+
 def extract_pages_from_pdf_force_ocr(pdf_path: str) -> List[str]:
     """跟 extract_pages_from_pdf() 類似，但『不管 pdfplumber 有沒有抓到文字
     層，每一頁一律強制用 OCR 辨識』，不看文字層內容。
@@ -481,7 +485,17 @@ def extract_pages_from_pdf_force_ocr(pdf_path: str) -> List[str]:
     覆蓋面積 >= 90% 頁面的圖片，也就是真正的掃描頁) 才強制 OCR；沒有這種
     滿版圖片的頁面 (原生文字 PDF) 一律直接用 pdfplumber 的文字層，不做
     OCR，避免把乾淨版型的文字搞亂。
+
+    這支函式不吃 pdfplumber_kwargs (OCR 不受 x_tolerance/y_tolerance 影響)，
+    但呼叫端 (find_best_extraction() 嘗試多組參數、audit_invoice_totals())
+    一次轉檔仍會呼叫好幾次，每次結果必定相同；整份結果直接快取，不用每次
+    都重新開檔、逐頁判斷是不是掃描頁 (HANDAL 2026-11-16 實測：改之前一份
+    PDF 轉檔要重複做滿版判斷 6 次，改完只做 1 次，每次省約 0.5 秒)。
     """
+    key = _pages_cache_key(pdf_path, {})
+    if key in _FORCE_OCR_PAGES_CACHE:
+        _FORCE_OCR_PAGES_CACHE.move_to_end(key)
+        return list(_FORCE_OCR_PAGES_CACHE[key])
     pages_text = []
     with pdfplumber.open(pdf_path) as pdf:
         for i, page in enumerate(limited_pages(pdf)):
@@ -490,7 +504,10 @@ def extract_pages_from_pdf_force_ocr(pdf_path: str) -> List[str]:
             else:
                 text = page.extract_text() or ""
             pages_text.append(text)
-    return pages_text
+    _FORCE_OCR_PAGES_CACHE[key] = pages_text
+    while len(_FORCE_OCR_PAGES_CACHE) > _FORCE_OCR_PAGES_CACHE_SIZE:
+        _FORCE_OCR_PAGES_CACHE.popitem(last=False)
+    return list(pages_text)
 
 
 def _page_is_scanned_image(page, coverage_threshold: float = 0.9) -> bool:
