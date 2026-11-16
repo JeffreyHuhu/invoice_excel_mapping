@@ -3879,7 +3879,10 @@ def _dhl_common_header(text: str) -> Dict[str, Optional[str]]:
     if not header["invoice_date"]:
         # INBOUND CHARGES INVOICE (D 開頭發票，2026-11-02 低等級 D000464655 等)：
         # 標籤只寫 "Date :"，日期格式是 DD/MM/YYYY，轉成 DD-MM-YYYY 再沿用上面的轉換
-        m = re.search(r"(?<![A-Za-z])Date\s*:\s*(\d{1,2})/(\d{1,2})/(\d{4})", text)
+        # 標籤常被 OCR 讀成 "Data"/"Dato"/"Dale"/"Dalo"，冒號也可能讀成 ">" (2026-11-16
+        # D000799338/D000794106)；壞掉的那一份數值通常不是純數字 (例如 "Q2/08/2026")，
+        # 正規表示式會自動跳過，改抓後面乾淨的 "Payment Due Date" 那一份。
+        m = re.search(r"(?<![A-Za-z])Da\w{1,2}\s*[:>]\s*(\d{1,2})/(\d{1,2})/(\d{4})", text)
         if m:
             header["invoice_date"] = _dhl_parse_date(f"{m.group(1)}-{m.group(2)}-{m.group(3)}")
     return header
@@ -4331,8 +4334,19 @@ def _parse_dhl_duty(text: str) -> Dict:
         # JKTZR00623780)：單筆超過 1,000 億 IDR 視為讀錯，不列入
         if amount is None or amount > 100_000_000_000:
             continue
-        vat = _dhl_clean_amount(im.group("vat")) if im.group("vat") else (
-            total - amount if amount is not None and total is not None else None)
+        # 稅別代碼 "Z" 固定是 0% (稅別分析表另外會列 "Z Duty and Tax 0.0%")，不用
+        # amount/total 相減推算：中間「未稅金額」欄位 OCR 常把個別數字讀錯 (例如
+        # 300,566 讀成 200,566，2026-11-16 JKTZR00712580 低等級)，相減會把這筆
+        # OCR 誤差誤判成一筆假的 VAT；Z 碼直接當 VAT=0，未稅金額採信 total 欄
+        # (跟稅別分析表的課稅基礎一致，比中間欄位可靠)。
+        if im.group("code").upper() == "Z":
+            vat = 0
+            if total is not None and amount != total:
+                amount = total
+        elif im.group("vat"):
+            vat = _dhl_clean_amount(im.group("vat"))
+        else:
+            vat = total - amount if amount is not None and total is not None else None
         items.append({"description": im.group("desc").strip(), "amount": amount, "vat": vat})
     for code in ("order_no", "arrive_date", "mbl_no", "volume", "vessel", "container_no"):
         header.setdefault(code, None)
@@ -4443,7 +4457,9 @@ def _dhl_is_unreadable(text: str) -> bool:
 _DHL_IC_BLOCK_RE = re.compile(r"Billing Details(?P<block>.*?)(?:Payment\s+T|Sub-?\s*Total|Please Pay)", re.DOTALL)
 _DHL_IC_ITEM_RE = re.compile(
     # 名稱可能有括號 "Bonded Storage (1 day(s))" (2026-11-03 D000811556)
-    r"^(?P<desc>[A-Za-z][A-Za-z0-9 \-()/.]*?)\s+(?P<amount>[\d,]+)\s+(?P<vat>[\d,]+)\s+(?P<total>[\d,]+)\s*$",
+    # VAT 欄是 0 時 OCR 常把數字 '0' 讀成雜訊字元 ('O'、'i)' 等，2026-11-16 D000799338/
+    # D000803090 低等級)：VAT 欄放寬成任意一個非空白詞，解析不出數字時當 0 (見呼叫端)。
+    r"^(?P<desc>[A-Za-z][A-Za-z0-9 \-()/.]*?)\s+(?P<amount>[\d,]+)\s+(?P<vat>\S+)\s+(?P<total>[\d,]+)\s*$",
     re.MULTILINE)
 
 
@@ -4489,7 +4505,8 @@ def _parse_dhl_inbound_charges(text: str) -> Dict:
     block = _DHL_IC_BLOCK_RE.search(text)
     items = [{"description": m.group("desc").strip(),
               "amount": _dhl_clean_amount(m.group("amount")),
-              "vat": _dhl_clean_amount(m.group("vat"))}
+              "vat": _dhl_clean_amount(m.group("vat"))
+              if _dhl_clean_amount(m.group("vat")) is not None else 0}
              for m in _DHL_IC_ITEM_RE.finditer(block.group("block") if block else "")]
     return {"header": header, "items": items}
 
@@ -4641,8 +4658,10 @@ def _dhl_extract_grand_total(text: str) -> Optional[int]:
         # 海運帳單的含稅總額 "TOTAL IDR 8.121.708"
         return _dhl_fwd_amount(_search(r"^TOTAL IDR\s+([\d.]+)", text))
     if _dhl_is_inbound_charges(text):
-        # 進口代墊費用的應付總額 "Please Pay This Amount: IDR 28,091,251"
-        return _dhl_clean_amount(_search(r"Please Pay This Amount:\s*IDR\s+([\d,]+)", text))
+        # 進口代墊費用的應付總額 "Please Pay This Amount: IDR 28,091,251"；
+        # "IDR" 跟數字之間可能被 OCR 雜訊字元卡住 ("IDR} 482,316"，2026-11-16
+        # D000803090 低等級)，用 \W* 取代 \s+ 容許非數字雜訊。
+        return _dhl_clean_amount(_search(r"Please Pay This Amount:\s*IDR\W*([\d,]+)", text))
     # 只看逐票明細 (第一個 "Air Waybill" 表頭到最後一個 "Service Sub Total")，
     # 不吃到後面附件 (報關單、商業發票) 裡單獨一行的數字
     start = text.find("Air Waybill")
