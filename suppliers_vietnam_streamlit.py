@@ -3991,7 +3991,7 @@ _VT_VHL_ANSWER = [
                # 用到，表頭明顯對得上的 NHẬP/XUẤT 表會被擠去比對寫死費用清單的 _xuat_variant
                # 版面，漏抓「hỗ trợ phí cơ sở hạ tầng」(2026-11-16 抽查 "POU HUNG 05-2025"：
                # NHẬP/XUẤT NB/CÁI MÉP 擷取加總比帳單合計少 5~10%)
-               "require": "TONG CONG CUOC VC", "require_all": ("TONG CONG CUOC VC",),
+               "require": "TONG CONG CUOC VC", "require_all": ("TONG CONG CUOC VC",), "_can_cont_variant": True,
                "fields": {**_VT_VHL_COMMON["fields"], "bl_no": "SO LO"},
                # công nợ VHL "6010" 的 CƯỚC 拆成市內/市外兩欄、VSC 併進 "PHÍ D/O VSC"；
                # POU HUNG "xuat" 表 (雖然叫 xuat，但有 TỔNG CỘNG CƯỚC VC 中間小計欄，結構
@@ -4010,17 +4010,18 @@ _VT_VHL_ANSWER = [
                         # "PHÍ CÂN CONT" 這個版面不是磅櫃表自己的欄 (那是另一組設定)，是跟 PHÍ
                         # NÂNG/PHÍ HẠ 同一欄位組、算進 TỔNG CỘNG HĐ NÂNG HẠ (2026-11-16 抽查
                         # "công nợ VHL T5-25" XUẤT 表：漏抓這欄)
-                        # 不要加裸的 "=CAN CONT"：這個名稱有時候算進 TỔNG (T4-25-L2 XUẤT-2 表)，
-                        # 有時候不算 (T6-25 XUẤT LÂN 2 表，使用者 2026-10-28 已確認不擷取，見
-                        # 上面 _VT_VINH_HUNG_LONG 開頭那份設定的註解)，兩種表頭長得一樣沒辦法
-                        # 用名稱分辨，要留給使用者確認，不要猜
+                        # 裸的 "CÂN CONT" 欄不寫死在這裡：這個名稱有時候算進 TỔNG (T4-25-L2
+                        # XUẤT-2 表)，有時候不算 (T6-25 XUẤT LÂN 2 表，使用者 2026-10-28 已
+                        # 確認不擷取，見上面 _VT_VINH_HUNG_LONG 開頭那份設定的註解)，兩種表頭
+                        # 長得一樣沒辦法用名稱分辨，改用 _vhl_cfgs_for_book() 依每本活頁簿自己
+                        # 的金額關係動態決定要不要加 (標 "_can_cont_variant" 的設定才會補)
                         ("=PHI CAN CONT", None)],
                # 合計欄名稱不只「TỔNG CỘNG」：大張工作表 (X1-1、xuat2) 只叫「TỔNG」，
                # 6010/nhập/6010-Lần 2 叫「TỔNG CỘNG CƯỚC & PHÍ」(2026-11-16 抽查 "công
                # nợ VHL" 全月份：抓不到合計欄，整表金額沒算進勾稽，差額看起來有幾十億)
                "grand": ("=TONG CONG", "TONG CONG CUOC & PHI", "=TONG")}),
     (r"(?!)", {**_VT_VHL_COMMON, "key": ["SO LO"], "date": "NGAY", "date_dm_swap": True,
-               "require": "CUOC", "_xuat_variant": True,
+               "require": "CUOC", "_xuat_variant": True, "_can_cont_variant": True,
                "fields": {**_VT_VHL_COMMON["fields"], "bl_no": "SO LO"},
                "fees": [("CUOC", None), ("=PHI NANG", "PHÍ NÂNG"), ("=PHI HA", "PHÍ HẠ"),
                         ("=PHI HA SOM", "Phí hạ sớm")],
@@ -4129,15 +4130,51 @@ def _vhl_xuat_has_bdnh(rows: List[list]) -> bool:
     return False
 
 
+def _vhl_can_cont_included(rows: List[list]) -> Optional[bool]:
+    """裸的「CÂN CONT」欄要不要算進費用，看這張表自己的 TỔNG CỘNG HĐ NÂNG HẠ 小計
+    公式有沒有算進去 (同 _vhl_xuat_has_bdnh() 的做法，用金額關係判斷，不用檔名硬寫)。
+    這欄沒有資料、或找不到需要的欄位時回傳 None (這張表不能用來判斷)。"""
+    h = _vt_header_row(rows, ("SO CONTAINER", "SOA CONTAINER"))
+    if h is None:
+        return None
+    labels = _vt_labels(rows, h, True)
+    c_nang, c_ha = _vt_col(labels, "=PHI NANG"), _vt_col(labels, "=PHI HA")
+    c_cc = _vt_col(labels, "=CAN CONT")
+    c_hd = _vt_col(labels, "=TONG CONG HD NANG HA", "=TONG NANG HA", "=TONG CONG PHI NANG HA")
+    if None in (c_nang, c_ha, c_cc, c_hd):
+        return None
+    for row in rows[h + 2:]:
+        nang, ha = _vn_num(_vn_cell(row, c_nang)), _vn_num(_vn_cell(row, c_ha))
+        cc, hd = _vn_num(_vn_cell(row, c_cc)), _vn_num(_vn_cell(row, c_hd))
+        if not cc or hd is None:
+            continue   # 這一列 CÂN CONT 是 0/空白，看不出有沒有算進小計，換下一列
+        base = (nang or 0) + (ha or 0)
+        if abs(hd - base) < 1:
+            return False
+        if abs(hd - (base + cc)) < 1:
+            return True
+    return None
+
+
 def _vhl_cfgs_for_book(book) -> List[Tuple[str, Dict]]:
     """「XUẤT」版面的費用設定 (_xuat_variant 標記的兩份：靠名稱配對、靠表頭配對)
-    動態決定要不要加 BD NÂNG HẠ，依這本活頁簿裡任一張 XUẤT 版面工作表的金額關係判斷。"""
+    動態決定要不要加 BD NÂNG HẠ、裸的 CÂN CONT，依這本活頁簿裡工作表自己的金額關係
+    判斷 (同一欄位名稱在不同月份的帳本代表不同意思，不能用固定清單或檔名判斷)。"""
     cfgs = list(_VT_VINH_HUNG_LONG)
     has_bdnh = any(_vhl_xuat_sheet(rows) and _vhl_xuat_has_bdnh(rows) for _, rows in book.sheets)
-    if not has_bdnh:
+    cc_results = [r for _, rows in book.sheets for r in [_vhl_can_cont_included(rows)] if r is not None]
+    has_can_cont = any(cc_results)
+    if not has_bdnh and not has_can_cont:
         return cfgs
-    return [(pat, {**cfg, "fees": cfg["fees"] + [(("=BDNH", "=BD NANG HA"), "BD NÂNG HẠ")]})
-            if cfg.get("_xuat_variant") else (pat, cfg) for pat, cfg in cfgs]
+    out = []
+    for pat, cfg in cfgs:
+        fees = cfg["fees"]
+        if has_bdnh and cfg.get("_xuat_variant"):
+            fees = fees + [(("=BDNH", "=BD NANG HA"), "BD NÂNG HẠ")]
+        if has_can_cont and cfg.get("_can_cont_variant"):
+            fees = fees + [("=CAN CONT", None)]
+        out.append((pat, {**cfg, "fees": fees}) if fees is not cfg["fees"] else (pat, cfg))
+    return out
 
 
 def _vhl_sheet_parse(book) -> List[Dict]:
