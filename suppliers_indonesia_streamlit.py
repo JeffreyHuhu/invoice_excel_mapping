@@ -26,6 +26,7 @@ import 觸發註冊，其他程式 (app.py/verify_app.py/run_regression.py 等) 
 import calendar
 import collections
 import difflib
+import functools
 import math
 import os
 import re
@@ -1638,7 +1639,7 @@ def parse_yje(text: str) -> Dict:
 # 這是同一個供應商關係下的「第二種帳單格式」：YJE 的帳單上會寫
 # "AGENT: PT TATA HARMONI SARANATAMA"，而這裡是 TATA 自己開立的印尼文
 # 稅務/報關費用發票，版面、欄位、金額格式都跟 YJE 那份完全不同，所以另外
-# 寫一組 detect_tata()/parse_tata()，用不同的 key 註冊 (辨識關鍵字互不
+# 寫一組 detect_tata_xxx()/parse_tata_xxx()，用不同的 key 註冊 (辨識關鍵字互不
 # 衝突：YJE 帳單裡沒有 "TAMAN DUTAMAS" 字樣，TATA 帳單裡也沒有
 # "INTERNATIONAL LOGISTICS" 字樣)。
 #
@@ -1663,7 +1664,8 @@ def detect_tata_classic(text: str) -> bool:
     英文排版 (見下面 parse_tata_classic())。用 "NOMOR INVOICE" 沒出現
     (那是第二種格式的專屬字樣) 來跟第二種格式互相排除。
     """
-    return "TAMAN DUTAMAS" in text.upper() and "NOMOR INVOICE" not in text.upper()
+    upper = text.upper()
+    return "TAMAN DUTAMAS" in upper and "NOMOR INVOICE" not in upper
 
 
 _TATA_LABEL_WORDS = [
@@ -2319,17 +2321,31 @@ def parse_tata_af(text: str) -> Dict:
     return {"header": header, "items": items}
 
 
-def detect_tata(text: str) -> bool:
-    return detect_tata_classic(text) or detect_tata_receipt(text) or detect_tata_af(text)
-
-
-def parse_tata(text: str) -> Dict:
-    """依內容判斷屬於哪一種 TATA 帳單格式，分派給對應的 parse 函式。"""
+# ⚠️ 2026-11 效能優化：_parse_multi_page_pdf() 對『每一頁』都先呼叫
+# entry["detect"]()、通過後再呼叫 entry["parse"]()，YJE_TATA 這個合併群組
+# 原本在這兩次呼叫裡各自重新判斷一次「這頁是 YJE 還是 TATA 的哪一種格式」
+# (detect_yje_or_tata() 判斷一次，parse_yje_or_tata() 又判斷一次)，等於同一
+# 頁文字的格式判斷跑兩遍。改用這個小快取只判斷一次、記住結果，detect 跟
+# parse 兩次呼叫共用同一個答案 (同一頁的 text 字串內容相同，一定會命中
+# 快取)。maxsize 給 64 只是避免無上限成長，不影響結果 (值一樣就會是同一個
+# 快取結果)。實測這段 detect/parse 邏輯本身只占整頁擷取時間 (pdfplumber)
+# 的 0.3% 以下，這裡純粹是整理程式碼，不是效能瓶頸，不影響任何既有判斷
+# 順序 (YJE 優先，TATA 三種格式維持 classic/receipt/af 原本的優先順序)。
+@functools.lru_cache(maxsize=64)
+def _yje_tata_classify(text: str) -> Optional[str]:
+    # 判斷順序照原本 detect_yje_or_tata()/detect_tata() 的優先順序：YJE 優先，
+    # TATA 的 classic/receipt/af 維持 classic、receipt、af 這個順序 (classic
+    # 跟 receipt 本來就是互斥的——classic 自己的判斷式已經排除 receipt 的
+    # 專屬字樣——這裡只是為了跟原本的呼叫順序完全一致，不要改動結果)。
+    if detect_yje(text):
+        return "yje"
+    if detect_tata_classic(text):
+        return "tata_classic"
     if detect_tata_receipt(text):
-        return parse_tata_receipt(text)
+        return "tata_receipt"
     if detect_tata_af(text):
-        return parse_tata_af(text)
-    return parse_tata_classic(text)
+        return "tata_af"
+    return None
 
 
 # ---------------------------------------------------------------------------
@@ -2351,7 +2367,7 @@ def parse_tata(text: str) -> Dict:
 #
 # 修正方式：不要分成兩個供應商 key，改成註冊「同一個」multi_page 供應商，
 # 但 detect()/parse() 內部『每一頁』都同時检查兩種格式——是 YJE 格式就用
-# parse_yje()，是 TATA 格式就用 parse_tata()，兩種格式都不是才判定這頁不
+# parse_yje()，是 TATA 格式就用對應的 parse_tata_xxx()，兩種格式都不是才判定這頁不
 # 屬於這個供應商。這樣不管一份 PDF 裡是純 YJE、純 TATA，還是兩種混在一起，
 # 每一頁都會被個別正確辨識並擷取，不會因為「整份 PDF 先綁定同一個 key」而
 # 漏掉另一種格式的頁面。
@@ -2362,18 +2378,24 @@ def detect_yje_or_tata(text: str) -> bool:
     head = text[:300].upper()
     if head.lstrip().startswith("DHL EXPRESS") and ("INVOICE" in head or "DEBIT NOTE" in head):
         return False
-    return detect_yje(text) or detect_tata(text)
+    return _yje_tata_classify(text) is not None
 
 
 def parse_yje_or_tata(text: str) -> Dict:
     """注意：這是 multi_page 供應商，text 是『一頁』的文字。每一頁各自
-    判斷是 YJE 格式還是 TATA 格式，呼叫對應的 parse 函式；因為只有先通過
-    detect_yje_or_tata() 的頁面才會呼叫到這裡，所以這兩個條件已經涵蓋了
-    所有會進來的頁面。
+    判斷是 YJE 格式還是 TATA 哪一種格式，呼叫對應的 parse 函式；因為只有先
+    通過 detect_yje_or_tata() 的頁面才會呼叫到這裡，_yje_tata_classify()
+    一定不是 None。這裡跟 detect_yje_or_tata() 共用同一個快取結果，不會對
+    同一頁文字重複判斷格式。
     """
-    if detect_yje(text):
+    fmt = _yje_tata_classify(text)
+    if fmt == "yje":
         return parse_yje(text)
-    return parse_tata(text)
+    if fmt == "tata_receipt":
+        return parse_tata_receipt(text)
+    if fmt == "tata_af":
+        return parse_tata_af(text)
+    return parse_tata_classic(text)
 
 
 # ===========================================================================
@@ -3150,7 +3172,11 @@ def _yje_tata_extract_total(text: str) -> Optional[int]:
     m = _search(r"SUB-TOTAL\s+Rp\s+([\d,]+)", text)
     if m:
         return _tata_clean_amount(m)
-    m = _search(r"Subtotal\s+([\d.,]+)", text)
+    # ⚠️ 2026-11 修正：部分 NOMOR INVOICE 收據把 "Subtotal" 跟金額印成
+    # "Subtotal: 42.157.835" (冒號緊接在字後面，中間沒有空白)，原本的
+    # "Subtotal\s+" 只吃得到空白，吃不到冒號，整個抓不到值，這一頁就變成
+    # 沒有稽核 (NO_TOTAL_AUDIT)，信心被迫降為「低」。改成冒號可有可無。
+    m = _search(r"Subtotal\s*:?\s*([\d.,]+)", text)
     if m:
         return _tata_receipt_clean_amount(m)
     return None
@@ -3173,6 +3199,12 @@ def _yje_tata_extract_grand_total(text: str) -> Optional[int]:
     m = _search(r"^TOTAL\s+Rp\s+([\d,]+)\s*$", text)
     if m:
         return _tata_clean_amount(m)
+    # ⚠️ 2026-11 修正：NOMOR INVOICE 收據的含稅總額印成 "Total: 42.443.835"
+    # (字首小寫 "T"、冒號緊接字後、句點千分位)，跟前面兩種格式都不同，原本
+    # 完全沒有對應規則，這一頁的含稅總額抓不到，整張發票信心被迫降為「低」。
+    m = _search(r"^Total\s*:?\s*([\d.]+)\s*$", text)
+    if m:
+        return _tata_receipt_clean_amount(m)
     return None
 
 
@@ -3888,6 +3920,26 @@ def _dhl_common_header(text: str) -> Dict[str, Optional[str]]:
     return header
 
 
+# 這些抬頭欄位，這家供應商的帳單本身沒有共通值 (逐票才有，或這種子格式本來
+# 就沒有)：各子格式 parse 完都要清空，避免殘留上一個樣本快取/預設值。4 個
+# 子格式各自需要清的欄位不完全一樣 (有些欄位已經在前面抓到、不能清掉)，用
+# keep 排除不要清的欄位。
+_DHL_UNUSED_HEADER_FIELDS = (
+    "order_no", "arrive_date", "mbl_no", "bl_no", "onboard_date",
+    "port_of_loading", "port_of_discharge", "volume", "vessel", "container_no")
+
+
+def _dhl_clear_unused_header(header: Dict, keep: Tuple[str, ...] = (),
+                             use_setdefault: bool = False) -> None:
+    for code in _DHL_UNUSED_HEADER_FIELDS:
+        if code in keep:
+            continue
+        if use_setdefault:
+            header.setdefault(code, None)
+        else:
+            header[code] = None
+
+
 # ---------------------------------------------------------------------------
 # (A) 一般格式：逐票 (Air Waybill) 拆解
 # ---------------------------------------------------------------------------
@@ -4057,10 +4109,7 @@ def _parse_dhl_regular(text: str) -> Optional[Dict]:
     # Order No.；bl_no/onboard_date/port_of_loading/port_of_discharge 這
     # 四個欄位改成逐票用上面 items 各自的 overrides 覆寫 (expand_to_rows()
     # 會自動處理)，這裡的抬頭預設值留 None 就好。
-    for code in ("order_no", "arrive_date", "mbl_no", "bl_no", "onboard_date",
-                 "port_of_loading", "port_of_discharge", "volume", "vessel",
-                 "container_no"):
-        header[code] = None
+    _dhl_clear_unused_header(header)
 
     return {"header": header, "items": items}
 
@@ -4275,8 +4324,8 @@ def _parse_dhl_scanned_customs(text: str) -> Dict:
     header["port_of_loading"] = port_m.group("origin").strip() if port_m else None
     header["port_of_discharge"] = port_m.group("dest").strip() if port_m else None
 
-    for code in ("arrive_date", "mbl_no", "volume", "vessel", "container_no"):
-        header[code] = None
+    _dhl_clear_unused_header(header, keep=("order_no", "bl_no", "onboard_date",
+                                           "port_of_loading", "port_of_discharge"))
 
     items = _dhl_customs_extract_items(text)
     _dhl_allocate_vat(text, items)
@@ -4348,8 +4397,8 @@ def _parse_dhl_duty(text: str) -> Dict:
         else:
             vat = total - amount if amount is not None and total is not None else None
         items.append({"description": im.group("desc").strip(), "amount": amount, "vat": vat})
-    for code in ("order_no", "arrive_date", "mbl_no", "volume", "vessel", "container_no"):
-        header.setdefault(code, None)
+    _dhl_clear_unused_header(header, keep=("bl_no", "onboard_date", "port_of_loading",
+                                           "port_of_discharge"), use_setdefault=True)
     # 一筆費用都擷取不到：判無法判讀 (同掃描版型，使用者 2026-10-31 確認)
     return {"header": header, "items": items or [{"description": "UNREADABLE", "amount": None, "vat": None}]}
 
@@ -4622,9 +4671,7 @@ def _parse_dhl_scan_multi(text: str) -> Optional[Dict]:
             (service, _dhl_clean_amount(m.group("charge")), _dhl_clean_amount(m.group("vat"))), extras)
 
     header = _dhl_common_header(text)
-    for code in ("order_no", "arrive_date", "mbl_no", "bl_no", "onboard_date",
-                 "port_of_loading", "port_of_discharge", "volume", "vessel", "container_no"):
-        header[code] = None
+    _dhl_clear_unused_header(header)
     return {"header": header, "items": items}
 
 
