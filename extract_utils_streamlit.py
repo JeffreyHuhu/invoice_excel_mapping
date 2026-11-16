@@ -1575,6 +1575,13 @@ def expand_to_rows(parsed: Dict) -> List[Dict[str, object]]:
                 row[code] = _fill_na(item.get(code))
         for code in ITEM_FIELD_CODES:
             row[code] = _fill_na(item.get(code))
+        # 底線開頭的內部欄位 (例如 VN02 的 "_vt_sheet"，標記這筆費用來自哪張
+        # 工作表，給 audit_invoice_totals() 的每張工作表個別稽核用) 照抄過去，
+        # 不受標準欄位清單限制；FIELD_CODES 以外的欄位不會被輸出層讀到
+        # (build_excel() 只依 FIELD_CODES 寫欄位)，不影響轉檔結果。
+        for code, value in item.items():
+            if code.startswith("_"):
+                row[code] = value
         rows.append(row)
     return rows
 
@@ -2377,11 +2384,21 @@ def audit_invoice_totals(
 
     if sheet_totals_fn:
         # Excel 帳單：總額直接取自帳單本身的合計列 (sheet_totals)，依
-        # invoice_no 對回擷取到的明細
+        # invoice_no 對回擷取到的明細。每張工作表自己有合計欄 (總額的
+        # "sheet" 鍵) 時各自獨立稽核 (2026-11-16 使用者規定)：不跟同一個
+        # 發票號碼底下其他工作表的金額混在一起，避免一張表漏抓合計欄拖累
+        # 其他張表的稽核結果。沒有自己合計欄的工作表維持原來的做法：併到
+        # 同一個發票號碼的共用池一起比。
         groups = _group_rows_by_invoice(rows)
         whole = None
         per_invoice: Dict[str, Dict] = {}
-        for t in sheet_totals_fn(read_spreadsheet(pdf_path)):
+        sheet_checks: Dict[str, List[Dict]] = {}
+        totals_list = sheet_totals_fn(read_spreadsheet(pdf_path))
+        audited_sheets: Dict[str, set] = {}
+        for t in totals_list:
+            if t.get("invoice_no") is not None and t.get("sheet"):
+                audited_sheets.setdefault(normalize_value(t["invoice_no"]), set()).add(t["sheet"])
+        for t in totals_list:
             args = (t.get("total"), t.get("grand_total"), t.get("final_total"),
                     t.get("grand_tolerance", base_tolerance), t.get("final_tolerance", base_tolerance),
                     t.get("vat_total"), t.get("net_tolerance", base_tolerance))
@@ -2390,10 +2407,24 @@ def audit_invoice_totals(
                 whole = _build_result(rows, *args)
                 continue
             key = normalize_value(t.get("invoice_no"))
-            if groups.get(key):
-                per_invoice[key] = _build_result(groups[key], *args)
+            sheet_name = t.get("sheet")
+            if sheet_name:
+                sheet_rows = [r for r in groups.get(key, []) if r.get("_vt_sheet") == sheet_name]
+                if sheet_rows:
+                    sheet_result = _build_result(sheet_rows, *args)
+                    sheet_result["blame_sheet"] = sheet_name
+                    sheet_checks.setdefault(key, []).append(sheet_result)
+                continue
+            pool_rows = [r for r in groups.get(key, []) if r.get("_vt_sheet") not in audited_sheets.get(key, ())]
+            if pool_rows:
+                per_invoice[key] = _build_result(pool_rows, *args)
                 if t.get("note"):   # 原帳單問題備註 (例如發票區塊重複)，給稽核訊息附上原因
                     per_invoice[key]["source_note"] = t["note"]
+                # 共用池裡實際是哪幾張工作表 (自己沒有合計欄)，查不到總額時訊息
+                # 可以直接點名，不用再逐張手動排查
+                pool_sheet_names = sorted({r.get("_vt_sheet") for r in pool_rows if r.get("_vt_sheet")})
+                if pool_sheet_names:
+                    per_invoice[key]["pool_sheets"] = pool_sheet_names
         # 每張發票的結果：有整份檔案的勾稽就套用到每張發票；這張發票自己的
         # 含稅總額勾稽 (grand_*) 優先 (例如 RỒNG Á CHÂU：每張發票的費用 +
         # VAT PASS THROUGH = 該發票的 TOTAL)
@@ -2401,12 +2432,36 @@ def audit_invoice_totals(
             if not group_rows:
                 continue
             own = per_invoice.get(key)
-            if whole is None and own is None:
+            sheets = sheet_checks.get(key, [])
+            if whole is None and own is None and not sheets:
                 continue
-            result = dict(whole or own)
+            result = dict(whole or own or sheets[0])
             if whole is not None and own is not None:
                 result.update({k: own[k] for k in ("vat_sum", "grand_total", "grand_diff",
                                                      "grand_match")})
+            # 共用池的結果 (own) AND 每張自己能稽核的工作表 (sheets) 全部要通過，
+            # 任何一項不一致就整張發票不一致，訊息附上是哪張工作表 (blame_sheet)。
+            # own 存在代表共用池裡有實際金額 (pool_rows 非空，見上面 "if pool_rows:"
+            # 才會設 per_invoice[key])：own 查不到總額時 (own.get(match_key) is
+            # None)，不能只看 sheets 通不通過就說「一致」——這筆金額根本沒被查過，
+            # 除非某張工作表已經抓到確定的不一致，否則這一項維持 None (未勾稽)，
+            # 不讓 sheets 的 PASS 蓋過去 (2026-11-16 使用者規定：未勾稽一律低)。
+            for match_key, diff_key in (("match", "diff"), ("vat_match", "vat_diff"),
+                                         ("grand_match", "grand_diff"), ("final_match", "final_diff")):
+                failing = next((c for c in ([own] if own else []) + sheets
+                               if c.get(match_key) is False), None)
+                if own is not None and own.get(match_key) is None:
+                    result[match_key] = False if failing else None
+                    if not failing and own.get("pool_sheets"):
+                        result["unaudited_sheets"] = own["pool_sheets"]
+                else:
+                    vals = [v for v in ([own.get(match_key)] if own else [])
+                            + [s.get(match_key) for s in sheets] if v is not None]
+                    result[match_key] = all(vals) if vals else None
+                if failing:
+                    result[diff_key] = failing[diff_key]
+                    if failing.get("blame_sheet"):
+                        result["blame_sheet"] = failing["blame_sheet"]
             result["invoice_no"] = group_rows[0].get("invoice_no", NA)
             results.append(result)
         return results

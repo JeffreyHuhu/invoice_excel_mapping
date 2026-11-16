@@ -404,7 +404,13 @@ def _is_batch_vat_summary_row(row: Dict) -> bool:
 
 def _check_audit(audit: Optional[Dict], supplier_key: Optional[str]) -> List[Dict]:
     """把 audit_invoice_totals() 的結果轉成問題清單。"""
-    if audit is None:
+    # audit 字典存在，但四項稽核 (match/vat_match/grand_match/final_match) 全部
+    # 是 None：代表這張發票完全沒有東西可以勾稽 (例如 Excel 帳單每張工作表個別
+    # 稽核後，這個發票號碼底下沒有自己合計欄的工作表，併進共用池卻找不到任何
+    # 總額)，跟 audit 整個是 None 的意義一樣，都算「金額沒有被查核過」
+    # (2026-11-16 使用者規定：未勾稽一律列為低，不管其他問題為何)。
+    if audit is None or all(audit.get(k) is None for k in
+                             ("match", "vat_match", "grand_match", "final_match")):
         entry = SUPPLIER_REGISTRY.get(supplier_key) if supplier_key else None
         has_audit_rule = bool(entry and (
             entry.get("extract_total") or entry.get("extract_grand_total")
@@ -413,6 +419,11 @@ def _check_audit(audit: Optional[Dict], supplier_key: Optional[str]) -> List[Dic
             message = "帳單上找不到總額，無法做金額勾稽"
         else:
             message = "此供應商尚無總額稽核規則，無法做金額勾稽"
+        # 每張工作表個別稽核時，點名是哪幾張工作表自己沒有合計欄 (2026-11-16
+        # 使用者規定)，不用再逐張手動排查
+        sheets = audit.get("unaudited_sheets") if audit else None
+        if sheets:
+            message += f"（工作表：{'、'.join(sheets)}）"
         return [_issue(INFO, "total", "NO_TOTAL_AUDIT", message)]
 
     issues = []
@@ -429,7 +440,11 @@ def _check_audit(audit: Optional[Dict], supplier_key: Optional[str]) -> List[Dic
             diff_text = f"{diff:,.2f}" if isinstance(diff, (int, float)) else diff
             # 原帳單問題備註 (例如發票重複列出)：仍是 ERROR，只附上原因
             note = f"（{audit['source_note']}）" if audit.get("source_note") else ""
-            issues.append(_issue(ERROR, "total", rule, f"{message} (差額 {diff_text}){note}"))
+            # 每張工作表個別稽核 (2026-11-16 使用者規定)：附上是哪張工作表的問題，
+            # 不用再逐張手動排查 (見 extract_utils_streamlit.audit_invoice_totals()
+            # 的 "blame_sheet")
+            sheet_note = f"（工作表：{audit['blame_sheet']}）" if audit.get("blame_sheet") else ""
+            issues.append(_issue(ERROR, "total", rule, f"{message} (差額 {diff_text}){note}{sheet_note}"))
     return issues
 
 

@@ -2948,6 +2948,11 @@ def _vt_parse_sheet(name: str, rows: List[list], cfg: Dict, supplier: str,
                     nums = [_vn_num(c) for c in cells[1:] if _vn_num(c) is not None]
                     pair[i] = nums[-1] if nums else None
         totals[doc_key] = pair
+    # 內部標記：這筆費用來自哪張工作表，給 sheet_totals() 判斷能不能這張表自己
+    # 獨立稽核 (不用等整個發票號碼湊齊才知道對不對)。底線開頭，輸出層不會寫出
+    # (沿用 "_grp" 這種內部欄位的慣例)。
+    for it in items:
+        it["_vt_sheet"] = name
     return items, totals
 
 
@@ -3139,7 +3144,14 @@ def _vt_make(supplier: str, cfgs: List[Tuple[str, Dict]]):
         return [{"header": {}, "items": items or [{"description": None, "amount": None}]}]
 
     def sheet_totals(book) -> List[Dict]:
-        merged: Dict[str, List[float]] = {}
+        # 每張工作表個別稽核 (2026-11-16 使用者規定，所有用這套引擎的供應商適用)：
+        # 這張工作表自己找得到合計欄 (grand 不是 None) 時，獨立輸出一筆帶 "sheet"
+        # 的稽核項目，不跟其他工作表混在一起——避免一張表漏抓合計欄 (規則還沒
+        # 跟上新的欄位名稱) 拖累同一個發票號碼底下其他張表的稽核結果，顯示成一個
+        # 誤導的巨大差額。這張表自己找不到合計欄時，維持原來的做法：併到同一個
+        # 發票號碼的共用池一起比。
+        pooled: Dict[str, List[float]] = {}
+        per_sheet: List[Dict] = []
         has_total = has_grand = False
         for name, rows, cfg in _vt_sheets(book, cfgs):
             # sum_row 也會算出一個可勾稽的未稅合計 (表尾 TOTAL 列各費用欄加總)，不是只有
@@ -3148,12 +3160,17 @@ def _vt_make(supplier: str, cfgs: List[Tuple[str, Dict]]):
             has_total |= "total" in cfg or "sheet_total" in cfg or "sum_row" in cfg
             has_grand |= "grand" in cfg or bool(cfg.get("sheet_total", (None, None))[1])
             for key, pair in _vt_parse_sheet(name, rows, cfg, supplier, _vt_year(book))[1].items():
-                m = merged.setdefault(key, [None, None])
-                for i, value in enumerate(pair):
-                    if value is not None:
-                        m[i] = (m[i] or 0) + value
-        return [{"invoice_no": key, "total": t if has_total else None,
-                 "grand_total": g if has_grand else None} for key, (t, g) in merged.items()]
+                if pair[1] is not None:
+                    per_sheet.append({"invoice_no": key, "sheet": name,
+                                       "total": pair[0] if has_total else None, "grand_total": pair[1]})
+                    continue
+                m = pooled.setdefault(key, [None, None])
+                if pair[0] is not None:
+                    m[0] = (m[0] or 0) + pair[0]
+        result = [{"invoice_no": key, "total": t if has_total else None,
+                 "grand_total": None} for key, (t, g) in pooled.items()]
+        result.extend(per_sheet)
+        return result
     return sheet_parse, sheet_totals
 
 
