@@ -1677,10 +1677,12 @@ _TATA_STOP = rf"(?=\s+{_TATA_NEXT}\b|\n|$)"
 
 
 def _tata_clean_amount(text: Optional[str]) -> Optional[int]:
-    """英式數字 '4,585,728' (逗號千分位，無小數) -> 4585728。"""
+    """千分位、無小數 -> 整數。多數費用用逗號千分位 ('4,585,728' ->
+    4585728)，但同一張發票裡 GUDANG FEE 偶爾混用句點千分位 ('56.443' ->
+    56443，2026-11-16 抽樣 HC2609 系列發現)，兩種符號都當千分位去掉。"""
     if not text:
         return None
-    text = text.strip().replace(",", "")
+    text = text.strip().replace(",", "").replace(".", "")
     return int(text) if text.isdigit() else None
 
 
@@ -1727,9 +1729,10 @@ def _tata_parse_date(text: Optional[str]) -> Optional[str]:
 # "4 HANDLING FEE YJE123965498 Rp 4,585,728"：項次 + 費用名稱 + (偶爾多一個
 # 含數字的追蹤號碼尾巴) + Rp + 金額。用「後面緊接的字是否含數字」判斷那個字
 # 是追蹤號碼還是費用名稱的一部分，避免把 "LOCAL EXPRESS CHARGE" 這種全大寫
-# 費用名稱誤判成「名稱+尾碼」。
+# 費用名稱誤判成「名稱+尾碼」。金額字元類別同時收逗號、句點 (見
+# _tata_clean_amount 的說明，GUDANG FEE 偶爾用句點千分位)。
 _TATA_ITEM_PATTERN = re.compile(
-    r"^\d+\s+(?P<desc>[A-Z][A-Z ]*?)(?:\s+(?=[A-Z0-9]*\d)[A-Z0-9]+)?\s+Rp\s+(?P<amount>[\d,]+)\s*$",
+    r"^\d+\s+(?P<desc>[A-Z][A-Z ]*?)(?:\s+(?=[A-Z0-9]*\d)[A-Z0-9]+)?\s+Rp\s+(?P<amount>[\d,.]+)\s*$",
     re.MULTILINE,
 )
 # "PPN 12%" 這一行是加值稅 (正確答案範本新增 VAT 欄位後，這一筆要變成
@@ -1738,7 +1741,7 @@ _TATA_ITEM_PATTERN = re.compile(
 # 基礎，有時候不等於 SUB-TOTAL，是 HANDLING FEE 另外乘上 11/12 算出來的
 # 中間值) 新版正確答案範本已經不要求輸出，只保留真正印在帳單上的 PPN
 # 金額。
-_TATA_PPN_PATTERN = re.compile(r"^(?P<desc>PPN\s*\d+%)\s+Rp\s+(?P<vat>[\d,]+)\s*$", re.MULTILINE)
+_TATA_PPN_PATTERN = re.compile(r"^(?P<desc>PPN\s*\d+%)\s+Rp\s+(?P<vat>[\d,.]+)\s*$", re.MULTILINE)
 
 
 def _tata_extract_items(text: str) -> List[Dict]:
@@ -2094,9 +2097,9 @@ def detect_tata_af(text: str) -> bool:
 
 _TATA_AF_ITEM_LINE_RE = re.compile(
     r"^(?P<no>\d+)\s+(?P<date>\d{1,2}/[A-Za-z]{3}/\d{2})\s+(?P<mid>.*?)\s*"
-    r"(?P<attn>[A-Z]+\s+RONG|[A-Z]+)\s+(?P<hawb>\S+)\s+(?P<qty>\d+)\s*PKGS\s+"
+    r"(?P<attn>[A-Z]+\s+RONG|[A-Z0-9-]+(?:\s*\([A-Z0-9]+\))?)\s+(?P<hawb>\S+)\s+(?P<qty>\d+)\s*PKGS\s+"
     r"(?P<weight>[\d,]+)\s*kgs\s+Rp\s+(?P<kurs>[\d.]+)\s+(?P<amount>[\d.]+)\s+"
-    r"(?P<vat>[\d.,]+)\s*$"
+    r"(?P<vat>[\d.,]+)(?:\s+(?P<declare>[\d.,]+|-))?\s*$"
 )
 # ⚠️ 2026-10 補充：mid 跟 attn 之間原本要求至少一個空白 (\s+)，但有些品項
 # 整個 Shipper/Country 都被拆到前後兩行、本行本體剩下 "DATE RZR RONG ..."
@@ -2104,6 +2107,25 @@ _TATA_AF_ITEM_LINE_RE = re.compile(
 # "3 28/Jul/25 RZR RONG YJE123807268 ...")，要求至少一個空白會讓這整行配不
 # 上 regex、整筆品項直接憑空消失 (比錯誤拆欄更嚴重)。改成 \s* 讓 mid 可以
 # 為空字串時兩個分隔空白共用同一個空白字元，不會因此漏掉整筆資料。
+#
+# ⚠️ 2026-11-16 抽樣 ASICS 系列補充：ATTN 偶爾寫成含括號/連字號的格式
+# (例如 "PCI-SB (B0EK)")，不是單純全大寫單字，也不是 "XXX RONG" 兩個字，
+# 原本的 attn 字元類別只收全大寫字母，抓不到這種格式、整筆品項消失 (例如
+# HC25010969 第 6 筆)。改成同時收數字跟連字號、後面可選一段括號備註。
+#
+# ⚠️ 2026-11-16 抽樣 NIKOMAS 系列補充：NIKE 品牌的明細行，VAT 後面多一欄
+# "DECLARE" 金額 (= 該筆 Kurs 匯率 × 固定 USD 5.35，會算進 TOTAL AMOUNT，
+# 但不算進 A/F 小計、也不計稅，見 _tata_af_extract_items() 的說明)，原本
+# 的規則要求 VAT 後面就是行尾，這一欄多出來的數字讓整行比對失敗、整筆品項
+# 消失。改成這欄可有可無 (declare)，有抓到的話另外輸出成一筆獨立品項；這欄
+# 偶爾印成 "-" (沒有 DECLARE 金額)，一樣要吃掉這個字元，不然行尾比對失敗。
+#
+# ⚠️ 2026-11-16 抽樣 NIKOMAS 系列已知限制：ATTN 偶爾是兩個單字的人名
+# (例如 "ND TSAI"，不是 "XXX RONG" 這種固定字尾)。試過放寬 attn 吃兩個單字，
+# 會連帶誤吃到其他供應商既有樣本的 Shipper/Country 多字名稱 (迴歸測試退步，
+# 已改回)，所以沒有收這個寬鬆選項。這種兩字人名目前仍會讓 mid 多吃一個字，
+# 使得這一筆的 Shipper 多一個字、Port of Loading 抓不到 (變成 N/A)，但
+# Description/AMOUNT/VAT 這些主要欄位不受影響，仍然正確。
 
 # 已知的國家字樣清單 (多字的排在前面，優先比對)：目前樣本出現這四種，
 # 之後遇到新國家字樣再加進來即可。
@@ -2164,6 +2186,22 @@ def _tata_af_clean_amount(text: Optional[str]) -> Optional[int]:
         return None
     text = text.strip().replace(".", "")
     return int(text) if text.isdigit() else None
+
+
+# ⚠️ 2026-11-16 抽樣 NIKOMAS 系列發現：表格下方 "A/F"/"TOTAL AMOUNT" 這兩行
+# 小計，金額數字常被切成兩三段、中間多一個空白 (例如 "A/F 1 9.205.642" 其實
+# 是 19.205.642、"TOTAL AMOUNT 1 6 .754.577" 其實是 16.754.577)，推測是帳單
+# PDF 排版造成的字元斷行假象，不是真的有空白。斷點位置不固定 (有時緊接數
+# 字、有時緊接句點)，所以不特定切法，直接把這一行「標籤後面所有數字/句點/
+# 逗號/空白」整段抓下來，再把空白去掉重新拼回完整數字。只限同一行內
+# (字元類別不含 \n)，不會跨行誤吃到下一行 (例如 DPP) 的數字。
+def _tata_af_total_line(text: str, label: str) -> Optional[int]:
+    """抓 '^<label>\\s+<數字(可能被空白切斷)>$' 這一行，去掉內部空白後清成整數。"""
+    m = re.search(rf"^{re.escape(label)}[ \t]+(?P<raw>[\d.,\t ]+)$", text, re.MULTILINE)
+    if not m:
+        return None
+    raw = "".join(m.group("raw").split())
+    return _tata_af_clean_amount(raw)
 
 
 def _tata_af_clean_vat(text: Optional[str]) -> Optional[float]:
@@ -2269,6 +2307,7 @@ def _tata_af_extract_items(text: str) -> List[Dict]:
             # 已知陷阱：匯率離譜偏低的雜訊列 (見上方區塊註解)，直接跳過。
             continue
 
+        onboard_date = _tata_af_parse_item_date(m.group("date"))
         items.append({
             "description": "A/F",
             "amount": _tata_af_clean_amount(m.group("amount")),
@@ -2278,10 +2317,30 @@ def _tata_af_extract_items(text: str) -> List[Dict]:
             # 每筆品項自帶的 DATE/HAWB/Country 欄位，覆寫整張發票共用的抬頭
             # 值 (這張帳單沒有單一共用的 onboard_date/bl_no/port_of_loading，
             # 每一筆貨運各自不同)。
-            "onboard_date": _tata_af_parse_item_date(m.group("date")),
+            "onboard_date": onboard_date,
             "bl_no": m.group("hawb") or None,
             "port_of_loading": country,
         })
+
+        # NIKE 品牌專屬的 "DECLARE" 欄位 (見上面 _TATA_AF_ITEM_LINE_RE 的
+        # 說明)：另外獨立成一筆品項。這筆金額放在 vat 欄 (不是 amount)，
+        # 原因是稽核機制 (extract_utils.audit_invoke_totals()) 的「未稅
+        # 小計」只加總 amount 欄、「含稅總額」才會把 amount+vat 一起加總，
+        # 而 DECLARE 剛好符合這個特性：不計入 A/F 未稅小計，但會算進
+        # TOTAL AMOUNT；用法跟 PPN 12% 那一筆 (amount=None、金額放 vat 欄)
+        # 是同一個道理，不是真的 VAT 稅額，只是借用同一個「加總進含稅總額」
+        # 的位置。
+        declare_raw = m.group("declare")
+        if declare_raw and declare_raw != "-":
+            items.append({
+                "description": "DECLARE",
+                "amount": None,
+                "vat": _tata_af_clean_amount(declare_raw),
+                "shipper": shipper or None,
+                "onboard_date": onboard_date,
+                "bl_no": m.group("hawb") or None,
+                "port_of_loading": country,
+            })
 
     return items
 
@@ -3166,9 +3225,9 @@ def _yje_tata_extract_total(text: str) -> Optional[int]:
     「不一致」——例如 YJE 英文費率表目前還沒有對應的規則)。
     """
     # TATA A/F 空運帳單：表格下方的 "A/F 41.631.725" 小計行 (見 TATA 第三種格式的稽核說明)
-    m = _search(r"^A/F\s+([\d.]+)\s*$", text)
-    if m:
-        return _tata_af_clean_amount(m)
+    total = _tata_af_total_line(text, "A/F")
+    if total is not None:
+        return total
     m = _search(r"SUB-TOTAL\s+Rp\s+([\d,]+)", text)
     if m:
         return _tata_clean_amount(m)
@@ -3192,10 +3251,10 @@ def _yje_tata_extract_grand_total(text: str) -> Optional[int]:
     還沒有對應的含稅總額規則，抓不到就回傳 None (不稽核，不是「不
     一致」)。
     """
-    # TATA A/F 空運帳單：表格下方的 "TOTAL AMOUNT 46.211.215" (A/F + VAT 12%)
-    m = _search(r"^TOTAL AMOUNT\s+([\d.]+)\s*$", text)
-    if m:
-        return _tata_af_clean_amount(m)
+    # TATA A/F 空運帳單：表格下方的 "TOTAL AMOUNT 46.211.215" (A/F + VAT 12% + DECLARE，見 DECLARE 欄位說明)
+    total = _tata_af_total_line(text, "TOTAL AMOUNT")
+    if total is not None:
+        return total
     m = _search(r"^TOTAL\s+Rp\s+([\d,]+)\s*$", text)
     if m:
         return _tata_clean_amount(m)
@@ -7334,6 +7393,11 @@ def _opl_swap_alt(items: List[Dict], total: float) -> None:
             return
 
 
+def _opl_dn_invoice_no(text: str) -> Optional[str]:
+    """發票號碼 = FILE NO (例 CT-2609538)。掃描檔 OCR 會把 "IP-" 讀成 "[P-" ("TXGJKT2509567")。"""
+    return re.sub(r"^[\[|lI1]P-", "IP-", _search(r"[FP]ILE NO\s*:\s*(\S+)", text) or "") or None
+
+
 def _parse_opl_dn(text: str) -> Dict:
     onboard = _opl_dn_date(_search(r"ON BOARD\s*:\s*([A-Z]{3}\.?\s*\d{1,2}\s*,\s*\d{4})", text))
     kg = _search(r"\(KGS\)\s*:\s*([\d,.]+)", text)
@@ -7345,8 +7409,7 @@ def _parse_opl_dn(text: str) -> Dict:
         # 使用者 2026-10-28：發票號碼 = FILE NO (例 CT-2609538)，發票日期 = 印表日期 (09/24/2026)。
         # 同一個 FILE NO 可能有好幾張 HB/L 各自請款 (抽樣 CT-2609648)：資料庫對這個供應商
         # 改用逐列判斷重複 (expense_normalize.SUPPLIER_NO_OWN_INVOICE)，不會少算
-        # 掃描檔 OCR 會把 "IP-" 讀成 "[P-" ("TXGJKT2509567")
-        "invoice_no": re.sub(r"^[\[|lI1]P-", "IP-", _search(r"[FP]ILE NO\s*:\s*(\S+)", text) or "") or None,
+        "invoice_no": _opl_dn_invoice_no(text),
         # 沒有印表日期時用 DATE，再沒有用開船日
         "invoice_date": _opl_dn_date(_search(r"印表日期\s*:\s*(\d{1,2}/\d{1,2}/\d{4})", text))
         or _opl_dn_date(_search(r"(?m)^\s*DATE\s*:\s*(\d{1,2}/\d{1,2}/\d{4})", text)) or onboard,
@@ -7546,11 +7609,23 @@ def parse_opl(text: str) -> Dict:
     return {"header": header, "items": items}
 
 
-def _opl_extract_total(text: str) -> Optional[float]:
+def _opl_extract_total(text: str):
     if _is_opl_dn(text):
-        # 好幾張 DN：各張總額加總 (有一張讀不到總額就不稽核)
-        totals = [_opl_dn_total(c) for c in _opl_split_dns(text)]
-        return round(sum(totals), 2) if None not in totals else None
+        chunks = _opl_split_dns(text)
+        if len(chunks) == 1:
+            return _opl_dn_total(text)
+        # 一份 PDF 有好幾張 DN、各自不同發票號碼 (例如 "SHKJKT25110300A" 同時有
+        # CT-2511211、CT-2511443)：逐張各自的總額回傳 {發票號碼: 總額}，讓
+        # audit_invoice_totals() 逐票勾稽 (比照 DSV 的做法)，否則每一張單獨的
+        # FILE NO 在「每票勾稽」裡會被當成「帳單上找不到總額」而拖累整張 PDF
+        # 的信心等級 (即使每一張自己其實都勾稽得過)。同一個 FILE NO 出現在
+        # 好幾張 DN 時加總 (抽樣 CT-2609648)。
+        totals: Dict[str, float] = {}
+        for c in chunks:
+            inv_no, total = _opl_dn_invoice_no(c), _opl_dn_total(c)
+            if inv_no and total is not None:
+                totals[inv_no] = totals.get(inv_no, 0.0) + total
+        return totals or None
     return _opl_amount(_search(r"SUB\s*TOTAL\s*:\s*([\d,.]+)", text))
 
 
