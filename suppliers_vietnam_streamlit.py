@@ -2844,6 +2844,11 @@ def _vt_parse_sheet(name: str, rows: List[list], cfg: Dict, supplier: str,
         # 兩種都稽核)：USD 合計 + VND 合計 = 兩種費用的加總，任一幣別對不上都會不通過
         for i, name_ in ((0, "total"), (0, "total_add"), (1, "grand")):
             value = _vn_num(_vn_cell(row, col[name_])) if col.get(name_) is not None else None
+            if name_ == "grand" and cfg.get("vat_of_amount") and value is not None:
+                # vat_of_amount：每個品項的 VAT 是另外算的 8% (沒有算進帳單這欄的「未稅」
+                # 合計)，勾稽基準也要加回 8% 才會跟含稅後的品項加總一致 (2026-11-16 抽查
+                # "BK"/"công nợ VHL" 的 NEO 工作表：少算 VAT，差額剛好等於 8%)
+                value = round(value * 1.08)
             if name_ == "total" and col.get("total_check") is not None:
                 # total_check：帳單另外有一欄自己核對明細加總用 (VN16 TOTAL PLV
                 # CHECK)，優先採用；跟 TỔNG 常常各自有缺漏、彼此對不上
@@ -3206,8 +3211,12 @@ _VT_TRANS_WAGON = [
 
 def detect_trans_wagon(text: str) -> bool:
     # 紅色發票清單 (Red inv no) 沒有公司名稱，用 TRANS WAGON 的發票符號 "1C26TYY" 辨識
+    # FREIGHT STATEMENT 抬頭少了公司名稱那一行 (2026-11-16 JULY 2026 IMPORT-YUEDE)：
+    # 抬頭 "FREIGHT STATEMENT" + 發票清單裡的 TRANS WAGON 字軌 "1C26TYY-8265"
+    norm = _vt_norm(text)
+    has_symbol = re.search(r"\b\dC\d{2}TYY\b", text) is not None
     return "TRANS WAGON" in text.upper() or (
-        "RED INV NO" in _vt_norm(text) and re.search(r"\b\dC\d{2}TYY\b", text) is not None)
+        ("RED INV NO" in norm or "FREIGHT STATEMENT" in norm) and has_symbol)
 
 
 # (e) PDF 電子增值稅發票 (HÓA ĐƠN GIÁ TRỊ GIA TĂNG，Serial 1C26TYY，2026-10-28 使用者
@@ -3970,23 +3979,37 @@ _VT_VHL_ANSWER = [
     # 一律先被下面「靠名稱」的版本比對掉，不會用到這兩份。
     # BK 的 "6070" 表頭日期欄沒有 "LẤY" 只寫 "NGÀY"，"NGAY LAY" 找不到時退回 "=NGAY"
     (r"(?!)", {**_VT_VHL_COMMON, "key": ["SO LO"], "date": ("NGAY LAY", "=NGAY"), "date_dm_swap": True,
-               "require_all": ("TONG CONG CUOC VC",),
+               # 也要設 "require" (不是只有 require_all)：同一本活頁簿裡只要有任何一張表
+               # 靠名稱比對中 (例如 "NEO CONT")，_vt_sheets_raw 的退回規則就只收「有
+               # require」的設定；沒有 "require" 的話，這份表頭比對專用設定整本都不會
+               # 用到，表頭明顯對得上的 NHẬP/XUẤT 表會被擠去比對寫死費用清單的 _xuat_variant
+               # 版面，漏抓「hỗ trợ phí cơ sở hạ tầng」(2026-11-16 抽查 "POU HUNG 05-2025"：
+               # NHẬP/XUẤT NB/CÁI MÉP 擷取加總比帳單合計少 5~10%)
+               "require": "TONG CONG CUOC VC", "require_all": ("TONG CONG CUOC VC",),
                "fields": {**_VT_VHL_COMMON["fields"], "bl_no": "SO LO"},
                # công nợ VHL "6010" 的 CƯỚC 拆成市內/市外兩欄、VSC 併進 "PHÍ D/O VSC"；
                # POU HUNG "xuat" 表 (雖然叫 xuat，但有 TỔNG CỘNG CƯỚC VC 中間小計欄，結構
                # 跟 NHẬP 一樣) 另有「hỗ trợ phí cơ sở hạ tầng」費與「Phí hạ bãi sớm」
-               "fees": [("=CUOC VC", "CƯỚC VC"), ("=CUOC VC TRONG TPHCM", "CƯỚC VC TRONG TPHCM"),
+               # 運費欄位名稱也會寫成「CƯỚC VẬN CHUYỂN」(不是「CƯỚC VC」)：desc 用 None 照抄
+               # 表頭原文，不要寫死 (2026-11-16 抽查 "BK 042025/052025/062026"：整欄沒抓到，
+               # 擷取加總只有帳單合計的 1/3)
+               "fees": [(("=CUOC VC", "=CUOC VAN CHUYEN"), None), ("=CUOC VC TRONG TPHCM", "CƯỚC VC TRONG TPHCM"),
                         ("=CUOC VC NGOAI TPHCM", "CƯỚC VC NGOÀI TPHCM"), ("=BD NANG, HA", "BD NÂNG, HẠ"),
                         ("=PHI NANG", "PHÍ NÂNG"), ("=PHI HA", "PHÍ HẠ"), ("=VSC", "VSC"),
                         ("=PHI D/O VSC", "PHÍ D/O VSC"), ("=HO TRO PHI CO SO HA TANG", None),
                         ("=PHI HA BAI SOM", "Phí hạ bãi sớm")],
-               "grand": "=TONG CONG"}),
+               # 合計欄名稱不只「TỔNG CỘNG」：大張工作表 (X1-1、xuat2) 只叫「TỔNG」，
+               # 6010/nhập/6010-Lần 2 叫「TỔNG CỘNG CƯỚC & PHÍ」(2026-11-16 抽查 "công
+               # nợ VHL" 全月份：抓不到合計欄，整表金額沒算進勾稽，差額看起來有幾十億)
+               "grand": ("=TONG CONG", "TONG CONG CUOC & PHI", "=TONG")}),
     (r"(?!)", {**_VT_VHL_COMMON, "key": ["SO LO"], "date": "NGAY", "date_dm_swap": True,
                "require": "CUOC", "_xuat_variant": True,
                "fields": {**_VT_VHL_COMMON["fields"], "bl_no": "SO LO"},
                "fees": [("CUOC", None), ("=PHI NANG", "PHÍ NÂNG"), ("=PHI HA", "PHÍ HẠ"),
                         ("=PHI HA SOM", "Phí hạ sớm")],
-               "grand": "=TONG CONG"}),
+               # 同一個合計欄別名問題 (見上面同名設定的註解)：POU HUNG XUẤT 版也會叫
+               # 「TỔNG CỘNG CƯỚC & PHÍ」(2026-11-16 抽查 "POU HUNG 02-2026")
+               "grand": ("=TONG CONG", "TONG CONG CUOC & PHI", "=TONG")}),
     (r"DU DUC-?NHAP", {**_VT_VHL_COMMON, "key": ["SO LO"], "date": "NGAY LAY",
                        "require_all": ("TONG CONG CUOC VC",),
                        "fields": {**_VT_VHL_COMMON["fields"], "bl_no": "SO LO"},
@@ -4027,12 +4050,21 @@ _VT_VHL_ANSWER = [
                   # 舊編碼 "SOÁ NGÀY NEO" 讀出來的 "Ø" 不是一般的 "O"，用結尾 "Y NEO" 來配對
                   "days_label": ("NGAY NEO", "Y NEO"),
                   "grand": "=TONG CONG"}),
-    (r"CHI HO", {**_VT_VHL_COMMON, "date": "NGAY LAY", "doc_const": "N/A",
+    # name_require="CUOC VC"：區分同樣叫 "CHI HỘ" 的另一種版面 (下面原本的 CHI HO
+    # 設定，費用是 PHÍ NÂNG/PHÍ HẠ/VSC、有合計欄)。沒有這個條件，名稱比對會先搶到
+    # 這份設定，新版面整張抓不到任何欄位 (2026-11-16 抽查 "THÁNG X- CHI HỘ POU
+    # YUEN L#" 好幾個月份都這樣)。
+    (r"CHI HO", {**_VT_VHL_COMMON, "date": "NGAY LAY", "doc_const": "N/A", "name_require": "CUOC VC",
                  "fees": [("CUOC VC", "CƯỚC VC")], "grand": None}),
 ]
 _VT_VINH_HUNG_LONG[0:0] = _VT_VHL_ANSWER
 _VT_VINH_HUNG_LONG.insert(0, (r"(?!)", {
-    **_VT_VINH_HUNG_LONG[0][1], "require_all": ("TONG CONG HD NANG HA", "=TONG CONG", "=CAN CONT"),
+    # 自己的版面特徵跟下面那份 (NHẬP 用，"require": "TONG CONG CUOC VC") 不一樣，這裡
+    # 是 XUẤT 也會有的「TỔNG CỘNG HĐ NÂNG HẠ」+ CÂN CONT 版面："require" 要蓋掉繼承
+    # 來的值，不然會變成也要有「TỔNG CỘNG CƯỚC VC」，XUẤT 表沒有這欄就永遠比對不到
+    # (2026-11-16 抽查 "BK 042025"：XUẤT 表被擠去比對到缺 CÂN CONT 費用的設定)
+    **_VT_VINH_HUNG_LONG[0][1], "require": "TONG CONG HD NANG HA",
+    "require_all": ("TONG CONG HD NANG HA", "=TONG CONG", "=CAN CONT"),
     "fees": _VT_VINH_HUNG_LONG[0][1]["fees"] + [("=CAN CONT", None)]}))
 
 
@@ -4116,22 +4148,34 @@ _VT_BINH_TAN = [
                "remainder": (("=TOTAL", "TOTAL 2%"), "Miscellaneous Fee"),
                "total": "$TOTAL", "vat_row": True, "date": "DEC DATE",
                "fields": {"order_no": "=INV"}, "cbm": "TOTAL CFS/AIR"}),
-    # 出口運費 (EXPORT TRUCK，每個部門一張工作表)：每列一批 (SỐ LÔ HÀNG)，運費 + 過路費 (VÉ ĐƯỜNG)，
-    # 表尾 "TOTAL :" 勾稽整張、"THUẾ SUẤT GTGT" 單獨一筆 VAT
-    (r"(?!)", {"header": "SO LO HANG", "key": ["SO LO HANG"], "require": "VE DUONG",
+    # 出口運費 (EXPORT TRUCK，整本工作簿只看 "HTX-BC" 彙總表)：每列一批 (SỐ LÔ HÀNG)，
+    # 運費 + 過路費 (VÉ ĐƯỜNG)，表尾 "TOTAL :" 勾稽整張、"THUẾ SUẤT GTGT" 單獨一筆 VAT。
+    # 2026-11-16 使用者樣本：同一本工作簿還有 18 張用車牌/工廠代號命名的小表
+    # (例如 "AS2-6000"、"172-6030")，內容是 HTX-BC 同一批資料改用車牌重新分類，
+    # 不是額外的發票；只限定 "HTX-BC" 工作表名稱，避免兩邊都算造成金額加倍。
+    # skip_sheet：名稱不符 "HTX-BC" 的工作表，即使表頭也符合，一樣跳過 (不然會被下面
+    # 「依表頭判斷」的備援邏輯重新抓進來，等於沒限制住)
+    (r"^HTX-BC$", {"header": "SO LO HANG", "key": ["SO LO HANG"], "require": "VE DUONG",
+               "name_require": "VE DUONG", "skip_sheet": r"^(?!HTX-BC$)",
                "fees": [("=SO TIEN", "Cước vận chuyển"), ("VE DUONG", "Vé đường")],
                "date": "=DATE", "sum_row": r"^TOTAL\s*:", "vat_row": True,
                "const": {"port_of_loading": "VIETNAM", "port_of_discharge": "VIETNAM"}}),
     # 同上的英文版 (2025-03)：KIND TRUCK | PRICE | AMOUNT | TICKET | F.TORY | EXPORT DECLARATION NO.
-    (r"(?!)", {"header": "EXPORT DECLARATION NO", "key": ["EXPORT DECLARATION NO"], "require": "=TICKET",
+    # name_require：兩個版面的工作表名稱都是 "HTX-BC"，一定要靠表頭 (=TICKET/VE ĐƯỜNG)
+    # 才能分辨是越南文版還是英文版，不然名稱比對 (第一輪) 會不看表頭就隨便套到前一個設定
+    (r"^HTX-BC$", {"header": "EXPORT DECLARATION NO", "key": ["EXPORT DECLARATION NO"], "require": "=TICKET",
+               "name_require": "=TICKET", "skip_sheet": r"^(?!HTX-BC$)",
                "fees": [("=AMOUNT", "Cước vận chuyển"), ("=TICKET", "Vé đường")],
                "date": "=DATE", "sum_row": r"^TOTAL\s*:", "vat_row": True,
                "const": {"port_of_loading": "VIETNAM", "port_of_discharge": "VIETNAM"}}),
     # 進口運費 PFQ (TRUCK AIR+CFS IMPORT，工作表名稱是日期 "0405")：Truck/Port/D/O,THC/Storage Fee、
     # VAT、Clearing Expense (未稅) 與 Total；每列的 Invoice No. 是批號
+    # 2026-11-16 使用者樣本：A 欄 (運費) 有時標 "Truck Fee"、有時標 "Delivery Fee"
+    # (同一份檔案裡不同週的工作表也會不一樣)；兩種標題都要認，否則運費整欄抓不到，
+    # 金額稽核全部失敗。D 欄 (固定 0，目前樣本沒出現非 0 的值) 同理也有 "Storage"/"Tax" 兩種標題。
     (r"(?!)", {"header": "CLEARING", "key": ["INVOICE NO"], "require": "CLEARING EXPENSE",
-               "fees": [("TRUCK", "Truck Fee"), ("PORT", "Port Fee"), ("D/O,THC", "D/O,THC Fee"),
-                        ("STORAGE", "Storage Fee")],
+               "fees": [(("TRUCK", "DELIVERY"), "Truck Fee"), ("PORT", "Port Fee"),
+                        ("D/O,THC", "D/O,THC Fee"), (("STORAGE", "TAX"), "Storage Fee")],
                "vat": "=VAT", "vat_desc": "VAT 8%", "total": "CLEARING EXPENSE", "grand": "=TOTAL",
                "date_sheet_mmdd": True,
                "const": {"port_of_loading": "VIETNAM", "port_of_discharge": "VIETNAM"}}),
