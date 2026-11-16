@@ -2568,8 +2568,14 @@ def _vt_parse_sheet(name: str, rows: List[list], cfg: Dict, supplier: str,
                 group_n += 1
                 key = last_base if group_n == 1 else f"{last_base}-{group_n}"
         if not key:
-            # 續行：單號空白但有費用 (VN14 同一票第二列只有 D/O 費)，算在上一張
-            if cfg.get("carry") and last_key and any(_vn_amount(_vn_cell(row, c)) for c, _ in fees):
+            # 續行：單號空白但有費用 (VN14 同一票第二列只有 D/O 費)，算在上一張。
+            # carry_require_date：這一列還要有日期才算續行 (VN06 EXPORT TRUCK 表尾、
+            # "TOTAL :" 列之前有一列是 AMOUNT/TICKET 兩欄各自的小計，日期跟單號
+            # 都空白，剛好落在 fees 欄位上；沒有這個限制會把這列小計也當成續行
+            # 費用疊加進去，整張金額加倍)
+            if (cfg.get("carry") and last_key and any(_vn_amount(_vn_cell(row, c)) for c, _ in fees)
+                    and (not cfg.get("carry_require_date")
+                         or (col.get("date") is not None and _vn_date(_vn_cell(row, col["date"]))))):
                 key = last_key
             else:
                 continue
@@ -3997,7 +4003,18 @@ _VT_VHL_ANSWER = [
                         ("=CUOC VC NGOAI TPHCM", "CƯỚC VC NGOÀI TPHCM"), ("=BD NANG, HA", "BD NÂNG, HẠ"),
                         ("=PHI NANG", "PHÍ NÂNG"), ("=PHI HA", "PHÍ HẠ"), ("=VSC", "VSC"),
                         ("=PHI D/O VSC", "PHÍ D/O VSC"), ("=HO TRO PHI CO SO HA TANG", None),
-                        ("=PHI HA BAI SOM", "Phí hạ bãi sớm")],
+                        ("=PHI HA BAI SOM", "Phí hạ bãi sớm"),
+                        # "PHÍ CÂN" (過磅費) 跟 VSC 同一組、算進 TỔNG CỘNG HĐ NÂNG HẠ (2026-11-16
+                        # 抽查 "POU HUNG 05-2025" XUẤT NB 表：漏抓這欄，整表少算)
+                        ("=PHI CAN", None),
+                        # "PHÍ CÂN CONT" 這個版面不是磅櫃表自己的欄 (那是另一組設定)，是跟 PHÍ
+                        # NÂNG/PHÍ HẠ 同一欄位組、算進 TỔNG CỘNG HĐ NÂNG HẠ (2026-11-16 抽查
+                        # "công nợ VHL T5-25" XUẤT 表：漏抓這欄)
+                        # 不要加裸的 "=CAN CONT"：這個名稱有時候算進 TỔNG (T4-25-L2 XUẤT-2 表)，
+                        # 有時候不算 (T6-25 XUẤT LÂN 2 表，使用者 2026-10-28 已確認不擷取，見
+                        # 上面 _VT_VINH_HUNG_LONG 開頭那份設定的註解)，兩種表頭長得一樣沒辦法
+                        # 用名稱分辨，要留給使用者確認，不要猜
+                        ("=PHI CAN CONT", None)],
                # 合計欄名稱不只「TỔNG CỘNG」：大張工作表 (X1-1、xuat2) 只叫「TỔNG」，
                # 6010/nhập/6010-Lần 2 叫「TỔNG CỘNG CƯỚC & PHÍ」(2026-11-16 抽查 "công
                # nợ VHL" 全月份：抓不到合計欄，整表金額沒算進勾稽，差額看起來有幾十億)
@@ -4008,8 +4025,11 @@ _VT_VHL_ANSWER = [
                "fees": [("CUOC", None), ("=PHI NANG", "PHÍ NÂNG"), ("=PHI HA", "PHÍ HẠ"),
                         ("=PHI HA SOM", "Phí hạ sớm")],
                # 同一個合計欄別名問題 (見上面同名設定的註解)：POU HUNG XUẤT 版也會叫
-               # 「TỔNG CỘNG CƯỚC & PHÍ」(2026-11-16 抽查 "POU HUNG 02-2026")
-               "grand": ("=TONG CONG", "TONG CONG CUOC & PHI", "=TONG")}),
+               # 「TỔNG CỘNG CƯỚC & PHÍ」(2026-11-16 抽查 "POU HUNG 02-2026")；YUEDE 版面
+               # 叫「TỔNG TIỀN CƯỚC VẬN CHUYỂN」(2026-11-16 抽查 "MAY 2026-YUEDE" "6070-
+               # CƯỚC NK VC" 表：被這份設定搶走比對，漏了下面 "CUOC VC|HANG LE" 那份的合計欄別名)
+               "grand": ("=TONG CONG", "TONG CONG CUOC & PHI", "=TONG",
+                         "TONG CONG SO TIEN", "TONG TIEN CUOC VAN CHUYEN")}),
     (r"DU DUC-?NHAP", {**_VT_VHL_COMMON, "key": ["SO LO"], "date": "NGAY LAY",
                        "require_all": ("TONG CONG CUOC VC",),
                        "fields": {**_VT_VHL_COMMON["fields"], "bl_no": "SO LO"},
@@ -4031,7 +4051,16 @@ _VT_VHL_ANSWER = [
                          "grand": "=TONG CONG"}),
     (r"CAN CONT", {**_VT_VHL_COMMON, "key": ["SO LO"], "date": "NGAY", "require_all": ("PTCC",),
                    "fields": {**_VT_VHL_COMMON["fields"], "bl_no": "SO LO"},
-                   "fees": [("=PTCC", "PTCC"), ("=CAN", "CÂN")], "grand": "=TONG"}),
+                   # 代墊過磅費那欄名稱不只「CÂN」：也會寫成「CHI HỘ CÂN」「PT CÂN CONT」
+                   # (跟下面另一份磅櫃表設定一樣的欄位家族，2026-11-16 抽查 "POU HUNG
+                   # 12-2025" 的 "CÂN CONT PH" 表：只抓到 PTCC，漏了 CHI HỘ CÂN 那欄)
+                   "fees": [("=PTCC", "PTCC"), ("=CAN", "CÂN"), ("=PT CAN CONT", None),
+                            ("=CHI HO CAN", None), ("=PHU THU", None), ("=PHU THU CAN", None),
+                            ("=PHI CAN CONT", None),
+                            # 有些月份的磅櫃表運費欄只叫「CƯỚC」(不是另外開運費表)，也要收
+                            # (2026-11-16 抽查 "POU HUNG 01-2026" "cân cont" 表)
+                            ("=CUOC", None)],
+                   "grand": "=TONG"}),
     (r"NEO-?DD", {**_VT_VHL_COMMON, "gross_vat": False, "vat_of_amount": True, "date": None,
                   "require": "PHI NEO XE", "key": ["SO LO", "SOA LOA"],
                   "const": {"invoice_date": "N/A"},  # 工作表沒有提櫃日，填 N/A (答案提示列)
@@ -4165,6 +4194,7 @@ _VT_BINH_TAN = [
     # 才能分辨是越南文版還是英文版，不然名稱比對 (第一輪) 會不看表頭就隨便套到前一個設定
     (r"^HTX-BC$", {"header": "EXPORT DECLARATION NO", "key": ["EXPORT DECLARATION NO"], "require": "=TICKET",
                "name_require": "=TICKET", "skip_sheet": r"^(?!HTX-BC$)",
+               "carry": True, "carry_require_date": True,
                "fees": [("=AMOUNT", "Cước vận chuyển"), ("=TICKET", "Vé đường")],
                "date": "=DATE", "sum_row": r"^TOTAL\s*:", "vat_row": True,
                "const": {"port_of_loading": "VIETNAM", "port_of_discharge": "VIETNAM"}}),

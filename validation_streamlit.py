@@ -378,6 +378,21 @@ def _check_items(group_rows: List[Dict]) -> List[Dict]:
     return issues
 
 
+# 這份 row 只對應「整張對帳表 (整週/整批) 的稅額彙總列」，不是單張發票：
+# suppliers_vietnam_streamlit.py 的 vat_row/vat_total 沒有 doc_key (抓不到整張
+# 對帳表唯一的發票號碼) 時，把這類列的 invoice_no 填成「{工作表名稱} VAT」
+# (固定以 " VAT" 結尾)，不對應任何一張原始發票。
+
+
+def _is_batch_vat_summary_row(row: Dict) -> bool:
+    amount = _to_number(row.get("amount"))
+    vat = _to_number(row.get("vat"))
+    if amount is not None or vat is None:
+        return False
+    invoice_no = row.get("invoice_no")
+    return isinstance(invoice_no, str) and invoice_no.endswith(" VAT")
+
+
 def _check_audit(audit: Optional[Dict], supplier_key: Optional[str]) -> List[Dict]:
     """把 audit_invoice_totals() 的結果轉成問題清單。"""
     if audit is None:
@@ -465,6 +480,15 @@ def validate_extraction(
         issues.extend(_check_header(group_rows[0], supplier_key))
         issues.extend(_check_items(group_rows))
         audit_issues = _check_audit(audit_by_invoice.get(inv_key), supplier_key)
+        if (inv_key not in audit_by_invoice and len(group_rows) == 1
+                and _is_batch_vat_summary_row(group_rows[0])):
+            # 整張對帳表 (整週/整批) 的稅額彙總列 (越南 Excel 帳單常見，見
+            # suppliers_vietnam_streamlit.py 的 vat_row/vat_total)：本身不是一張
+            # 發票，帳單上沒有另一個「這一筆的總額」可以勾稽，不算 NO_TOTAL_AUDIT，
+            # 不該拖累整份帳單的信心等級 (2026-11-16 使用者規定)
+            audit_issues = [dict(_issue(INFO, "total", "BATCH_VAT_SUMMARY",
+                                        "這是對帳表整批 (整週) 的稅額彙總列，不是單張發票，沒有對應總額可勾稽"),
+                                 no_penalty=True)]
         if supplier_key in EXTRA_CHARGE_ID_SUPPLIERS:
             issues.extend(_check_extra_charges(group_rows, audit_passed=(
                 inv_key in audit_by_invoice and not audit_issues)))
