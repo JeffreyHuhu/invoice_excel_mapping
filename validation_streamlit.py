@@ -137,6 +137,11 @@ KNOWN_SOURCE_ISSUES: Dict[str, Dict[Tuple[str, str], Tuple[str, Optional[Union[s
         # 「進口每筆出貨都要列」的 VAT / VAT PASS THROUGH 列 (稅額 0 時金額、稅額都 N/A)
         ("amount", "MISSING_REQUIRED"): ("進口每筆出貨都列 VAT 列，VAT PASS THROUGH 為 0 時金額與稅額皆為 N/A", None),
     },
+    # 曜捷 (OPL_USD) 某些費用列原帳單本身品名欄就是空白 (使用者 2026-11-17 確認，
+    # 例如 SPOE2505038 的整櫃包乾費用，金額稽核本身是對的)：只在抓不到品名時才算
+    "OPL_USD": {
+        ("description", "MISSING_REQUIRED"): ("曜捷原帳單這筆費用的品名欄本身是空白", {"N/A", "None", ""}),
+    },
     "INDOPROSTIME_TRANSPORT": {
         # 帳單印 "2026-JUN-31" (6 月沒有 31 日)；[POUCHEN]_IPE JUNI 的 FLIGHT 印
         # "CI761/287052025" (日期多一碼，得到 2025-MAY-87，使用者 2026-10-30 確認)
