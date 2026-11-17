@@ -2380,6 +2380,107 @@ def parse_tata_af(text: str) -> Dict:
     return {"header": header, "items": items}
 
 
+# ===========================================================================
+# TATA 第四種格式：PYI (PT. POU YUEN INDONESIA) 月結空運帳單
+# ===========================================================================
+#
+# ⚠️ 2026-11-16 抽樣發現：跟 tata_af (第三種格式) 版面很像 (同樣是
+# "Kurs 1 USD ... A/F ... PPn 12%" 表格)，但有三個關鍵差異，不能套用同一組
+# regex：
+#   1. 日期是 "DD/MM/YYYY" 數字格式 (例如 "20/01/2026")，不是
+#      "DD/Mon/YY" 英文月份縮寫 (tata_af 的 "20/Jun/25")。
+#   2. 表頭是 "CONSIGNEE"，不是 "Shipper...ATTN"：沒有獨立的 ATTN 欄，一行
+#      只有「公司名稱 + 國家」，不會像 tata_af 那樣遇到 Shipper/Country/ATTN
+#      三個欄位換行交錯的情況 (目前樣本沒看到換行殘字，版面比較單純)。
+#   3. A/F 金額跟 VAT 都有小數 (逗號小數，例如 "2.658.981,60")，不是
+#      tata_af 的整數金額。
+# 小計用 "SUB-TOTAL"/"TOTAL" (沒有 "Rp"、也沒有 "AMOUNT")，跟 classic 格式
+# 的 "SUB-TOTAL Rp ..."/"TOTAL Rp ..." 也不一樣，稽核規則另外加在
+# _yje_tata_extract_total()/_yje_tata_extract_grand_total() 裡 (見那兩個
+# 函式的新增分支)。
+#
+# 目前只有 3 份樣本 (PYI FEB 2026 的 p1/p33/p34)，版面統一、乾淨，沒有觀察
+# 到 tata_af 那種換行/斷字異常，先用這個單純版本；之後遇到新樣本再補。
+
+def detect_tata_pyi(text: str) -> bool:
+    """用表頭 "CONSIGNEE" 字樣跟 tata_af 的 "Shipper" 互斥 (同一欄位、不同
+    名稱)，避免跟 tata_af 衝突 (兩者都有 "Kurs 1 USD" 字樣)。"""
+    upper = text.upper()
+    return "KURS 1 USD" in upper and "CONSIGNEE" in upper
+
+
+_TATA_PYI_ITEM_LINE_RE = re.compile(
+    r"^(?P<no>\d+)\s+(?P<day>\d{1,2})/(?P<month>\d{1,2})/(?P<year>\d{4})\s+"
+    r"(?P<mid>.*?)\s+(?P<hawb>\S+)\s+(?P<qty>\d+)\s+(?P<weight>[\d,]+)\s*kgs\s+"
+    r"Rp\s+(?P<kurs>[\d.]+)\s+(?P<amount>[\d.,]+)\s+(?P<vat>[\d.,]+)\s*$",
+    re.MULTILINE,
+)
+
+
+def _tata_pyi_clean_decimal(text: Optional[str]) -> Optional[float]:
+    """印尼式千分位 + 逗號小數 '2.658.981,60' -> 2658981.6。"""
+    if not text:
+        return None
+    text = text.strip().replace(".", "").replace(",", ".")
+    try:
+        return float(text)
+    except ValueError:
+        return None
+
+
+def _tata_pyi_extract_items(text: str) -> List[Dict]:
+    items = []
+    for m in _TATA_PYI_ITEM_LINE_RE.finditer(text):
+        shipper, country = _tata_af_strip_country_suffix(m.group("mid"))
+        items.append({
+            "description": "A/F",
+            "amount": _tata_pyi_clean_decimal(m.group("amount")),
+            "vat": _tata_pyi_clean_decimal(m.group("vat")),
+            "volume": _tata_af_format_weight(m.group("weight")),
+            "shipper": shipper or None,
+            # 跟 tata_af 一樣，每筆品項自帶的 DATE/HAWB/Country 覆寫整張發票
+            # 共用的抬頭值 (這張帳單也沒有單一共用的
+            # onboard_date/bl_no/port_of_loading)。
+            "onboard_date": _format_date_en(m.group("day"), m.group("month"), m.group("year")),
+            "bl_no": m.group("hawb") or None,
+            "port_of_loading": country,
+        })
+    return items
+
+
+def parse_tata_pyi(text: str) -> Dict:
+    """注意：這是 multi_page 供應商，text 是『一頁』的文字。"""
+    header: Dict[str, Optional[str]] = {}
+
+    header["invoice_no"] = _search(r"No\.\s*:\s*(\S+)", text)
+
+    date_m = re.search(r"(?m)^\s*DATE\s*:\s*(\d{1,2})/(\d{1,2})/(\d{4})", text)
+    header["invoice_date"] = (
+        _format_date_en(date_m.group(1), date_m.group(2), date_m.group(3))
+        if date_m else None
+    )
+
+    header["supplier"] = _search(r"Nama\s*:\s*(.+)$", text)
+
+    consignee_raw = _search(r"\bTo\s*:\s*(.+)$", text)
+    if consignee_raw:
+        consignee_raw = re.sub(r"\s*\([^)]*\)\s*$", "", consignee_raw).strip()
+    header["consignee"] = consignee_raw or None
+
+    for code in (
+        "order_no", "arrive_date", "onboard_date", "bl_no", "mbl_no",
+        "port_of_loading", "port_of_discharge", "vessel", "container_no",
+        "volume", "shipper",
+    ):
+        header[code] = None
+
+    items = _tata_pyi_extract_items(text)
+    if not items:
+        items = [{"description": None, "amount": None}]
+
+    return {"header": header, "items": items}
+
+
 # ⚠️ 2026-11 效能優化：_parse_multi_page_pdf() 對『每一頁』都先呼叫
 # entry["detect"]()、通過後再呼叫 entry["parse"]()，YJE_TATA 這個合併群組
 # 原本在這兩次呼叫裡各自重新判斷一次「這頁是 YJE 還是 TATA 的哪一種格式」
@@ -2402,6 +2503,11 @@ def _yje_tata_classify(text: str) -> Optional[str]:
         return "tata_classic"
     if detect_tata_receipt(text):
         return "tata_receipt"
+    # PYI 版面要先判斷 (比 af 嚴格：同時要求 "Kurs 1 USD" 跟 "CONSIGNEE"
+    # 兩個字樣都出現)，af 只看 "Kurs 1 USD"，兩者都會命中同一頁；af 排前面
+    # 的話 PYI 頁會被誤判成 af、日期格式不同整頁抓不到品項。
+    if detect_tata_pyi(text):
+        return "tata_pyi"
     if detect_tata_af(text):
         return "tata_af"
     return None
@@ -2452,6 +2558,8 @@ def parse_yje_or_tata(text: str) -> Dict:
         return parse_yje(text)
     if fmt == "tata_receipt":
         return parse_tata_receipt(text)
+    if fmt == "tata_pyi":
+        return parse_tata_pyi(text)
     if fmt == "tata_af":
         return parse_tata_af(text)
     return parse_tata_classic(text)
@@ -3228,6 +3336,10 @@ def _yje_tata_extract_total(text: str) -> Optional[int]:
     total = _tata_af_total_line(text, "A/F")
     if total is not None:
         return total
+    # TATA PYI 月結帳單："SUB-TOTAL 9.860.284" (沒有 "Rp"，見 PYI 格式說明)
+    m = _search(r"^SUB-TOTAL\s+([\d.]+)\s*$", text)
+    if m:
+        return _tata_af_clean_amount(m)
     m = _search(r"SUB-TOTAL\s+Rp\s+([\d,]+)", text)
     if m:
         return _tata_clean_amount(m)
@@ -3255,6 +3367,10 @@ def _yje_tata_extract_grand_total(text: str) -> Optional[int]:
     total = _tata_af_total_line(text, "TOTAL AMOUNT")
     if total is not None:
         return total
+    # TATA PYI 月結帳單："TOTAL 10.944.915" (沒有 "Rp"、也沒有 "AMOUNT"，見 PYI 格式說明)
+    m = _search(r"^TOTAL\s+([\d.]+)\s*$", text)
+    if m:
+        return _tata_af_clean_amount(m)
     m = _search(r"^TOTAL\s+Rp\s+([\d,]+)\s*$", text)
     if m:
         return _tata_clean_amount(m)
