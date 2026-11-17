@@ -1605,7 +1605,10 @@ def _cw_totals(text: str, patterns, conv=_cw_vn_number, key_fn=_cw_invoice_no):
 
 def _cw_extract_total(text: str):
     # 掃描頁 OCR 可能漏掉 "SUBTOTAL" 標籤，金額仍接在 "discrepancies." 後面 (YUSEN_SEP.2026)
-    return _cw_totals(text, [r"SUBTOTAL[ \t]+(\d[\d.]*(?:,\d+)?)",
+    # 金額最後一組三位數字中間偶爾被 OCR 多讀出一個空格 ("26.405.38 5" 應該是
+    # "26.405.385")，結尾加 "(?:\s\d{1,3})?" 容許再接一段 1~3 位數字；抓到後
+    # _cw_vn_number() 會把空格去掉再轉數字 (2026-11-17 抽查 DHL_VN JUL.2026)
+    return _cw_totals(text, [r"SUBTOTAL[ \t]+(\d[\d.]*(?:,\d+)?(?:\s\d{1,3})?)",
                              r"discrepancies\.[ \t]+(\d{1,3}(?:\.\d{3})+(?:,\d+)?)[ \t]*$",
                              # "Charge Sheet" 版面 (_cw_charge_sheet_items()) 沒有 SUBTOTAL，
                              # 用 "Job Total" 這一列的第一個數字 (未稅加總，2026-11-16 抽查
@@ -1616,8 +1619,8 @@ def _cw_extract_total(text: str):
 def _cw_extract_grand_total(text: str):
     # YUSEN 的金額有時印在 "TOTAL VND" 上一行 (字的高度略高，被拆成兩行)
     # 外幣發票是 "TOTAL USD" (金額 "31,86" 逗號是小數點)
-    return (_cw_totals(text, [r"^TOTAL[ \t]+(?:VND|USD)[ \t]+(\d[\d.]*(?:,\d+)?)",
-                              r"^(\d[\d.]*(?:,\d+)?)[ \t]*\nTOTAL[ \t]+(?:VND|USD)\s*$",
+    return (_cw_totals(text, [r"^TOTAL[ \t]+(?:VND|USD)[ \t]+(\d[\d.]*(?:,\d+)?(?:\s\d{1,3})?)",
+                              r"^(\d[\d.]*(?:,\d+)?(?:\s\d{1,3})?)[ \t]*\nTOTAL[ \t]+(?:VND|USD)\s*$",
                               # 掃描頁 OCR 漏掉 "TOTAL VND" 標籤時，用頁尾 "Invoiced VND 7.171.200"
                               r"Invoiced[ \t]+(?:VND|USD)[ \t]+(\d{1,3}(?:\.\d{3})+(?:,\d+)?)\b",
                               # "Charge Sheet" 版面沒有 "TOTAL VND"，用 "Job Total" 這一列最後
@@ -1833,7 +1836,7 @@ def parse_dhl_vn(text: str) -> Dict:
 def _dhl_vn_extract_total(text: str):
     if _is_dhl_vn_charge_sheet(text):
         return None
-    out = _cw_totals(text, [r"SUBTOTAL[ \t]+(\d[\d.]*(?:,\d+)?)",
+    out = _cw_totals(text, [r"SUBTOTAL[ \t]+(\d[\d.]*(?:,\d+)?(?:\s\d{1,3})?)",
                             r"discrepancies\.[ \t]+(\d{1,3}(?:\.\d{3})+(?:,\d+)?)[ \t]*$",
                             # "Air Freight Departure Charge Sheet" 版面 (_cw_charge_sheet_items())
                             # 沒有 SUBTOTAL，用 "Job Total" 這一列的第一個數字 (未稅加總，
@@ -1852,12 +1855,12 @@ def _dhl_vn_extract_grand_total(text: str):
     if _is_dhl_vn_charge_sheet(text):
         v = _search(r"Total \(VND\)\s*([\d.]+,\d{2})", text)
         return _dhl_vn_num(v) if v else None
-    out = (_cw_totals(text, [r"^TOTAL[ \t]+(?:VND|USD)[ \t]+(\d[\d.]*(?:,\d+)?)",
-                             r"^(\d[\d.]*(?:,\d+)?)[ \t]*\nTOTAL[ \t]+(?:VND|USD)\s*$",
+    out = (_cw_totals(text, [r"^TOTAL[ \t]+(?:VND|USD)[ \t]+(\d[\d.]*(?:,\d+)?(?:\s\d{1,3})?)",
+                             r"^(\d[\d.]*(?:,\d+)?(?:\s\d{1,3})?)[ \t]*\nTOTAL[ \t]+(?:VND|USD)\s*$",
                              r"Invoiced[ \t]+(?:VND|USD)[ \t]+(\d{1,3}(?:\.\d{3})+(?:,\d+)?)\b",
                              # DHL 版面 "TOTAL VND" 常跟左欄的銀行轉帳說明擠在同一行，不是行首
                              # (VN13 答案，2026-11-10)
-                             r"TOTAL[ \t]+(?:VND|USD)[ \t]+(\d[\d.]*(?:,\d+)?)\s*$",
+                             r"TOTAL[ \t]+(?:VND|USD)[ \t]+(\d[\d.]*(?:,\d+)?(?:\s\d{1,3})?)\s*$",
                              # "Air Freight Departure Charge Sheet" 版面沒有 "TOTAL VND"，用
                              # "Job Total" 這一列最後一個數字 (含稅總額，2026-11-16 抽查
                              # OCT.2026 S2604933241)
