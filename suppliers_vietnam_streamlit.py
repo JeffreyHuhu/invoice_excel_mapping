@@ -1364,32 +1364,41 @@ def _molcs_invoice_pages(pdf_path: str) -> Dict[str, List[int]]:
     """MOL CONSOLIDATION SERVICE 發票 (一頁或跨 2 頁，見 _molcs_pages() 說明)
     各自對應到原始 PDF 頁碼。只有 MOL 自己呼叫，跟 cargowise_invoice_pages()
     各管各的格式 (CargoWise SHIPMENT 發票 vs. MOLCS 增值稅發票)，兩邊結果在
-    _mol_invoice_page_map() 合併。key 跟 _group_rows_by_invoice()/_mol_totals()
-    用同一套規則：草稿發票 (Số 空白，共用 Ký hiệu) 要帶 Order No. 才能分清楚
-    (使用者 2026-11-16 回報「整份 MOL 月結單還是全部低」：沒有這份頁碼對應，
-    拆檔機制找不到草稿發票的頁碼，只能整份一起歸檔)。"""
+    _mol_invoice_page_map() 合併。
+
+    逐頁呼叫 _molcs_parse_page()，再用跟 _group_rows_by_invoice() 完全一樣的
+    Order No. 順延邏輯分組，刻意不自己另外用「累積到看到 Cộng tiền hàng 才
+    收尾」的頁面緩衝法——那套邏輯跟 _parse_multi_page_pdf() 真正逐頁
+    detect/parse 的分組結果不是每次都一致 (2026-11-17 抽查 FEB.2025：4 張
+    中等信心的草稿發票被錯誤併進低信心那份拆檔，因為緩衝法算出來的頁碼範圍
+    跟真正的發票分組兜不起來)，改成跟真正的分組邏輯共用同一套規則，才能保證
+    頁碼對應跟信心等級 100% 一致。"""
     from extract_utils_streamlit import supplier_pages
     pages = supplier_pages(pdf_path, "MOL")
     result: Dict[str, List[int]] = {}
-    buf_pages: List[int] = []
-    buf_text: List[str] = []
+    last_order: Dict[str, str] = {}
     for i, page_text in enumerate(pages, start=1):
         if not _is_molcs(page_text):
             continue
-        buf_text.append(page_text)
-        buf_pages.append(i)
-        if "Cộng tiền hàng" in page_text:
-            rows = _molcs_parse_page("\n".join(buf_text))
-            if rows:
-                inv = normalize_value(rows[0].get("invoice_no"))
-                key = inv
-                if _mol_is_draft_series(inv):
-                    order = normalize_value(rows[0].get("order_no"))
-                    if order not in ("N/A", "", None):
-                        key = f"{inv}#{order}"
-                bucket = result.setdefault(key, [])
-                bucket.extend(p for p in buf_pages if p not in bucket)
-            buf_text, buf_pages = [], []
+        try:
+            rows = _molcs_parse_page(page_text)
+        except Exception:
+            continue
+        if not rows:
+            continue
+        inv = normalize_value(rows[0].get("invoice_no"))
+        key = inv
+        if _mol_is_draft_series(inv):
+            order = normalize_value(rows[0].get("order_no"))
+            if order in ("N/A", "", None):
+                order = last_order.get(inv)
+            else:
+                last_order[inv] = order
+            if order:
+                key = f"{inv}#{order}"
+        bucket = result.setdefault(key, [])
+        if i not in bucket:
+            bucket.append(i)
     return result
 
 
@@ -1726,6 +1735,14 @@ def _is_dhl_vn_vat_invoice(page: str) -> bool:
     return "HÓA ĐƠN GIÁ TRỊ GIA TĂNG" in page.upper()
 
 
+def _is_other_company_vat_invoice(page: str) -> bool:
+    """批次 PDF 偶爾混入別家公司自己開的越南 VAT 電子發票 (附件頁)，版面跟 DHL
+    自己的 "HÓA ĐƠN GIÁ TRỊ GIA TĂNG" 一樣，但開票公司不是 DHL (2026-11-17
+    抽查 JAN.2026 第 2~6 頁 CÔNG TY TNHH KUEHNE + NAGEL)：這種頁面不是 DHL
+    的帳單，當附件頁跳過，不擷取，也不要被 _is_dhl_vn_vat_invoice() 誤認。"""
+    return _is_dhl_vn_vat_invoice(page) and "DHL" not in page.upper()
+
+
 def _dhl_vn_vat_docs(text: str) -> List[str]:
     """VAT INVOICE 頁可能跨頁：第 1 頁結尾 "Trang 1/2"，續頁開頭
     "tiếp theo trang trước"，Tổng cộng 在最後一頁 (VN13 答案，2026-11-10)。"""
@@ -1885,6 +1902,7 @@ register_supplier(
     "DHL_VN", _DHL_VN_SUPPLIER, detect_dhl_vn, parse_dhl_vn,
     extract_total=_dhl_vn_extract_total,
     extract_grand_total=_dhl_vn_extract_grand_total, page_text=_cargowise_pages,
+    invoice_page=lambda page: not _is_other_company_vat_invoice(page),
     invoice_page_map=lambda p: cargowise_invoice_pages(p, "DHL_VN"),
 )
 
