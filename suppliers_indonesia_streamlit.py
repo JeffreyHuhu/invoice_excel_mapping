@@ -7202,9 +7202,11 @@ def _opl_dn_total(text: str) -> Optional[float]:
     if not found:
         # 合計行被其他文字黐成一行 ("--BBAANNKK DDEETTAAIILLSS:: US$ 987.60"，"OLJKT2507006"：
         # Remark 的 "BANK DETAILS" 跟合計行版面重疊)：退而求其次，找「整行只有一個 US$」且
-        # 結尾是乾淨數字的那一行 (明細列一定有兩個 US$：UNIT PRICE 跟 PREPAID AMT，不會誤判)
+        # 結尾是乾淨數字的那一行 (明細列通常有兩個 US$：UNIT PRICE 跟 PREPAID AMT，不會誤判；
+        # 但單價是 HKD 的明細列只有一個 US$ ("HKGJKT24120372A" 的 PARKING FEE 用 HKD 計價)，
+        # 要排除明細列常見的單位字樣，不然會把某一筆費用誤判成總額)
         for line in reversed(text.splitlines()):
-            if line.count("US$") == 1:
+            if line.count("US$") == 1 and not re.search(r"\b(?:SET|KGS|CBM|USD|HKD|CIN)\b", line.upper()):
                 m = re.search(r"US\$\s*[=:.\s\-—~]*?\s*(\d[\d,.]*(?:\s*\.\s*\d{2})?)\s*$", line)
                 if m:
                     found = [m.group(1)]
