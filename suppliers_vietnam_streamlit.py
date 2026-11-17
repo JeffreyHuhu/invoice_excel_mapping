@@ -1211,8 +1211,10 @@ def _cw_comma_number(text: str):
     return int(value) if value.is_integer() else value
 
 
-# 掃描頁 OCR 會把標籤後的冒號讀成 ")" "|" "!" "/" ("SHIPMENT|/SSGN0316985")
-_CW_INV_RE = r"SHIPMENT[\s)|:\]!/]*(?!DETAILS)([A-Z][A-Z0-9]{5,})"
+# 掃描頁 OCR 會把標籤後的冒號讀成 "," ")" "|" "!" "/" ("SHIPMENT|/SSGN0316985"、
+# "SHIPMENT, $2602241936")；開頭的 "S" 偶爾被讀成 "$" (2026-11-17 抽查
+# JUL/MAY.2026 批次)，比對時當同一個字，抓到後再換回 "S"
+_CW_INV_RE = r"SHIPMENT[\s,)|:\]!/]*(?!DETAILS)([A-Z$][A-Z0-9]{5,})"
 _CW_PAGE_MARK = "\n##PAGE##"
 
 
@@ -1226,6 +1228,8 @@ def _cw_invoice_no(text: str) -> Optional[str]:
         return barcode
     inv = _search(_CW_INV_RE, text)
     if inv:
+        if inv.startswith("$"):
+            inv = "S" + inv[1:]
         fixed = re.sub(r"^([A-Z]+?)O+(?=\d{7,}$)", r"\1", inv)
         inv = fixed if fixed != inv and re.fullmatch(r"[A-Z]{3,5}\d{7,}", fixed) else inv
         return inv
