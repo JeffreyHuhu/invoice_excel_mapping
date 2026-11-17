@@ -2129,19 +2129,39 @@ def _group_rows_by_invoice(rows: List[Dict], supplier_key: Optional[str] = None)
     不同發票的明細加在一起 (使用者 2026-11-16 回報「辨識等級(低)」)。這裡
     只有 MOL 的草稿發票才額外用 Order No. 細分 (VAT 列本身的 Order No.
     是 N/A，沿用同一張發票前一筆品項列的 Order No.，見 _molcs_parse_page()
-    說明)；其他供應商、MOL 自己的正式發票/Debit Note 完全不受影響。"""
+    說明)；其他供應商、MOL 自己的正式發票/Debit Note 完全不受影響。
+
+    同一個 Order No. 有時真的對應「兩張」各自獨立的草稿發票 (2026-11-18
+    抽查發現：運費另開一張 0% 稅率發票、在地雜費又開一張 8% 稅率發票，
+    船務單據上是同一個訂艙號碼，但帳務上是兩張各自合計、各自勾稽的發票)。
+    只看 Order No. 分組會把兩張合併成一張，金額勾稽一定對不起來。這裡用
+    「VAT 列 (這張發票的結尾) 出現過後，同一個 Order No. 又冒出新的品項列」
+    當作『其實是下一張發票』的訊號，重新開一組 (groups 的 key 加上 -2、
+    -3...)；沒有這種情況時 (絕大多數) 行為跟以前完全一樣。"""
     groups: Dict[str, List[Dict]] = {}
     last_order: Dict[str, str] = {}
+    closed_orders: set = set()
+    reopen_count: Dict[tuple, int] = {}
     for row in rows:
         inv_no = normalize_value(row.get("invoice_no"))
         if supplier_key == "MOL" and _mol_is_draft_series(inv_no):
-            order = normalize_value(row.get("order_no"))
-            if order in ("N/A", "", None):
+            raw_order = normalize_value(row.get("order_no"))
+            is_summary_row = raw_order in ("N/A", "", None)
+            if is_summary_row:
                 order = last_order.get(inv_no)
             else:
+                order = raw_order
+                base = (inv_no, order)
+                if base in closed_orders:
+                    reopen_count[base] = reopen_count.get(base, 1) + 1
+                    closed_orders.discard(base)
                 last_order[inv_no] = order
             if order:
-                inv_no = f"{inv_no}#{order}"
+                base = (inv_no, order)
+                n = reopen_count.get(base, 1)
+                inv_no = f"{inv_no}#{order}" + (f"-{n}" if n > 1 else "")
+                if is_summary_row:
+                    closed_orders.add(base)
         groups.setdefault(inv_no, []).append(row)
     return groups
 
@@ -2475,24 +2495,28 @@ def audit_invoice_totals(
             # own 存在代表共用池裡有實際金額 (pool_rows 非空，見上面 "if pool_rows:"
             # 才會設 per_invoice[key])：own 查不到總額時 (own.get(match_key) is
             # None)，不能只看 sheets 通不通過就說「一致」——這筆金額根本沒被查過，
-            # 除非某張工作表已經抓到確定的不一致，否則這一項維持 None (未勾稽)，
-            # 不讓 sheets 的 PASS 蓋過去 (2026-11-16 使用者規定：未勾稽一律低)。
+            # 除非某張工作表已經抓到確定的不一致，否則這一項維持 whole 已經算好的
+            # 值 (不要蓋成 None；2026-11-18 發現：own/sheets 都沒有這張發票自己的
+            # 總額可查時 [供應商只設定表尾整份合計，沒有每張工作表/每張發票自己的
+            # 合計欄，例如 VN18 SAIGON_TRANSPORT]，原本這裡會直接蓋成 None，把
+            # whole 早就算出來的一致/不一致結果洗掉，變成整張發票「沒有可勾稽的
+            # 總額」)。只有 own/sheets 明確判定「不一致」或「一致」時才覆蓋。
             for match_key, diff_key in (("match", "diff"), ("vat_match", "vat_diff"),
                                          ("grand_match", "grand_diff"), ("final_match", "final_diff")):
                 failing = next((c for c in ([own] if own else []) + sheets
                                if c.get(match_key) is False), None)
-                if own is not None and own.get(match_key) is None:
-                    result[match_key] = False if failing else None
-                    if not failing and own.get("pool_sheets"):
-                        result["unaudited_sheets"] = own["pool_sheets"]
-                else:
-                    vals = [v for v in ([own.get(match_key)] if own else [])
-                            + [s.get(match_key) for s in sheets] if v is not None]
-                    result[match_key] = all(vals) if vals else None
                 if failing:
+                    result[match_key] = False
                     result[diff_key] = failing[diff_key]
                     if failing.get("blame_sheet"):
                         result["blame_sheet"] = failing["blame_sheet"]
+                    continue
+                if own is not None and own.get(match_key) is None and own.get("pool_sheets"):
+                    result["unaudited_sheets"] = own["pool_sheets"]
+                vals = [v for v in ([own.get(match_key)] if own else [])
+                        + [s.get(match_key) for s in sheets] if v is not None]
+                if vals:
+                    result[match_key] = all(vals)
             result["invoice_no"] = group_rows[0].get("invoice_no", NA)
             results.append(result)
         return results

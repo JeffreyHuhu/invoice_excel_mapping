@@ -1372,11 +1372,19 @@ def _molcs_invoice_pages(pdf_path: str) -> Dict[str, List[int]]:
     detect/parse 的分組結果不是每次都一致 (2026-11-17 抽查 FEB.2025：4 張
     中等信心的草稿發票被錯誤併進低信心那份拆檔，因為緩衝法算出來的頁碼範圍
     跟真正的發票分組兜不起來)，改成跟真正的分組邏輯共用同一套規則，才能保證
-    頁碼對應跟信心等級 100% 一致。"""
+    頁碼對應跟信心等級 100% 一致。
+
+    同一個 Order No. 有時真的對應兩張各自獨立的草稿發票 (運費 0% 稅率一張、
+    在地雜費 8% 稅率另一張，見 extract_utils_streamlit._group_rows_by_invoice()
+    說明)：這裡用同一套「已經收尾過的 Order No. 又冒出新一頁」判斷重新開號
+    (key 加上 -2、-3...)，跟 _group_rows_by_invoice() 保持一致，頁碼對應才不
+    會錯亂。"""
     from extract_utils_streamlit import supplier_pages
     pages = supplier_pages(pdf_path, "MOL")
     result: Dict[str, List[int]] = {}
     last_order: Dict[str, str] = {}
+    closed_orders: set = set()
+    reopen_count: Dict[tuple, int] = {}
     for i, page_text in enumerate(pages, start=1):
         if not _is_molcs(page_text):
             continue
@@ -1393,9 +1401,17 @@ def _molcs_invoice_pages(pdf_path: str) -> Dict[str, List[int]]:
             if order in ("N/A", "", None):
                 order = last_order.get(inv)
             else:
+                base = (inv, order)
+                if base in closed_orders:
+                    reopen_count[base] = reopen_count.get(base, 1) + 1
+                    closed_orders.discard(base)
                 last_order[inv] = order
             if order:
-                key = f"{inv}#{order}"
+                base = (inv, order)
+                n = reopen_count.get(base, 1)
+                key = f"{inv}#{order}" + (f"-{n}" if n > 1 else "")
+                if any(r.get("vat") is not None for r in rows):
+                    closed_orders.add(base)
         bucket = result.setdefault(key, [])
         if i not in bucket:
             bucket.append(i)
@@ -1948,7 +1964,14 @@ _MOLCS_ITEM_RE = re.compile(
     r"^\d+\s+(?:(?P<desc>.+?)\s+)?(?P<unit>[A-Za-z]{2,6})\s+(?P<qty>[\d.,]+)\s+[\d.,]+\s+(?P<amount>[\d.,]+)$")
 # 訂艙號碼 (Order No.)／括號內的號碼 (B/L NO.)，例如 "VN2085282 (620112501501)"；多筆用「/」分隔
 # 時 Order No. 用「, 」連接 (使用者 2026-11-10 答案)。整行獨立，不要跟其他文字黏在一起判斷。
-_MOLCS_REF_RE = re.compile(r"^((?:VN\d{7}/)*VN\d{7})(?:\s*\((\S+)\))?\s*$", re.MULTILINE)
+# 2026-11-18 VN09 抽查發現：有些月份的括號改印「船名+航次」(例如 "VN2089104 (Tàu MAERSK
+# JIANGYIN,chuyến số 531S,HO CHI MINH-UBERHERRN)")，內容含空白又跨好幾行，不像舊版
+# B/L 號碼那樣一個不含空白的詞就結束——改成行首抓到 Order No. 就算數，不再要求
+# 「後面剛好接短詞再換行結束」，Order No. 才不會整段抓不到 (抓不到會退回沿用前一張發票
+# 的 Order No.，造成好幾張不同發票被誤判成同一張，金額勾稽整批錯，見 extract_utils
+# _group_rows_by_invoice() 說明)。bl_no 只在括號內容是「不含空白的短詞」時才算
+# (跟以前行為一致)，新的船名+航次格式不會誤填進 bl_no，維持 "N/A"。
+_MOLCS_REF_RE = re.compile(r"^((?:VN\d{7}/)*VN\d{7})\s*(?:\((\S+)\))?", re.MULTILINE)
 
 
 def _is_molcs(text: str) -> bool:
