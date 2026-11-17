@@ -1153,8 +1153,10 @@ _CW_CHARGE_RE = re.compile(
     # ；2026-11-16 抽查 DEC.2025 S2505430837)
     # OCR 把表格邊線讀成直線符號 "|"，混進 "0%" 跟金額中間 ("0% | 110.846.208"，
     # 2026-11-16 抽查 APR.2026 S2601536402 第 18 頁)
-    r"|0%\s+(?:(?=\d{1,3}(?:\.\d{3})*(?:,\d{1,2})?$)|\d\.\s?|\*\s|\|\s*))\s*"
-    r"(?P<amount>\d{1,3}(?:\.\d{3})*(?:,\d{1,2})?)$", re.MULTILINE)
+    # OCR 偶爾在千分位句點後面多讀出一個空格 ("64.546. 261"，2026-11-17 抽查
+    # APR.2026 S2601526262 第 20 頁)：金額數字群組容許這個空格
+    r"|0%\s+(?:(?=\d{1,3}(?:\.\s?\d{3})*(?:,\d{1,2})?$)|\d\.\s?|\*\s|\|\s*))\s*"
+    r"(?P<amount>\d{1,3}(?:\.\s?\d{3})*(?:,\d{1,2})?)$", re.MULTILINE)
 # 費用名稱裡夾著外幣單價跟匯率 ("Org. Terminal Handling-Forwarder USD 108,96 @"、
 # "Freight USD 2.911,35 @ 25698,000000"：匯率可能接在同一行的 "@" 後面，也可能印在
 # 下一行，兩種都被 _CW_CHARGE_RE 的 desc 群組整段吃進去)，答案要求外幣單價移到名稱
@@ -1176,9 +1178,11 @@ def _cw_clean_draft_watermark(desc: str) -> str:
 
 
 def _cw_vn_number(text: Optional[str]):
-    """'1.234.567' (越南盾) -> 1234567；'29,50' / '1.234,50' (外幣，逗號是小數點) -> 29.5。"""
+    """'1.234.567' (越南盾) -> 1234567；'29,50' / '1.234,50' (外幣，逗號是小數點) -> 29.5。
+    OCR 偶爾在千分位句點後面多讀出一個空格 ("64.546. 261")，先拿掉才轉數字。"""
     if not text:
         return None
+    text = text.replace(" ", "")
     if "," in text:
         return float(text.replace(".", "").replace(",", "."))
     return _dsv_vn_dot_amount(text)
@@ -1766,7 +1770,15 @@ def parse_dhl_vn(text: str) -> Dict:
             if r.get("consignee"):
                 r["consignee"] = _vn_full_consignee(r["consignee"])
         items += rows
+    # VAT INVOICE 頁偶爾在原始帳單裡被重複夾帶同一頁兩次以上 (同發票號碼、文字
+    # 完全相同，2026-11-17 抽查 FEB.2026 發票 17981 重複 4 次)：只算一次，
+    # 避免費用被重複加總成數倍
+    seen_vat_docs = set()
     for doc in _dhl_vn_vat_docs(text):
+        sig = (_dhl_vn_vat_key(doc), doc.strip())
+        if sig[0] and sig in seen_vat_docs:
+            continue
+        seen_vat_docs.add(sig)
         items += _parse_dhl_vn_vat_invoice(doc)
     return {"header": {}, "items": items}
 
