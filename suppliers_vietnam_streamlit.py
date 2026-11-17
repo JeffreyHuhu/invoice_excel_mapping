@@ -4143,6 +4143,11 @@ _VT_VHL_ANSWER = [
                # 版面，漏抓「hỗ trợ phí cơ sở hạ tầng」(2026-11-16 抽查 "POU HUNG 05-2025"：
                # NHẬP/XUẤT NB/CÁI MÉP 擷取加總比帳單合計少 5~10%)
                "require": "TONG CONG CUOC VC", "require_all": ("TONG CONG CUOC VC",), "_can_cont_variant": True,
+               # above=True：「TỔNG CỘNG HĐ NÂNG HẠ」「TỔNG CỘNG」這兩欄的標題有時候印在
+               # 表頭列的上一列 (合併儲存格往下延伸)，表頭列自己那兩欄是空白 (2026-11-17
+               # 抽查 "POU HUNG 02-2025" POUHUNG-POUPHONG 表：grand 欄一直抓不到，顯示
+               # 「帳單上找不到總額」，其實有總額只是標題位置不一樣)
+               "above": True,
                "fields": {**_VT_VHL_COMMON["fields"], "bl_no": "SO LO"},
                # công nợ VHL "6010" 的 CƯỚC 拆成市內/市外兩欄、VSC 併進 "PHÍ D/O VSC"；
                # POU HUNG "xuat" 表 (雖然叫 xuat，但有 TỔNG CỘNG CƯỚC VC 中間小計欄，結構
@@ -4241,7 +4246,10 @@ _VT_VHL_ANSWER = [
     # 這份設定，新版面整張抓不到任何欄位 (2026-11-16 抽查 "THÁNG X- CHI HỘ POU
     # YUEN L#" 好幾個月份都這樣)。
     (r"CHI HO", {**_VT_VHL_COMMON, "date": "NGAY LAY", "doc_const": "N/A", "name_require": "CUOC VC",
-                 "fees": [("CUOC VC", "CƯỚC VC")], "grand": None}),
+                 # 這個版面只有一欄費用 (CƯỚC VC)，沒有另外的合計欄：CỘNG 列就是這欄自己
+                 # 的加總，拿它當 grand 就能勾稽 (2026-11-17 使用者確認 "CỘNG(TOTAL) =
+                 # CHƯA VAT + Thuế VAT (8%)"：原本設 None 是沒注意到這欄本身就是合計)
+                 "fees": [("CUOC VC", "CƯỚC VC")], "grand": "=CUOC VC"}),
 ]
 _VT_VINH_HUNG_LONG[0:0] = _VT_VHL_ANSWER
 _VT_VINH_HUNG_LONG.insert(0, (r"(?!)", {
