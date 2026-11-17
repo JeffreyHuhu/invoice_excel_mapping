@@ -1026,6 +1026,14 @@ def _cargowise_pages(pdf_path: str) -> List[str]:
                 # 掃描頁 (YUSEN 把整份帳單掃描附在後面)：400 dpi + psm 6 才讀得對金額
                 # (使用者 2026-10-27 要求掃描頁也要到等級高)
                 text = _ocr_page_with_psm(pdf_path, page_index, 6)
+                # 自我檢查：這一頁自己的費用加總對不上這一頁的 SUBTOTAL 時，改用
+                # 灰階+自動對比重新 OCR，對得上才採用 (原圖把金額開頭的數字讀成
+                # "#"，對比後的圖才讀得對，2026-11-17 抽查 DSV_VN JUN.2026 掃描頁
+                # SEDC1846199："USD Zero Rated #0.799.363" -> "70.799.363")
+                if _cw_page_balances(text) is False:
+                    alt = _ocr_page_with_psm(pdf_path, page_index, 6, contrast=True)
+                    if _cw_page_balances(alt):
+                        text = alt
                 ship = _cw_ocr_shipment(pg)
                 if ship:
                     text = f"SHIPMENT {ship}\n{text}"
@@ -1450,13 +1458,30 @@ def _cw_parse_doc(doc: str, supplier: Optional[str]) -> List[Dict]:
     h["invoice_no"] = _cw_invoice_no(doc)
     # 掃描頁 OCR 會在標籤後多讀一個符號 ("INVOICE DATE) 19-Apr-26"，2026-10-28 抽樣 DHL 合輯)
     h["invoice_date"] = _cw_date(_search(r"\bDATE\s*[\[|()/]?\s*(\d{1,2}-[A-Za-z]{3}-\d{2})", doc))
-    # "Air Freight Departure Charge Sheet" 版面標籤跟號碼中間夾著 OCR 雜訊符號
-    # ("NAME SHIPMENT!|S2604933241")；且要排除 "SHIPMENT DETAILS PRINTED BY" 這個
-    # 說明文字 (每頁都有，長得很像「SHIPMENT + 代碼」會被誤當成終止點，抓到完全
-    # 不相關的內容，2026-11-16 抽查 OCT.2026 S2604933241)
-    m = re.search(r"^(?!SHIPMENT)(.+?)\s*(?:INVOICE DATE|SHIPMENT\W*(?!DETAILS)[A-Z][A-Z0-9]{5,})",
-                  doc, re.MULTILINE)
-    h["consignee"] = m.group(1).strip() if m else None
+    # DSV 自己的版面固定在稅號 "MST #: <號碼>" 下一行印客戶名稱 (MOL/DHL_VN/
+    # YUSEN 沒有這個標籤，不受影響)；名稱可能跟 "INVOICE DATE"/"SHIPMENT<號碼>"
+    # 黏在同一行 (雙欄壓成一行，見下一段)，要去掉。這個錨點比下面那段更穩，優先
+    # 用它 (下面那段靠 "SHIPMENT<號碼>" 定位，掃描頁跨頁合併時可能跨到下一頁
+    # 開頭的 "SHIPMENT<號碼>"，抓到上一頁最後一行的費用名稱，2026-11-17 抽查
+    # DSV_VN JUN.2026 掃描頁 SEDC1846199/SEDC1821847)
+    # 掃描頁偶爾在標籤跟客戶名稱中間多讀出一個空白行 (2026-11-17 抽查 DSV_VN
+    # JUN.2026 掃描頁 SEDC1846201)，"\n+" 容許中間夾著空行
+    m = re.search(r"\bMST #:\s*\S+\n+[ \t]*(.+)$", doc, re.MULTILINE)
+    name = m.group(1).strip() if m else None
+    if name:
+        cut = re.search(r"[ \t]*(?:INVOICE DATE|SHIPMENT\W*(?!DETAILS)[A-Z][A-Z0-9]{5,})", name)
+        if cut:
+            name = name[:cut.start()].strip()
+    if not name:
+        # "Air Freight Departure Charge Sheet" 版面標籤跟號碼中間夾著 OCR 雜訊
+        # 符號 ("NAME SHIPMENT!|S2604933241")；且要排除 "SHIPMENT DETAILS
+        # PRINTED BY" 這個說明文字 (每頁都有，長得很像「SHIPMENT + 代碼」會被
+        # 誤當成終止點，抓到完全不相關的內容，2026-11-16 抽查 OCT.2026
+        # S2604933241)。名稱跟定位點要在同一行 (不能跨行，上面的理由)
+        m2 = re.search(r"^(?!SHIPMENT)(.+?)[ \t]*(?:INVOICE DATE|SHIPMENT\W*(?!DETAILS)[A-Z][A-Z0-9]{5,})",
+                       doc, re.MULTILINE)
+        name = m2.group(1).strip() if m2 else None
+    h["consignee"] = name
     h["shipper"] = _search(r"^##SHIPPER## (.+)$", doc)
     h["order_no"] = _search(r"\bPON:\s*(\S+)", doc)
     if not h["order_no"]:
@@ -1601,6 +1626,21 @@ def _cw_extract_grand_total(text: str):
                               r"\d{1,3}(?:\.\d{3})*(?:,\d+)?[ \t]+(\d{1,3}(?:\.\d{3})*(?:,\d+)?)\s*$"])
             or _cw_totals(text, [r"GRAND TOTAL for [A-Z]{3}[ \t]+(\d[\d,]*(?:\.\d+)?)"],
                           conv=_cw_comma_number))
+
+
+def _cw_page_balances(text: str) -> Optional[bool]:
+    """掃描頁 OCR 自我檢查 (給 _cargowise_pages() 用)：這一頁自己的費用加總
+    (未稅) 對不上這一頁自己的 SUBTOTAL 時回 False，對得上回 True；抓不到
+    SHIPMENT 號碼或 SUBTOTAL 時回 None (不判斷，例如附件頁、沒有費用表的續頁)。
+    單張發票跨好幾頁時，每頁各自核對自己那頁的小計，不是全發票的總額。"""
+    inv = _cw_invoice_no(text)
+    if not inv:
+        return None
+    total = _cw_extract_total(text).get(inv)
+    if total is None:
+        return None
+    amount = sum(it.get("amount") or 0 for it in _cw_parse_doc(text, None))
+    return abs(amount - total) <= 1
 
 
 register_supplier(
