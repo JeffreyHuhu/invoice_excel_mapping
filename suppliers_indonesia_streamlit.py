@@ -2096,9 +2096,11 @@ def detect_tata_af(text: str) -> bool:
 
 
 _TATA_AF_ITEM_LINE_RE = re.compile(
-    r"^(?P<no>\d+)\s+(?P<date>\d{1,2}/[A-Za-z]{3}/\d{2})\s+(?P<mid>.*?)\s*"
-    r"(?P<attn>[A-Z]+\s+RONG|[A-Z0-9-]+(?:\s*\([A-Z0-9]+\))?)\s+(?P<hawb>\S+)\s+(?P<qty>\d+)\s*PKGS\s+"
-    r"(?P<weight>[\d,]+)\s*kgs\s+Rp\s+(?P<kurs>[\d.]+)\s+(?P<amount>[\d.]+)\s+"
+    r"^(?:(?P<no>\d+)\s+)?(?P<date>\d{1,2}/(?:[A-Za-z]{3}|\d{1,2})/\d{2,4})\s*(?P<mid>.*?)\s*"
+    r"(?P<attn>[A-Z]+\s+RONG|[A-Z0-9-]+(?:\s*\([A-Z0-9]+\))?)\s+(?P<hawb>\S+)\s+(?P<qty>\d+)\s*(?:PKGS\s+)?"
+    r"(?P<weight>[\d,]+)\s*kgs\s+Rp\s+(?P<kurs>[\d.]+)\s+"
+    r"(?:Rp\s+(?P<fee1>[\d.]+)\s+)?(?:Rp\s+(?P<fee2>[\d.]+)\s+)?"
+    r"(?P<amount>[\d.]+)\s+"
     r"(?P<vat>[\d.,]+)(?:\s+(?P<declare>[\d.,]+|-))?\s*$"
 )
 # ⚠️ 2026-10 補充：mid 跟 attn 之間原本要求至少一個空白 (\s+)，但有些品項
@@ -2126,6 +2128,47 @@ _TATA_AF_ITEM_LINE_RE = re.compile(
 # 已改回)，所以沒有收這個寬鬆選項。這種兩字人名目前仍會讓 mid 多吃一個字，
 # 使得這一筆的 Shipper 多一個字、Port of Loading 抓不到 (變成 N/A)，但
 # Description/AMOUNT/VAT 這些主要欄位不受影響，仍然正確。
+#
+# ⚠️ 2026-11-17 抽樣 ASICS MARET 2025 補充：少數品項沒有 "PKGS" 字樣 (例如
+# "5 3/Mar/25 ASIATAN INTERNATIONAL LIMITED LENI IDEX13702 1 23,00 kgs Rp
+# 16.800 2.820.720 310.279,2"，QTY 後面直接接重量，沒有 "PKGS")，原本
+# "PKGS" 是必填字樣，這一筆會整筆消失。改成 "PKGS" 可有可無。
+#
+# ⚠️ 2026-11-17 抽樣 NIKOMAS JAN 2025 補充：少數品項的 DATE 欄用
+# "DD/MM/YYYY" 數字月份 (例如 "04/01/2025")，不是 "DD/Mon/YY" 英文月份縮寫
+# (這張帳單其他品項都是 "DD/Mon/YY"，同一張帳單兩種格式混用)；而且日期跟
+# Shipper 之間偶爾沒有空白 ("04/01/2025DUKSUNG...")。原本日期格式只認
+# "DD/Mon/YY"、日期跟 mid 之間要求至少一個空白，這兩個條件任一不符就會讓
+# 整筆品項消失。改成日期格式兩種都接受，日期跟 mid 之間的空白也放寬成可有
+# 可無 (呼叫 _tata_af_parse_item_date() 轉換時兩種格式都支援，見該函式)。
+#
+# ⚠️ 2026-11-17 抽樣 NIKOMAS JAN 2025 補充：少數品項開頭沒有項次編號
+# (例如 "8/Jan/25 TAIWAN 2024006452 1 PKGS 1,50 kgs Rp 16.475 177.930
+# 19.572,3 88.141"，直接從日期開始，沒有 "3 " 這種項次)。原本項次編號是
+# 必填，這種列會整筆消失。改成項次編號可有可無 (不影響輸出，這個欄位本來
+# 就沒有對應到任何標準欄位)。
+#
+# ⚠️ 2026-11-17 抽樣 NIKOMAS JUNI 2026 已知限制：極少數品項完全沒有 HAWB
+# (例如 "5 21/May/26 TAIWAN 1 PKGS 7,50 kgs Rp 17.719 1.063.140 116.945,4
+# 94.796"，Country 後面直接接 QTY，中間沒有 HAWB 欄)。HAWB 目前是必填
+# 欄位，這種列仍會整筆消失；樣本目前只看到 1 筆，先不處理 (avoid 放寬
+# HAWB 必填造成其他列誤判)。
+#
+# ⚠️ 2026-11-17 抽樣 PYI 系列補充：PYI 的表頭多兩欄「GUDANG FEE」「DECLARE
+# ORIGIN FEE」(表頭印成兩行 "GUDANG DECLARE" / "MSA ORGIN FEE"，位置被拆
+# 開)，欄位值印在 Kurs 跟 A/F 金額之間，各自前面都有 "Rp"，兩欄都是選填
+# (0、1 或 2 個都可能出現)：
+#   - 都沒有："...Rp 17.719 4.252.560 467.781,6" (直接 kurs -> amount)
+#   - 只有一個："...Rp 18.141 Rp 97.054 943.332 103.766,5"
+#   - 兩個都有："...Rp 18.141 Rp 13.486 Rp 97.054 798.204 87.802,4"
+# 兩欄不會算進 A/F 小計 (DPP 的計算基礎)，但都會加進 TOTAL AMOUNT：
+# TOTAL AMOUNT = A/F + GUDANG FEE + DECLARE ORIGIN FEE + VAT12%。
+# 只有一個值時無法直接從位置判斷是哪一欄，用「是否等於 Kurs × 5.35 (容許
+# 四捨五入誤差 1)」判斷：符合公式的是 DECLARE ORIGIN FEE (跟 NIKOMAS 的
+# DECLARE 同一個算法)，不符合的是 GUDANG FEE (帳單本身金額，沒有固定公式)。
+# 兩欄分別獨立成一筆品項，amount 留空、金額放 vat 欄 (理由跟 DECLARE 一樣，
+# 見 _tata_af_extract_items() 原本的 DECLARE 說明：這樣不會被算進 A/F 小計，
+# 但會被算進含稅總額)。
 
 # 已知的國家字樣清單 (多字的排在前面，優先比對)：目前樣本出現這四種，
 # 之後遇到新國家字樣再加進來即可。
@@ -2204,6 +2247,31 @@ def _tata_af_total_line(text: str, label: str) -> Optional[int]:
     return _tata_af_clean_amount(raw)
 
 
+# ⚠️ 2026-11-17 抽樣 ASICS AGUSTUS 2026 發現：同一個斷字假象也會發生在
+# "No. :" 發票號碼這一行，例如 "No. : H C2608-2462" 其實是 "HC2608-2462"
+# (第一個字元被空白隔開)，不只會發生在 A/F/TOTAL AMOUNT 這兩個數字小計行。
+# 原本的 "No\.\s*:\s*(\S+)" 只抓到空白前的 "H"，整張發票號碼都錯，連帶讓
+# 同一份 PDF 裡本來各自獨立的發票被錯誤分組、稽核金額全部加在一起。這裡
+# 一樣用「整行抓下來、去掉內部空白重新拼回」的做法，不限定只有數字。
+_TATA_AF_LINE_STOP_WORDS = {"TELP", "ATTN", "MAWB", "HAWB", "FLIGHT", "CONSIGNEE", "ADDRESS", "INV"}
+
+
+def _tata_af_line_tokens(text: str, label: str) -> Optional[str]:
+    """抓 '<label>\\s*<值(可能被空白切斷)>'，去掉內部空白後回傳整段文字。
+    label 不要求在行首 (例如 "No. :" 前面還有收件人地址)；遇到下一個已知
+    欄位關鍵字就停止 (避免這一行後面還接著別的欄位時誤吃進來)。"""
+    m = re.search(rf"{re.escape(label)}\s*(?P<raw>[^\n]+)", text)
+    if not m:
+        return None
+    tokens = []
+    for tok in m.group("raw").split():
+        if tok.rstrip(":").upper() in _TATA_AF_LINE_STOP_WORDS:
+            break
+        tokens.append(tok)
+    raw = "".join(tokens)
+    return raw or None
+
+
 def _tata_af_clean_vat(text: Optional[str]) -> Optional[float]:
     """印尼式千分位 + 逗號小數 '167.475,7' -> 167475.7。"""
     if not text:
@@ -2223,16 +2291,22 @@ def _tata_af_clean_kurs(text: Optional[str]) -> Optional[int]:
 
 
 def _tata_af_parse_item_date(text: Optional[str]) -> Optional[str]:
-    """每一筆品項自己帶的 DATE 欄位 ('31/Jul/25' -> 'DD/Mon/YY') 轉成統一的
-    'DD Mon YYYY' 格式，對應到這筆品項覆寫用的 onboard_date。兩位數年份一律
-    視為 20XX (目前樣本都落在 2025 年附近)。"""
+    """每一筆品項自己帶的 DATE 欄位轉成統一的 'DD Mon YYYY' 格式，對應到
+    這筆品項覆寫用的 onboard_date。兩種格式都看過：'31/Jul/25' (英文月份縮寫
+    + 兩位數年份，一律視為 20XX) 跟 'DD/MM/YYYY' 數字月份 + 四位數年份
+    (2026-11-17 抽樣 NIKOMAS JAN 2025 發現同一張帳單兩種格式混用)。"""
     if not text:
         return None
-    m = re.match(r"^(\d{1,2})/([A-Za-z]{3})/(\d{2})$", text.strip())
-    if not m:
-        return None
-    day, month_name, yy = m.group(1), m.group(2), m.group(3)
-    return _format_date_en_from_month_name(day, month_name, 2000 + int(yy))
+    stripped = text.strip()
+    m = re.match(r"^(\d{1,2})/([A-Za-z]{3})/(\d{2})$", stripped)
+    if m:
+        day, month_name, yy = m.group(1), m.group(2), m.group(3)
+        return _format_date_en_from_month_name(day, month_name, 2000 + int(yy))
+    m = re.match(r"^(\d{1,2})/(\d{1,2})/(\d{4})$", stripped)
+    if m:
+        day, month, year = m.group(1), m.group(2), m.group(3)
+        return _format_date_en(day, month, year)
+    return None
 
 
 def _tata_af_format_weight(text: Optional[str]) -> Optional[str]:
@@ -2322,6 +2396,32 @@ def _tata_af_extract_items(text: str) -> List[Dict]:
             "port_of_loading": country,
         })
 
+        # PYI 專屬的 "GUDANG FEE"/"DECLARE ORIGIN FEE" 欄 (見上面
+        # _TATA_AF_ITEM_LINE_RE 的說明)：都放在 vat 欄，理由跟下面的 NIKE
+        # DECLARE 一樣。只有一個值時用「是否等於 Kurs × 5.35」分辨是哪一欄。
+        fee1 = _tata_af_clean_amount(m.group("fee1"))
+        fee2 = _tata_af_clean_amount(m.group("fee2"))
+        gudang_fee = declare_origin_fee = None
+        if fee1 is not None and fee2 is not None:
+            gudang_fee, declare_origin_fee = fee1, fee2
+        elif fee1 is not None:
+            expected_declare = round(kurs * 5.35) if kurs else None
+            if expected_declare is not None and abs(fee1 - expected_declare) <= 1:
+                declare_origin_fee = fee1
+            else:
+                gudang_fee = fee1
+        for desc, value in (("GUDANG FEE", gudang_fee), ("DECLARE ORIGIN FEE", declare_origin_fee)):
+            if value is not None:
+                items.append({
+                    "description": desc,
+                    "amount": None,
+                    "vat": value,
+                    "shipper": shipper or None,
+                    "onboard_date": onboard_date,
+                    "bl_no": m.group("hawb") or None,
+                    "port_of_loading": country,
+                })
+
         # NIKE 品牌專屬的 "DECLARE" 欄位 (見上面 _TATA_AF_ITEM_LINE_RE 的
         # 說明)：另外獨立成一筆品項。這筆金額放在 vat 欄 (不是 amount)，
         # 原因是稽核機制 (extract_utils.audit_invoke_totals()) 的「未稅
@@ -2349,7 +2449,10 @@ def parse_tata_af(text: str) -> Dict:
     """注意：這是 multi_page 供應商，text 是『一頁』的文字。"""
     header: Dict[str, Optional[str]] = {}
 
-    header["invoice_no"] = _search(r"No\.\s*:\s*(\S+)", text)
+    # "No. :" 後面的發票號碼偶爾被斷字假象拆開 (例如 "No. : H C2608-2462"
+    # 其實是 "HC2608-2462"，見 _tata_af_line_tokens() 的說明)，用同一招
+    # 整行抓下來、去掉內部空白重新拼回。
+    header["invoice_no"] = _tata_af_line_tokens(text, "No. :")
 
     date_m = re.search(r"Inv\s*Date\s*:\s*(\d{1,2})/(\d{1,2})/(\d{4})", text)
     header["invoice_date"] = (
@@ -2452,7 +2555,8 @@ def parse_tata_pyi(text: str) -> Dict:
     """注意：這是 multi_page 供應商，text 是『一頁』的文字。"""
     header: Dict[str, Optional[str]] = {}
 
-    header["invoice_no"] = _search(r"No\.\s*:\s*(\S+)", text)
+    # 同 parse_tata_af()：發票號碼偶爾被斷字假象拆開，整行抓下來重新拼回。
+    header["invoice_no"] = _tata_af_line_tokens(text, "No. :")
 
     date_m = re.search(r"(?m)^\s*DATE\s*:\s*(\d{1,2})/(\d{1,2})/(\d{4})", text)
     header["invoice_date"] = (
