@@ -69,7 +69,11 @@ REQUIRED_HEADER_FIELDS = ("invoice_date", "invoice_no", "supplier", "consignee")
 # 使用者 2026-11-16 規定：VN11 APL_VN 的 POUYUEN DN 系列工作表本身沒有 Inv# 欄
 # (suppliers_vietnam_streamlit.py 的 inv_col 找不到該欄，填 N/A)，不是抓錯，
 # INVOICE NO 缺值降為 WARN。只適用這家供應商。
-SUPPLIER_WARN_ONLY_HEADER_FIELDS = {"VINH_HUNG_LONG": {"invoice_no"}, "APL_VN": {"invoice_no"}}
+# VN12 NGUYEN_HUONG 舊版 (T01-2025~T2-2026) 的整張 VAT 8% 彙總列故意把 INVOICE NO
+# 填 N/A (suppliers_vietnam_streamlit.py 的 vat_na_fields，2026-11-10 答案)：這不是
+# 一張真的發票，沒有字軌可填。每票本身 (日期當發票號碼) 不受影響，仍是 ERROR。
+SUPPLIER_WARN_ONLY_HEADER_FIELDS = {"VINH_HUNG_LONG": {"invoice_no"}, "APL_VN": {"invoice_no"},
+                                     "NGUYEN_HUONG": {"invoice_no"}}
 
 # 個別供應商另外的必要欄位 (使用者在答案 Excel 提示列標「(必要)」的欄位)：
 # {供應商: {欄位: 缺值時的等級}}。"container_no" 只在整櫃 (材積是「數量X櫃型」) 時才必要。
@@ -399,7 +403,9 @@ def _check_items(group_rows: List[Dict]) -> List[Dict]:
 # suppliers_vietnam_streamlit.py 的 vat_row/vat_total 沒有 doc_key (抓不到整張
 # 對帳表唯一的發票號碼) 時，把這類列的 invoice_no 填成「{工作表名稱} VAT」
 # (固定以 " VAT" 結尾)，不對應任何一張原始發票。
-
+# VN12 NGUYEN_HUONG 舊版 (vat_na_fields) 把這類列的 INVOICE NO 改填 "N/A"
+# (2026-11-10 答案，跟上面的「{工作表名稱} VAT」慣例不同)，一樣不對應任何一張
+# 原始發票，所以也算進來 (2026-11-18)。
 
 def _is_batch_vat_summary_row(row: Dict) -> bool:
     amount = _to_number(row.get("amount"))
@@ -407,7 +413,7 @@ def _is_batch_vat_summary_row(row: Dict) -> bool:
     if amount is not None or vat is None:
         return False
     invoice_no = row.get("invoice_no")
-    return isinstance(invoice_no, str) and invoice_no.endswith(" VAT")
+    return isinstance(invoice_no, str) and (invoice_no.endswith(" VAT") or invoice_no == "N/A")
 
 
 def _check_audit(audit: Optional[Dict], supplier_key: Optional[str]) -> List[Dict]:
