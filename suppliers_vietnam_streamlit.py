@@ -28,8 +28,8 @@ from typing import Dict, List, Optional, Tuple
 
 from extract_utils_streamlit import (
     _mol_is_draft_series, _ocr_page_with_psm, _scanned_page_indexes, extract_pages_from_pdf,
-    limited_pages, normalize_value, register_supplier, set_supplier_number, SUPPLIER_REGISTRY,
-    SheetBook, VN_AUDIT_TOLERANCE,
+    fix_ocr_confusion, limited_pages, normalize_value, register_supplier, set_supplier_number,
+    SUPPLIER_REGISTRY, SheetBook, VN_AUDIT_TOLERANCE,
 )
 from suppliers_common_streamlit import (
     INDO_MONTHS, _search, _fmt_volume, _volume_from_text,
@@ -1212,9 +1212,13 @@ def _cw_comma_number(text: str):
 
 
 # 掃描頁 OCR 會把標籤後的冒號讀成 "," ")" "|" "!" "/" ("SHIPMENT|/SSGN0316985"、
-# "SHIPMENT, $2602241936")；開頭的 "S" 偶爾被讀成 "$" (2026-11-17 抽查
-# JUL/MAY.2026 批次)，比對時當同一個字，抓到後再換回 "S"
+# "SHIPMENT, $2602241936")；開頭的 "S" 偶爾被讀成 "$" 等易混字 (2026-11-17
+# 抽查 JUL/MAY.2026 批次)。regex 的字元類別要先收下這些易混字才抓得到
+# (不然連字串都擷取不到)，抓到後交給 fix_ocr_confusion() 比對、換回正確
+# 字元；以後遇到新的易混字組合，登記進 extract_utils_streamlit 的
+# _OCR_CONFUSABLES 對照表就好，不用再改這個 regex
 _CW_INV_RE = r"SHIPMENT[\s,)|:\]!/]*(?!DETAILS)([A-Z$][A-Z0-9]{5,})"
+_CW_INV_FORMAT = re.compile(r"S[A-Z0-9]{5,}")
 _CW_PAGE_MARK = "\n##PAGE##"
 
 
@@ -1228,8 +1232,7 @@ def _cw_invoice_no(text: str) -> Optional[str]:
         return barcode
     inv = _search(_CW_INV_RE, text)
     if inv:
-        if inv.startswith("$"):
-            inv = "S" + inv[1:]
+        inv = fix_ocr_confusion(inv, _CW_INV_FORMAT)
         fixed = re.sub(r"^([A-Z]+?)O+(?=\d{7,}$)", r"\1", inv)
         inv = fixed if fixed != inv and re.fullmatch(r"[A-Z]{3,5}\d{7,}", fixed) else inv
         return inv

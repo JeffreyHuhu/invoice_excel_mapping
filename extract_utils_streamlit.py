@@ -1890,6 +1890,33 @@ def _coerce_to_date(value) -> Optional[datetime.date]:
     return None
 
 
+# OCR 常把形狀相近的字元讀錯；只收錄「單一字元 -> 單一字元」且兩個字元
+# 不會同時出現在同一個合法值裡的組合，才不會誤改到本來就對的字。
+_OCR_CONFUSABLES: Dict[str, str] = {
+    "$": "S", "O": "0", "0": "O", "I": "1", "1": "I", "B": "8", "8": "B",
+}
+
+
+def fix_ocr_confusion(value: str, expected_re: "re.Pattern") -> str:
+    """欄位格式已知時 (例如 SHIPMENT 號碼固定是「S+數字」，不可能是其他字元)，
+    擷取到的字串不符合 expected_re 就試著用常見 OCR 誤讀對照表
+    (_OCR_CONFUSABLES) 逐一換字，換成第一個符合格式的結果就回傳；每個字元
+    只試換一次，都不符合就照原樣傳回，呼叫端自行判斷要不要當作抓不到。
+    只能用在格式已知、唯一合法的欄位，不要用在地址/品名等自由文字欄位
+    (OCR 誤讀對照表一改就可能把本來對的字改錯，自由文字沒有格式可以驗證
+    對不對)。"""
+    if expected_re.fullmatch(value):
+        return value
+    for i, ch in enumerate(value):
+        repl = _OCR_CONFUSABLES.get(ch)
+        if not repl:
+            continue
+        candidate = value[:i] + repl + value[i + 1:]
+        if expected_re.fullmatch(candidate):
+            return candidate
+    return value
+
+
 def normalize_value(value) -> str:
     """統一轉成好比對的字串：去除空白/大小寫差異，日期物件轉成固定格式，
     數字不管原本是 int/float/字串、有沒有多餘的小數位 (例如 '11.810' 對
