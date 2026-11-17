@@ -5114,7 +5114,13 @@ def _saigon_fill_vnd_gap(rows: List[list]) -> List[list]:
     帳單沒存計算結果時 calamine 讀成空白 (2026-11-11 POU SUNG 09-SAIF 抽樣，兩張
     工作表都是空白，整張發票讀不到金額)。自己用表頭上方 "EX RATE" 小表的 USD
     匯率算出來，跟 Excel 開啟後會顯示的值一樣。沒有這個版面、或已經有金額時
-    不改動 (維持其他樣本的既有行為)。"""
+    不改動 (維持其他樣本的既有行為)。
+    表尾 "Thành tiền"/"Tổng số tiền" 合計列的 VND 欄同樣是公式、同樣讀成空白
+    (2026-11-18 SAIGON_TRANSPORT POUSUNG 09-SAIF 抽樣：逐列金額補好了，但合計列
+    還是空白，稽核程式把空白當成 0，整張發票變成「跟帳單 0 元不一致」而不是
+    「沒有總額可勾稽」)。合計列本身沒有 USD 金額可以乘匯率，改成用剛剛補好的
+    逐列 VND 金額加總回填；"Thuế GTGT" (VAT) 這張帳單沒有稅額，不符合這個
+    label pattern，不會被誤填。"""
     h = _vt_header_row(rows, "SO BILL")
     if h is None:
         return rows
@@ -5135,15 +5141,58 @@ def _saigon_fill_vnd_gap(rows: List[list]) -> List[list]:
     if not rate:
         return rows
     out = [list(row) for row in rows]
+    filled_total = 0
     for row in out[h + 2:]:
         usd_val = _vn_num(_vn_cell(row, usd_c))
         if usd_val and vnd_c < len(row):
             row[vnd_c] = round(usd_val * rate)
+            filled_total += row[vnd_c]
+    for row in out[h + 2:]:
+        cells = [c for c in row if c not in (None, "")]
+        if (cells and re.match(r"^(TONG|TOTAL|THANH TIEN$)", _vt_norm(cells[0]))
+                and vnd_c < len(row) and not _vn_num(_vn_cell(row, vnd_c))):
+            row[vnd_c] = filled_total
+    return out
+
+
+def _saigon_label_blank_total(rows: List[list]) -> List[list]:
+    """HAWB 版對帳表的表尾合計列有時完全沒有文字 label，只有數字 (2026-11-18
+    POU CHEN T11-2025a 抽樣：合計列是空白格 + 兩個數字，不是 "Total" + 數字)。
+    共用的 "end" 判斷 (抓表尾第一個文字是 TOTAL/TONG 之類的列) 認不出純數字列，
+    會把合計列也當成資料列繼續往下找，sum_row 永遠抓不到合計，變成「沒有總額
+    可勾稽」(即使擷取金額其實跟合計列的數字相加完全一致)。找到最後一列有
+    HAWB 編號的資料列，若緊接著下一列是純數字、沒有文字 label，補上 "TOTAL"
+    讓後面的 end/sum_row 判斷可以抓到；已經有文字 label (例如 "Total") 的列
+    不受影響。"""
+    h = _vt_header_row(rows, "HAWB")
+    if h is None:
+        return rows
+    labels = _vt_labels(rows, h)
+    hawb_c = _vt_col(labels, "HAWB NO")
+    amt_c = _vt_col(labels, "AMOUNT (VND)")
+    if hawb_c is None or amt_c is None:
+        return rows
+    # 兩欄都要有值才算資料列：HAWB 編號欄之後 (銀行帳戶說明等雜訊) 可能剛好
+    # 落在同一欄，只看 HAWB 欄會把雜訊列誤判成最後一筆資料
+    last_data = None
+    for i in range(h + 1, len(rows)):
+        if (_vn_cell(rows[i], hawb_c) not in (None, "")
+                and _vn_num(_vn_cell(rows[i], amt_c)) is not None):
+            last_data = i
+    if last_data is None or last_data + 1 >= len(rows):
+        return rows
+    nxt = rows[last_data + 1]
+    first = next((c for c in nxt if c not in (None, "")), None)
+    if first is None or isinstance(first, str):
+        return rows   # 整列空白、或已經有文字 label，不用補
+    out = [list(r) for r in rows]
+    out[last_data + 1][0] = "TOTAL"
     return out
 
 
 def _saigon_sheets(book: SheetBook) -> SheetBook:
-    return SheetBook(book.path, [(name, _saigon_fill_vnd_gap(rows)) for name, rows in book.sheets])
+    return SheetBook(book.path, [(name, _saigon_label_blank_total(_saigon_fill_vnd_gap(rows)))
+                                  for name, rows in book.sheets])
 
 
 _saigon_parse, _saigon_totals = _vt_make("SAI GON AIR & OCEAN FREIGHT SCE.CO.LTD", _VT_SAIGON)
