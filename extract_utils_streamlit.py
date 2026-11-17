@@ -1687,8 +1687,12 @@ def supplier_pages(pdf_path: str, key: Optional[str], **pdfplumber_kwargs) -> Li
     try:
         pages = entry["page_text"](pdf_path)
     except Exception:
-        # 自訂擷取失敗就用預設擷取，不中斷流程
-        return extract_pages_from_pdf(pdf_path, **pdfplumber_kwargs)
+        # 冷啟動偶爾失敗一次 (2026-11-17 OPL_USD 觀察到同一份檔案、同一套程式，
+        # 新程序偶爾第一次失敗，重跑就正常)，重試一次；兩次都失敗才退回預設擷取
+        try:
+            pages = entry["page_text"](pdf_path)
+        except Exception:
+            return extract_pages_from_pdf(pdf_path, **pdfplumber_kwargs)
     if any(not p.strip() for p in pages):
         default = extract_pages_from_pdf(pdf_path, **pdfplumber_kwargs)
         if len(default) == len(pages):
