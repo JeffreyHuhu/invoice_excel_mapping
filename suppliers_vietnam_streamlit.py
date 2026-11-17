@@ -5169,22 +5169,45 @@ def _saigon_label_blank_total(rows: List[list]) -> List[list]:
         return rows
     labels = _vt_labels(rows, h)
     hawb_c = _vt_col(labels, "HAWB NO")
-    amt_c = _vt_col(labels, "AMOUNT (VND)")
-    if hawb_c is None or amt_c is None:
+    if hawb_c is None:
         return rows
-    # 兩欄都要有值才算資料列：HAWB 編號欄之後 (銀行帳戶說明等雜訊) 可能剛好
-    # 落在同一欄，只看 HAWB 欄會把雜訊列誤判成最後一筆資料
+    # 找最後一列有 HAWB 編號的資料列：遇到第一列「有資料但沒有 HAWB 編號」就
+    # 停止往下找，那一列就是表尾 (合計/小計列)。不能繼續掃到底，銀行帳戶說明
+    # 等雜訊的某一欄可能剛好跟 HAWB 編號欄同欄 (2026-11-18 POU CHEN T11-2025a
+    # 抽樣："Tên tài khoản : ..." 剛好也在 HAWB 欄，曾經被誤判成最後一筆資料，
+    # 合計列算錯位置)；資料列和合計列之間通常緊接著，不會有空白列可以當分界。
+    # 只看 HAWB 欄：有些列只有 Local Charge、沒有 Amount (例如 RAF AIR 最後一列
+    # JWE830176)，一樣算資料列，不能再額外要求 Amount 欄也有值。
     last_data = None
     for i in range(h + 1, len(rows)):
-        if (_vn_cell(rows[i], hawb_c) not in (None, "")
-                and _vn_num(_vn_cell(rows[i], amt_c)) is not None):
+        row = rows[i]
+        if all(c in (None, "") for c in row):
+            continue
+        if _vn_cell(row, hawb_c) not in (None, ""):
             last_data = i
+            continue
+        if last_data is not None:
+            break
     if last_data is None or last_data + 1 >= len(rows):
         return rows
     nxt = rows[last_data + 1]
-    first = next((c for c in nxt if c not in (None, "")), None)
-    if first is None or isinstance(first, str):
-        return rows   # 整列空白、或已經有文字 label，不用補
+    if _vn_cell(nxt, hawb_c) not in (None, ""):
+        return rows   # 下一列還有 HAWB 編號，不是合計列
+    if any(isinstance(c, str) and c.strip() for c in nxt):
+        return rows   # 已經有文字 label (或其他文字)，不用補
+    if not any(isinstance(c, (int, float)) and not isinstance(c, bool) for c in nxt):
+        return rows   # 整列空白，不是合計列
+    # 這一列有數字、沒有文字，看起來像合計列；但如果後面還有一列是真的有文字
+    # label (例如 "Total")，代表這張表另外有一列夾在資料列中間的小計 (不是
+    # 真正的表尾合計)，真正的合計在後面，不該把這列當成合計 (2026-11-18
+    # File RAF AIR 抽樣：第 64 列是被算進 SUM 範圍、重複計算的小計列，真正的
+    # 合計列在第 81 列，已經有 "Total" 文字；這裡不補，讓既有的 end 判斷繼續
+    # 往下找到第 81 列)
+    tail_pattern = r"^(TONG|TOTAL|TTL|CONG|VAT|XIN VUI|SO TK|THANH TIEN$)"
+    for row in rows[last_data + 2:]:
+        first = next((c for c in row if c not in (None, "")), None)
+        if isinstance(first, str) and re.match(tail_pattern, _vt_norm(first)):
+            return rows
     out = [list(r) for r in rows]
     out[last_data + 1][0] = "TOTAL"
     return out
