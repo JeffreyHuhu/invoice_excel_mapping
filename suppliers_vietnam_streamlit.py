@@ -1439,7 +1439,11 @@ def _cw_parse_doc(doc: str, supplier: Optional[str]) -> List[Dict]:
     h["invoice_no"] = _cw_invoice_no(doc)
     # 掃描頁 OCR 會在標籤後多讀一個符號 ("INVOICE DATE) 19-Apr-26"，2026-10-28 抽樣 DHL 合輯)
     h["invoice_date"] = _cw_date(_search(r"\bDATE\s*[\[|()/]?\s*(\d{1,2}-[A-Za-z]{3}-\d{2})", doc))
-    m = re.search(r"^(?!SHIPMENT)(.+?)\s*(?:INVOICE DATE|SHIPMENT\s*[A-Z][A-Z0-9]{5,})",
+    # "Air Freight Departure Charge Sheet" 版面標籤跟號碼中間夾著 OCR 雜訊符號
+    # ("NAME SHIPMENT!|S2604933241")；且要排除 "SHIPMENT DETAILS PRINTED BY" 這個
+    # 說明文字 (每頁都有，長得很像「SHIPMENT + 代碼」會被誤當成終止點，抓到完全
+    # 不相關的內容，2026-11-16 抽查 OCT.2026 S2604933241)
+    m = re.search(r"^(?!SHIPMENT)(.+?)\s*(?:INVOICE DATE|SHIPMENT\W*(?!DETAILS)[A-Z][A-Z0-9]{5,})",
                   doc, re.MULTILINE)
     h["consignee"] = m.group(1).strip() if m else None
     h["shipper"] = _search(r"^##SHIPPER## (.+)$", doc)
