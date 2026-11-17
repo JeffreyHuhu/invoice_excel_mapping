@@ -34,7 +34,7 @@ import datetime
 from typing import Dict, List, Optional, Tuple
 
 from extract_utils_streamlit import (
-    _ocr_page_with_psm, _scanned_page_indexes, extract_pages_from_pdf,
+    _ocr_page_text, _ocr_page_with_psm, _scanned_page_indexes, extract_pages_from_pdf,
     limited_pages, register_supplier, set_supplier_number, SUPPLIER_REGISTRY, SheetBook,
 )
 from suppliers_common_streamlit import (
@@ -1540,8 +1540,17 @@ def parse_hyper_mega(text: str) -> Dict:
 #     讓 expand_to_rows() 補 N/A。
 
 def detect_yje(text: str) -> bool:
+    """⚠️ 2026-11-18 抽樣「YJE_TATA-辨識等級(低)」發現：TATA 的收據格式
+    (tata_receipt) 常有一筆品項是「REIMBURSEMENT - INVOICE YJE (SHENZHEN)
+    INTERNATIONAL LOGISTICS CO.,LTD.」(TATA 代墊、轉收 YJE 自己開的帳單)，
+    這一行本身就同時含有 "YJE" 跟 "INTERNATIONAL LOGISTICS" 兩個字樣，會被
+    誤判成「這一頁是 YJE 自己的帳單」，整頁改用 parse_yje() 擷取、所有欄位
+    全部抓空 (真正該用的是 parse_tata_receipt())。用 "NOMOR INVOICE" 沒出現
+    排除 (跟 detect_tata_classic() 互相排除的方式一樣，tata_receipt 專屬
+    這個字樣，YJE 自己的帳單不會有)。"""
     upper = text.upper()
-    return "YJE" in upper and "INTERNATIONAL LOGISTICS" in upper
+    return ("YJE" in upper and "INTERNATIONAL LOGISTICS" in upper
+            and "NOMOR INVOICE" not in upper)
 
 
 def _yje_clean_consignee(value: Optional[str]) -> Optional[str]:
@@ -1714,11 +1723,13 @@ def _tata_extract_shipper(text: str) -> Optional[str]:
 
 def _tata_parse_date(text: Optional[str]) -> Optional[str]:
     """'2026-08-24' -> '24.08.2026'，跟其他供應商一樣統一成 'DD.MM.YYYY'
-    (正確答案 Excel 這幾欄是 Excel 日期格式)。
+    (正確答案 Excel 這幾欄是 Excel 日期格式)。掃描檔 OCR 偶爾把分隔符號讀成
+    '/' 而不是 '-' (例如 '2025/07/17'，2026-11-18 抽樣 ASICS 系列發現)，
+    兩種分隔符號都接受。
     """
     if not text:
         return text
-    m = re.match(r"(\d{4})-(\d{1,2})-(\d{1,2})", text.strip())
+    m = re.match(r"(\d{4})[-/](\d{1,2})[-/](\d{1,2})", text.strip())
     if not m:
         return text
     year, month, day = m.groups()
@@ -1766,9 +1777,16 @@ def parse_tata_classic(text: str) -> Dict:
     """注意：這是 multi_page 供應商，text 是『一頁』的文字。"""
     header: Dict[str, Optional[str]] = {}
 
-    header["invoice_no"] = _search(r"(?m)^NO\s*:\s*(\S+)", text)
+    # ⚠️ 2026-11-18 抽樣 ASICS/NIKOMAS 系列掃描檔發現：OCR 偶爾把 "NO" 這個
+    # 字漏掉，整行只剩 "» HC25011872"/"> HC25012424"/": HC25011872" (冒號
+    # 常被 OCR 認成 ">"/"»" 這種類似符號，不固定是哪一個，"NO" 字樣也可能
+    # 整個漏掉)；沒有抓到時退回找 "INVOICE" 標題後面第一個「符號 <值>」這一
+    # 行 (發票號碼固定印在這個位置)。"INV Date" 後面的冒號也有同樣的 OCR
+    # 誤讀，一起放寬。
+    header["invoice_no"] = _search(r"(?m)^NO\s*:\s*(\S+)", text) or _search(
+        r"\bINVOICE\b\s*\n+\s*[:>»]\s*(\S+)", text)
     header["invoice_date"] = _tata_parse_date(
-        _search(r"INV\s*Date\s*:\s*(\d{4}-\d{1,2}-\d{1,2})", text)
+        _search(r"INV\s*Date\s*[:>»]\s*(\d{4}[-/]\d{1,2}[-/]\d{1,2})", text)
     )
     header["supplier"] = _search(r"Nama\s*:\s*(PT\..+)$", text)
     header["consignee"] = _search(rf"\bTO\s*:\s*(.+?){_TATA_STOP}", text)
@@ -1962,9 +1980,13 @@ def parse_tata_receipt(text: str) -> Dict:
     """注意：這是 multi_page 供應商，text 是『一頁』的文字。"""
     header: Dict[str, Optional[str]] = {}
 
-    header["invoice_no"] = _search(r"NOMOR\s*INVOICE\s*#\s*:\s*(\S+)", text)
+    # ⚠️ 2026-11-18 抽樣「YJE_TATA-辨識等級(低)」掃描檔發現：OCR 偶爾把
+    # "NOMOR INVOICE # :"/"TANGGAL :" 的冒號漏掉 (例如 "NOMOR INVOICE #
+    # TH20250032"、"TANGGAL 02-01-2025")，原本冒號是必填，整個抓不到值。
+    # 改成冒號可有可無。
+    header["invoice_no"] = _search(r"NOMOR\s*INVOICE\s*#\s*:?\s*(\S+)", text)
     header["invoice_date"] = _tata_receipt_parse_date(
-        _search(r"TANGGAL\s*:\s*(\d{1,2}-\d{1,2}-\d{4})", text)
+        _search(r"TANGGAL\s*:?\s*(\d{1,2}-\d{1,2}-\d{4})", text)
     )
     header["supplier"] = "PT TATA HARMONI SARANATAMA"
     header["consignee"] = _search(r"PELANGGAN\s*\n(.+?)\s+DETAIL\s*PEMBAYARAN", text)
@@ -2461,8 +2483,11 @@ def parse_tata_af(text: str) -> Dict:
     )
 
     # "Nama :" 後面這份帳單沒有句點 ("PT " 不是 "PT.")，跟 classic 格式的
-    # 寫法不同，不要求句點。
-    header["supplier"] = _search(r"Nama\s*:\s*(.+)$", text)
+    # 寫法不同，不要求句點。⚠️ 2026-11-18 抽樣 ASICS JULI 2026 發現：少數
+    # 發票的頁尾完全沒有印這一行 (單頁帳單、不是被切到下一頁)，抓不到時
+    # 退回寫死的供應商名稱 (這個群組固定是 TATA，跟 tata_receipt/
+    # tata_pouyuen 已經在用的作法一致)。
+    header["supplier"] = _search(r"Nama\s*:\s*(.+)$", text) or "PT TATA HARMONI SARANATAMA"
 
     consignee_raw = _search(r"\bTo\s*:\s*(.+)$", text)
     if consignee_raw:
@@ -2564,7 +2589,8 @@ def parse_tata_pyi(text: str) -> Dict:
         if date_m else None
     )
 
-    header["supplier"] = _search(r"Nama\s*:\s*(.+)$", text)
+    # 退回寫死的供應商名稱 (見 parse_tata_af() 同一處的說明)。
+    header["supplier"] = _search(r"Nama\s*:\s*(.+)$", text) or "PT TATA HARMONI SARANATAMA"
 
     consignee_raw = _search(r"\bTo\s*:\s*(.+)$", text)
     if consignee_raw:
@@ -2635,13 +2661,60 @@ _TATA_POUYUEN_ITEM_LINE_RE = re.compile(
 )
 
 
+def _tata_pouyuen_score(text: str) -> int:
+    """這份 OCR 文字能抓到幾個表頭欄位 (invoice_no/invoice_date/supplier/
+    consignee)，用來在「方向偵測版」跟「不轉向版」兩種 OCR 結果之間選比較
+    好的一份 (見 _tata_pouyuen_pages() 的說明)。呼叫 parse_yje_or_tata() 走
+    一般的格式判斷流程，不管這頁實際是哪一種 TATA 版面都適用。"""
+    try:
+        header = parse_yje_or_tata(text).get("header", {})
+    except Exception:
+        return 0
+    return sum(1 for k in ("invoice_no", "invoice_date", "supplier", "consignee") if header.get(k))
+
+
 def _tata_pouyuen_pages(pdf_path: str) -> List[str]:
     """把「沒有表頭、看起來是 POU YUEN 續頁」的頁面併回前一頁 (見上方格式
     說明第 3 點)。只在『前一頁是 POU YUEN 表頭頁』且『這一頁本身沒有
     No./Kurs 1 USD/CONSIGNEE，但有 POU YUEN 的品項或小計特徵』兩個條件都
     成立時才合併，避免誤併到其他格式 (classic/receipt/af/pyi) 各自獨立的
-    單頁發票。"""
+    單頁發票。
+
+    ⚠️ 2026-11-18 發現的副作用：幫 YJE_TATA 註冊 page_text 之後，
+    extract_pages_from_pdf() 內部有個省算力判斷 (_page_needs_full_ocr())，
+    看到「這家供應商有註冊 page_text」就假設該函式會自己處理掃描頁的 OCR，
+    不再對掃描頁做高解析度重做，留在低解析度 (150dpi) 的快速 OCR 結果——但
+    這支函式本身沒有做任何 OCR，只是呼叫 extract_pages_from_pdf() 再重新
+    排頁，所以等於掃描頁全部被迫降級成低解析度 OCR。低解析度在雙欄版面
+    (抬頭標籤跟值分左右兩欄) 常把欄位順序讀亂 (例如 NIKOMAS 系列抽樣發現
+    "INVOICE / Inv Date / To / ..." 標籤全部先讀完、後面才接著讀到
+    "HC25013249 / 2025-08-05 10:15:44 / PT NIKOMAS GEMILANG / ..." 對應的
+    值，完全脫節)。這裡補一次高解析度 OCR，用 _ocr_page_text() (不是
+    _ocr_page_with_psm())，因為要跟「沒有註冊 page_text 時」原本的高解析度
+    重做行為完全一致 (含方向偵測；2026-11-18 發現改用
+    _ocr_page_with_psm(..., 3) 少了方向偵測，部分本來就印歪的掃描頁
+    (INV TH 系列) 反而比原來更差)。
+
+    ⚠️ 2026-11-18 再發現：方向偵測也不是每次都對 (程式裡其他地方也有同樣
+    的警告)，ASICS 系列又有幾份反而是「方向偵測版」比「不轉向版」更差 (表頭
+    欄位抓到的比較少)。兩種各有各的失手樣本，沒有哪一個全面比較好，所以
+    兩個版本都跑一次、用『實際解析結果抓到幾個表頭欄位』(見
+    _tata_pouyuen_score()) 當裁判，不是憑經驗猜；只有方向偵測版表頭資訊
+    不完整時才多花一次 OCR 試不轉向版，大部分乾淨的掃描頁不會多花這筆算力。
+    """
     pages = extract_pages_from_pdf(pdf_path)
+    scanned_idx = _scanned_page_indexes(pdf_path)
+    if scanned_idx:
+        import pdfplumber
+        with pdfplumber.open(pdf_path) as pdf:
+            for i in scanned_idx:
+                redo = _ocr_page_text(pdf_path, i, pdf.pages[i])
+                if redo.strip() and _tata_pouyuen_score(redo) < 4:
+                    alt = _ocr_page_with_psm(pdf_path, i, 3)
+                    if alt.strip() and _tata_pouyuen_score(alt) > _tata_pouyuen_score(redo):
+                        redo = alt
+                if redo.strip():
+                    pages[i] = redo
     merged: List[str] = []
     for text in pages:
         upper = text.upper()
@@ -6618,6 +6691,15 @@ _HANDAL_COMBINED_ITEM_RE = re.compile(
     rf'^(?:\d+\s+)?(?P<desc>[A-Z][A-Za-z0-9 /().=*\->]*?)[\s,;:]+(?:\d+[\s,;:]+)?'
     rf'(?P<unit>{_HANDAL_NUM}){_HANDAL_SEP}(?P<amount>{_HANDAL_NUM})(?!\d)[^\n0-9]*$'
 )
+# 名稱 + 數量 + 單價 + 金額四個都寫出來、但金額不到 1,000 (沒有千分位逗號) 的
+# 版型 (使用者 2026-11-18 樣本 251104S："COLLECTION FEE 1 900 900")：
+# 數量這一欄一定要有 (跟 _HANDAL_COMBINED_ITEM_RE 不同，這裡不是「可選」)，
+# 且單價要等於「金額 / 數量」，兩個條件都符合才夠明確，避免把描述文字裡的
+# 小數字 (例如 "TRUCKING LAUT 40 (PPH 23)" 的 40、23) 誤判成金額。
+_HANDAL_SMALL_ITEM_RE = re.compile(
+    r'^(?:\d+\s+)?(?P<desc>[A-Z][A-Za-z /().=*\->]*?)[\s,;:]+(?P<qty>\d{1,2})[\s,;:]+'
+    r'(?P<unit>\d{1,3})[\s,;:]+(?P<amount>\d{1,3})(?!\d)[^\n0-9]*$'
+)
 _HANDAL_PAIR_ONLY_RE = re.compile(
     rf'^(?P<unit>{_HANDAL_NUM}){_HANDAL_SEP}(?P<amount>{_HANDAL_NUM})(?!\d)[^\n0-9]*$'
 )
@@ -6845,6 +6927,11 @@ def _handal_extract_items_core(text: str):
         # (使用者 2026-11 樣本 NIKO-AGUST 2025_SAMPLE，2026-11-03 確認)。CUSTOMS 是真的字，不改。
         line = re.sub(r'(?<![A-Za-z])([A-Za-z$]{5,8})(?=\s+CLEARANCE\b)', _handal_fix_custom_word, line,
                       flags=re.IGNORECASE)
+        # 名稱跟數字之間偶爾被 OCR 多塞一兩個小寫雜字 ("SEGEL oo 25,000"，使用者
+        # 2026-11-18 樣本 NIKO-AGUST 2026 第 36 頁)：這家費用名稱全部是大寫
+        # (見 _looks_like_handal_item_desc)，行內出現的小寫字一定是雜訊，先拿掉
+        # 才能跟大寫名稱比對到，不然整行會被誤判成不是費用項目而漏算。
+        line = re.sub(r'(?<=[A-Z])\s+[a-z]{1,4}(?=\s+\d)', '', line)
         if not line:
             continue
         if re.match(r'for and on', line, re.IGNORECASE):
@@ -6860,6 +6947,13 @@ def _handal_extract_items_core(text: str):
                 "vat": None,
             })
             continue
+
+        ms = _HANDAL_SMALL_ITEM_RE.match(line)
+        if ms and _looks_like_handal_item_desc(ms.group('desc')):
+            qty, unit, amount = int(ms.group('qty')), int(ms.group('unit')), int(ms.group('amount'))
+            if unit * qty == amount:
+                items.append({"description": ms.group('desc').strip(), "amount": amount, "vat": None})
+                continue
 
         # 單價欄是 OCR 雜訊 ("COLLECTION FEE ?23,000 523,000"，使用者 2026-11 樣本 NIKO-AGUST 2025 第 56 頁)：
         # 取最後一個完整金額，名稱若像費用名稱就直接收
@@ -6957,7 +7051,10 @@ def _handal_rekap_sheet(rows: List[list]) -> Optional[Tuple[Dict, Dict]]:
 
     items, total, dates = [], None, []
     for r in rows[head + 1:]:
-        if _vn_num(_vn_cell(r, 0)) is not None:          # 明細列 (NO 欄是序號)
+        # 明細列：NO POL~FEET 這段任何一欄有值就算 (2026-11-18 抽樣發現 NO 欄本身
+        # 偶爾打錯，變成空白或亂碼字串如 "15221:28"；只靠 NO 欄判斷會把這種明細列
+        # 誤判成合計列，導致後面的明細全部漏算)。只有這段整段空白才是合計列。
+        if any(_vn_text(_vn_cell(r, c)).strip() for c in range(1, feet_col + 1)):
             feet = _vn_text(_vn_cell(r, feet_col)).strip()
             # 貨櫃欄寫車型 ("WINGBOX"、"BOX"，沒有數字) 時不是貨櫃號碼
             box = _vn_text(_vn_cell(r, cont_col)).strip() if cont_col is not None else ""
@@ -6966,7 +7063,12 @@ def _handal_rekap_sheet(rows: List[list]) -> Optional[Tuple[Dict, Dict]]:
             for k in range(feet_col + 1, end):
                 amount = _vn_amount(_vn_cell(r, k))
                 if amount:
-                    items.append({"description": label(k), "amount": amount, "vat": None, **extra})
+                    lbl = label(k)
+                    # DISCOUNT 欄是從 JUMLAH 裡扣掉的折扣 (例如 "DIPOTONG 500 KARNA
+                    # TERLAMBAT")，不是另外加收的費用，要記成負數才會跟 JUMLAH 對得上
+                    if "DISCOUNT" in lbl.upper():
+                        amount = -amount
+                    items.append({"description": lbl, "amount": amount, "vat": None, **extra})
             d = _vn_cell(r, 1)
             if isinstance(d, (datetime.date, datetime.datetime)):
                 dates.append(d)
@@ -6984,6 +7086,14 @@ def _handal_rekap_sheet(rows: List[list]) -> Optional[Tuple[Dict, Dict]]:
 
 def _handal_sheets(book) -> Tuple[List[Dict], List[Dict]]:
     got = [g for g in (_handal_rekap_sheet(rows) for _, rows in book.sheets) if g]
+    # 同一個 Excel 檔案裡，拖車 (TR/HT) 跟吊櫃 (HL) 是同一批貨、同一個收件公司，
+    # 但抬頭的 PT. 公司名只印在第一個分頁：其他分頁抓不到就補用同檔已抓到的值。
+    consignee = next((g[0]["header"]["consignee"] for g in got if g[0]["header"].get("consignee")), None)
+    if consignee:
+        for g in got:
+            g[0]["header"].setdefault("consignee", None)
+            if not g[0]["header"]["consignee"]:
+                g[0]["header"]["consignee"] = consignee
     return ([g[0] for g in got] or [{"header": {}, "items": [{"description": None, "amount": None}]}],
             [g[1] for g in got])
 
@@ -7437,8 +7547,10 @@ def _opl_dn_total(text: str) -> Optional[float]:
     # 小數點後也可能多一個空白 ("US$ 658 . 32"，"HKGJKT25030047")
     # 文字版有些版型合計行是 "TOTAL: US$ 678.84 NT$ 22,343" (美金後面還接新台幣換算，
     # "520825 (PT. NIKOMAS GOA 2ND)"、"SPOE2505046")：美金數字後面容許再接一段 NT$ 金額
+    # 千分位逗號後面偶爾多讀出一個空白 ("US$ = -3, 982.68"，"SHKJKT25040021A-K"；
+    # "US$ 5, 558. 00"，"SHKJKT25100703A-N")
     found = re.findall(r"(?m)^[^A-Za-z\n]{0,8}?(?:[a-z]{1,2}\s+){0,2}(?:TOTAL\s*:\s*)?US\$\s*[=:.\s\-—~]*?\s*"
-                       r"(\d[\d,.]*(?:\s*\.\s*\d{2})?)\s*(?:NT\$\s*[\d,.]+)?\s*$",
+                       r"(\d(?:\s*[,.]\s*\d+)*)\s*(?:NT\$\s*[\d,.]+)?\s*$",
                        text)
     if not found:
         # 合計行被其他文字黐成一行 ("--BBAANNKK DDEETTAAIILLSS:: US$ 987.60"，"OLJKT2507006"：
@@ -7448,7 +7560,7 @@ def _opl_dn_total(text: str) -> Optional[float]:
         # 要排除明細列常見的單位字樣，不然會把某一筆費用誤判成總額)
         for line in reversed(text.splitlines()):
             if line.count("US$") == 1 and not re.search(r"\b(?:SET|KGS|CBM|USD|HKD|CIN)\b", line.upper()):
-                m = re.search(r"US\$\s*[=:.\s\-—~]*?\s*(\d[\d,.]*(?:\s*\.\s*\d{2})?)\s*$", line)
+                m = re.search(r"US\$\s*[=:.\s\-—~]*?\s*(\d(?:\s*[,.]\s*\d+)*)\s*$", line)
                 if m:
                     found = [m.group(1)]
                     break
@@ -7602,8 +7714,9 @@ def _opl_pages(pdf_path: str) -> List[str]:
             # 明細對不上總額、或缺 CONSIGNEE/發票日期時，依序改用 500 dpi 黑白、600 dpi psm 6
             # 重讀，分數較高才採用。雜訊很重的掃描頁 (整欄文字黐在一起，"OLCXML2501005C05"、
             # "SE25011500013"、"JKTHCSE2501061E"、"OLCXML2501085C01") 這兩種都救不回來，改用
-            # psm 3 (全自動版面分析，不假設單欄) 才讀得出來，分別要搭配 500 dpi 或 700 dpi
-            for retry in ({"dpi": 500, "bw": True}, {"psm": 6}, {"dpi": 500, "psm": 3},
+            # psm 3 (全自動版面分析，不假設單欄) 才讀得出來，分別要搭配 500/600/700 dpi
+            # ("OLJKT2502015" 的合計行整個被漏讀，600 dpi psm 3 才讀得到)
+            for retry in ({"dpi": 500, "bw": True}, {"psm": 6}, {"psm": 3}, {"dpi": 500, "psm": 3},
                           {"dpi": 700, "psm": 3, "bw": True}, {"dpi": 700, "psm": 4}):
                 if score == 2:
                     break
@@ -7856,8 +7969,9 @@ def _opl_field(label: str, text: str) -> Optional[str]:
 def _opl_amount(value: Optional[str]) -> Optional[float]:
     if not value:
         return None
+    # 掃描檔總額後面偶爾多讀出一個句點 ("US$ 7,337.32."，"HKGJKT2503196A")
     try:
-        return float(value.replace(",", ""))
+        return float(value.replace(",", "").rstrip("."))
     except ValueError:
         return None
 
