@@ -2585,6 +2585,136 @@ def parse_tata_pyi(text: str) -> Dict:
     return {"header": header, "items": items}
 
 
+# ===========================================================================
+# TATA 第五種格式：POU YUEN 空運帳單 (沒有 "Kurs 1 USD" 字樣)
+# ===========================================================================
+#
+# ⚠️ 2026-11-17 抽樣「未知供應商」資料夾發現 (HC2608-2469/2470、
+# HC2609-2156/2157)：版面跟 tata_af 很像 (同樣是 "NO DATE SHIPPER ATTN HAWB
+# Incoterm ... A/F" 表格、同樣的 "A/F + VAT 12% (FREIGHT ONLY) [+ GUDANG FEE
+# + DECLARE ORIGIN FEE] = TOTAL AMOUNT" 小計)，但表頭沒有 "Kurs 1 USD" 字樣
+# (原本 detect_tata_af() 靠這個字樣辨識)，af 的 detect 完全不會承認這種頁面，
+# 之前被歸類成「未知供應商」。跟 af 的差異：
+#   1. 品項沒有重量 (kgs) 欄，Kurs/費用數字前面也沒有 "Rp" 字樣。
+#   2. 品項沒有單筆 VAT 欄：VAT 12%、GUDANG FEE、DECLARE ORIGIN FEE 都只在
+#      帳單下方各印一列小計 (沒有值時那一列是空白，等於 0)，不是像 PYI 那樣
+#      每筆品項各自帶 (見 CLAUDE.md「VAT 與總額稽核」案例 2：整張帳單只有
+#      一列稅金，建一個獨立品項，amount 留空、金額放 vat 欄)。
+#   3. 品項太多時會跨到第 2 頁，第 2 頁只剩品項尾段 + 小計，沒有表頭 (沒有
+#      "No. :"/"Inv Date :"/"To :"/"Nama :" 任何一個)。YJE_TATA 是
+#      multi_page=True 的「一頁一張發票」群組，這種跨頁發票如果照原樣逐頁
+#      丟給 detect/parse，第 2 頁會因為抓不到發票號碼而被誤判成另一張無關
+#      的「N/A」發票 (見 _tata_pouyuen_pages() 的說明)，所以額外註冊了
+#      page_text 回呼，在 detect/parse 看到頁面文字之前先把這種續頁併回
+#      前一頁。
+#
+# Shipper/ATTN/HAWB/Incoterm/Country 常態性跨 2~3 行換行 (跟 tata_af 一樣的
+# 版面陷阱)，但這些欄位不是必填欄位 (必填只有 INVOICE NO/SUPPLIER/
+# CONSIGNEE/Description/AMOUNT)，這裡先不處理換行重組，只保留單行抓到的
+# 部分，不影響 AMOUNT 正確性跟金額稽核。
+
+def detect_tata_pouyuen(text: str) -> bool:
+    """跟 tata_af/tata_pyi 互斥 (那兩種都有 "KURS 1 USD" 字樣，這種沒有)。
+    表頭頁用品項列特徵辨識；跨頁續頁沒有表頭時，退回看帳單下方
+    "DECLARE ORIGIN FEE" 小計列 (這個標籤目前只有 PYI/這種格式會印成單獨
+    一列，PYI 已經在前面被 "KURS 1 USD" 排除掉)。"""
+    upper = text.upper()
+    if "KURS 1 USD" in upper or "CONSIGNEE" in upper:
+        return False
+    if _TATA_POUYUEN_ITEM_LINE_RE.search(text):
+        return True
+    return bool(re.search(r"^DECLARE ORIGIN FEE\b", text, re.MULTILINE))
+
+
+_TATA_POUYUEN_ITEM_LINE_RE = re.compile(
+    r"^(?:(?P<no>\d+)\s+)?(?P<date>\d{1,2}/[A-Za-z]{3}/\d{2,4})\s+(?P<mid>.*?)\s+"
+    r"(?P<kurs_usd>\d+,\d+)\s+(?P<kurs_idr>[\d.]+)\s+"
+    r"(?:(?P<fee1>[\d.]+)\s+)?(?:(?P<fee2>[\d.]+)\s+)?"
+    r"(?P<amount>[\d.]+)\s*$",
+    re.MULTILINE,
+)
+
+
+def _tata_pouyuen_pages(pdf_path: str) -> List[str]:
+    """把「沒有表頭、看起來是 POU YUEN 續頁」的頁面併回前一頁 (見上方格式
+    說明第 3 點)。只在『前一頁是 POU YUEN 表頭頁』且『這一頁本身沒有
+    No./Kurs 1 USD/CONSIGNEE，但有 POU YUEN 的品項或小計特徵』兩個條件都
+    成立時才合併，避免誤併到其他格式 (classic/receipt/af/pyi) 各自獨立的
+    單頁發票。"""
+    pages = extract_pages_from_pdf(pdf_path)
+    merged: List[str] = []
+    for text in pages:
+        upper = text.upper()
+        prev_upper = merged[-1].upper() if merged else ""
+        prev_is_pouyuen_header = (
+            bool(merged) and "NO. :" in prev_upper
+            and "KURS 1 USD" not in prev_upper and "CONSIGNEE" not in prev_upper
+        )
+        this_is_continuation = (
+            "NO. :" not in upper and "KURS 1 USD" not in upper and "CONSIGNEE" not in upper
+            and (_TATA_POUYUEN_ITEM_LINE_RE.search(text)
+                 or re.search(r"^DECLARE ORIGIN FEE\b", text, re.MULTILINE))
+        )
+        if prev_is_pouyuen_header and this_is_continuation:
+            merged[-1] = merged[-1] + "\n" + text
+        else:
+            merged.append(text)
+    return merged
+
+
+def _tata_pouyuen_extract_items(text: str) -> List[Dict]:
+    items: List[Dict] = []
+    for m in _TATA_POUYUEN_ITEM_LINE_RE.finditer(text):
+        shipper, country = _tata_af_strip_country_suffix(m.group("mid"))
+        items.append({
+            "description": "A/F",
+            "amount": _tata_af_clean_amount(m.group("amount")),
+            "shipper": shipper or None,
+            "onboard_date": _tata_af_parse_item_date(m.group("date")),
+            "port_of_loading": country,
+        })
+
+    # VAT/GUDANG FEE/DECLARE ORIGIN FEE 都是帳單下方單獨一列小計 (不是每筆
+    # 品項各自帶，跟 PYI 不一樣)，沒有值的列等於 0，不另外建立品項 (比照
+    # CLAUDE.md「某些月份才有的費用項目，只在金額大於 0 時才加入」)。
+    for label in ("GUDANG FEE", "DECLARE ORIGIN FEE", "VAT 12% (FREIGHT ONLY)"):
+        value = _tata_af_total_line(text, label)
+        if value:
+            items.append({"description": label, "amount": None, "vat": value})
+
+    return items
+
+
+def parse_tata_pouyuen(text: str) -> Dict:
+    """注意：這是 multi_page 供應商，text 經過 _tata_pouyuen_pages() 處理，
+    跨頁發票已經併回同一份文字，表頭/品項/小計都在同一個 text 裡。"""
+    header: Dict[str, Optional[str]] = {}
+    header["invoice_no"] = _tata_af_line_tokens(text, "No. :")
+
+    date_m = re.search(r"Inv\s*Date\s*:\s*(\d{1,2})/(\d{1,2})/(\d{4})", text)
+    header["invoice_date"] = (
+        _format_date_en(date_m.group(1), date_m.group(2), date_m.group(3))
+        if date_m else None
+    )
+
+    # 供應商名稱固定，不靠帳單下方的 "Nama :" 搜尋 (跟 tata_receipt 作法一致)。
+    header["supplier"] = "PT TATA HARMONI SARANATAMA"
+    header["consignee"] = _search(r"\bTo\s*:\s*(.+)$", text)
+
+    for code in (
+        "order_no", "arrive_date", "onboard_date", "bl_no", "mbl_no",
+        "port_of_loading", "port_of_discharge", "vessel", "container_no",
+        "volume", "shipper",
+    ):
+        header[code] = None
+
+    items = _tata_pouyuen_extract_items(text)
+    if not items:
+        items = [{"description": None, "amount": None}]
+
+    return {"header": header, "items": items}
+
+
 # ⚠️ 2026-11 效能優化：_parse_multi_page_pdf() 對『每一頁』都先呼叫
 # entry["detect"]()、通過後再呼叫 entry["parse"]()，YJE_TATA 這個合併群組
 # 原本在這兩次呼叫裡各自重新判斷一次「這頁是 YJE 還是 TATA 的哪一種格式」
@@ -2614,6 +2744,8 @@ def _yje_tata_classify(text: str) -> Optional[str]:
         return "tata_pyi"
     if detect_tata_af(text):
         return "tata_af"
+    if detect_tata_pouyuen(text):
+        return "tata_pouyuen"
     return None
 
 
@@ -2666,6 +2798,8 @@ def parse_yje_or_tata(text: str) -> Dict:
         return parse_tata_pyi(text)
     if fmt == "tata_af":
         return parse_tata_af(text)
+    if fmt == "tata_pouyuen":
+        return parse_tata_pouyuen(text)
     return parse_tata_classic(text)
 
 
@@ -3709,6 +3843,7 @@ register_supplier(
     detect_yje_or_tata, parse_yje_or_tata, multi_page=True,
     extract_total=_yje_tata_extract_total,
     extract_grand_total=_yje_tata_extract_grand_total,
+    page_text=_tata_pouyuen_pages,
 )
 register_supplier(
     "TRANS_DAYA_PRIMA", "PT. TRANS DAYA PRIMA", detect_trans, parse_trans,
