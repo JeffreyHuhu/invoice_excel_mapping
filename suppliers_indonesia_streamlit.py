@@ -7422,7 +7422,9 @@ def _is_opl_dn(text: str) -> bool:
     # 標題讀成亂碼時 ("JKTHCSE2601010H")，有 S/O# 欄也算；HB/L 會讀成 AB/L ("SPOE2509124…")、
     # UB/L ("HKGJKT25090024")、BB/L ("HKGJKT25110676")
     # OCR 也會把 DEBIT 讀成 "DEB iT"、S/O# 讀成 "5/O#" ("OLJKT2509010")
-    title = re.search(r"OUTBOUND\s+(?:INVOICE|DEB\s?IT\s+NOTE)", upper) or re.search(r"[S5]/O#", upper) or (
+    # INVOICE 中間多讀出一個字母 ("INVOILCE")、S/O# 的 O 讀成數字 0 ("S/0#")
+    # ("HKGJKT25030197")
+    title = re.search(r"OUTBOUND\s+(?:INVOI.?CE|DEB\s?IT\s+NOTE)", upper) or re.search(r"[S5]/[O0]#", upper) or (
         re.search(r"(?m)^\s*INVOICE\s*$", upper) and "ORIENTAL POWER" in upper)
     return bool(title) and re.search(r"[FP]ILE NO", upper) is not None \
         and re.search(r"[HAUB]B/L", upper) is not None
@@ -7598,8 +7600,11 @@ def _opl_pages(pdf_path: str) -> List[str]:
             score = _opl_scan_score(text)
             others = []
             # 明細對不上總額、或缺 CONSIGNEE/發票日期時，依序改用 500 dpi 黑白、600 dpi psm 6
-            # 重讀，分數較高才採用
-            for retry in ({"dpi": 500, "bw": True}, {"psm": 6}):
+            # 重讀，分數較高才採用。雜訊很重的掃描頁 (整欄文字黐在一起，"OLCXML2501005C05"、
+            # "SE25011500013"、"JKTHCSE2501061E"、"OLCXML2501085C01") 這兩種都救不回來，改用
+            # psm 3 (全自動版面分析，不假設單欄) 才讀得出來，分別要搭配 500 dpi 或 700 dpi
+            for retry in ({"dpi": 500, "bw": True}, {"psm": 6}, {"dpi": 500, "psm": 3},
+                          {"dpi": 700, "psm": 3, "bw": True}, {"dpi": 700, "psm": 4}):
                 if score == 2:
                     break
                 alt = _opl_scan_ocr(pdf_path, page_index, **retry)
@@ -7774,7 +7779,9 @@ def _parse_opl_dn(text: str) -> Dict:
         "consignee": _opl_std_consignee(_opl_cnee(text) or _opl_messr(text)),
         # 掃描檔 OCR 會在冒號前後多讀 "=" / ";" ("S/O# =: 25110203"、"HB/L =: HKGJKT…")
         # "S/O# :; 25110369" ("OESIN25100084")、"S/O# + 25100365" ("XM25100326")
-        "order_no": _search(r"[S5]/O#\s*[=:;]*\s*:[\s;]*(\S+)", text) or _search(r"[S5]/O#\s*[=;+]+\s*(\d+)", text),
+        # O 讀成數字 0 ("S/0# : 25030197"，"HKGJKT25030197")
+        "order_no": _search(r"[S5]/[O0]#\s*[=:;]*\s*:[\s;]*(\S+)", text)
+        or _search(r"[S5]/[O0]#\s*[=;+]+\s*(\d+)", text),
         "onboard_date": onboard,
         # 胡志明 → 雅加達的 HB/L 開頭是 JKTHCSE，OCR 會讀成 "JETHCSE"/"SKTHCSE" ("HARDASES跨月份更新帳單"、
         # "JKTHCSE2510070V")
