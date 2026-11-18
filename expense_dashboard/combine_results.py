@@ -21,10 +21,12 @@ combine_results.py — 把所有轉檔結果 Excel 整合成一份 (欄位跟轉
 """
 
 import argparse
+import os
 import sys
+from concurrent.futures import ProcessPoolExecutor
 from datetime import date, datetime
 from pathlib import Path
-from typing import List, Sequence
+from typing import List, Sequence, Tuple
 
 from openpyxl import Workbook
 from openpyxl.cell import WriteOnlyCell
@@ -78,8 +80,30 @@ def _invoice_key(row: dict):
     return key
 
 
+def _read_one(task: Tuple[int, str, str]) -> Tuple[str, List[dict], str]:
+    """單一檔案的讀取與整理 (給多行程平行處理用；每份檔案互不相關，可以平行跑)。
+    dedup 要照固定順序做，所以不在這裡做，留給 collect_rows 序列處理。"""
+    _, level, path = task
+    try:
+        raw = _read_rows(path)
+        header_idx, mapping = _find_header(raw)
+    except Exception as e:  # 損壞或格式不符：回報錯誤，由主程序記 log
+        return [], str(e)
+    file_rows = []
+    for values in raw[header_idx + 1:]:
+        row = {code: values[col] for col, code in mapping.items() if col < len(values)}
+        row = {k: (None if v == "" else v) for k, v in row.items()}
+        if any(v is not None for v in row.values()):
+            row["level"] = level
+            row["_path"] = path          # 判斷幣別用 (國家資料夾)，不寫進 Excel
+            file_rows.append(row)
+    return file_rows, None
+
+
 def collect_rows(roots: Sequence[Path], levels: Sequence[str]):
-    """回傳 (明細列, 統計)。明細列是 {欄位代碼: 值}。"""
+    """回傳 (明細列, 統計)。明細列是 {欄位代碼: 值}。
+    每份檔案的讀取用多行程平行處理 (CPU 密集的 openpyxl 解析)；dedup 仍照
+    rank/path 排序後的固定順序序列處理，結果跟序列版完全一樣。"""
     log = get_logger()
     files = []
     for rank, level in enumerate(levels):
@@ -90,32 +114,26 @@ def collect_rows(roots: Sequence[Path], levels: Sequence[str]):
     seen = set()
     stats = {lv: {"files": 0, "rows": 0} for lv in levels}
     stats.update(failed=0, dup_rows=0)
-    for _, level, path in files:
-        try:
-            raw = _read_rows(path)
-            header_idx, mapping = _find_header(raw)
-        except Exception as e:  # 損壞或格式不符：記 log，繼續下一份
-            log.warning("整合 Excel 讀取失敗 %s：%s", path, e)
-            stats["failed"] += 1
-            continue
-        file_rows = []
-        for values in raw[header_idx + 1:]:
-            row = {code: values[col] for col, code in mapping.items() if col < len(values)}
-            row = {k: (None if v == "" else v) for k, v in row.items()}
-            if any(v is not None for v in row.values()):
-                row["level"] = level
-                row["_path"] = path          # 判斷幣別用 (國家資料夾)，不寫進 Excel
-                file_rows.append(row)
-        keys = {_invoice_key(r) for r in file_rows} - {None}
-        dup_keys = keys & seen
-        if dup_keys:
-            before = len(file_rows)
-            file_rows = [r for r in file_rows if _invoice_key(r) not in dup_keys]
-            stats["dup_rows"] += before - len(file_rows)
-        seen |= keys
-        rows += file_rows
-        stats[level]["files"] += 1
-        stats[level]["rows"] += len(file_rows)
+    if not files:
+        return rows, stats
+    workers = max((os.cpu_count() or 2) - 1, 1)
+    with ProcessPoolExecutor(max_workers=workers) as pool:
+        results = pool.map(_read_one, files, chunksize=16)
+        for (_, level, path), (file_rows, error) in zip(files, results):
+            if error is not None:  # 損壞或格式不符：記 log，繼續下一份
+                log.warning("整合 Excel 讀取失敗 %s：%s", path, error)
+                stats["failed"] += 1
+                continue
+            keys = {_invoice_key(r) for r in file_rows} - {None}
+            dup_keys = keys & seen
+            if dup_keys:
+                before = len(file_rows)
+                file_rows = [r for r in file_rows if _invoice_key(r) not in dup_keys]
+                stats["dup_rows"] += before - len(file_rows)
+            seen |= keys
+            rows += file_rows
+            stats[level]["files"] += 1
+            stats[level]["rows"] += len(file_rows)
     return rows, stats
 
 

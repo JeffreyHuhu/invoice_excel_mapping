@@ -397,6 +397,8 @@ SUPPLIER_CURRENCY: dict = {
     "ORIENTAL POWER LOGISTICS CO., LTD.": "USD",
     # 曜捷轉檔結果的名稱沒有結尾的句點 (2026-11-01 OPL_USD 查出：幣別落到未知)
     "ORIENTAL POWER LOGISTICS CO., LTD": "USD",
+    # 柬埔寨 KH01 Oriental Logistics & Distribution：幣別固定 USD (供應商規則文件已確認，2026-11-19)
+    "ORIENTAL LOGISTICS & DISTRIBUTION (CAMBODIA) CO., LTD": "USD",
 }
 
 # INVOICE NO 不是供應商自己的帳單號碼 (例如寶成的發票號、OPL 的 FILE NO) 的
@@ -481,6 +483,11 @@ def supplier_country(supplier) -> Optional[str]:
 # TWD 要在 CNY 前面，「新台幣…元」才不會被當成人民幣)
 # 費用名稱的幣別標記 "AMS FEE (USD)" (YUSEN 2025-04 SSGN0285833)
 _DESC_CURRENCY_RE = re.compile(r"\((USD|EUR|SGD|HKD|CNY|JPY|IDR|VND|THB|MYR|TWD)\)")
+# 費用名稱的幣別標記後面又接一組「幣別 數字」時，是原始匯率備註，不是金額本身的
+# 幣別：金額欄已經換算成當地幣別 (例如 TRANS_WAGON "O/F (USD) (USD 7)"，AMOUNT 是
+# 已換算的越南盾，"(USD 7)" 只是每單位的美金報價；2026-11-19 查出)
+_DESC_RATE_NOTE_RE = re.compile(
+    r"\((USD|EUR|SGD|HKD|CNY|JPY|IDR|VND|THB|MYR|TWD)\)\s*\(\1\s+[\d.,]+\)")
 
 _CURRENCY_RES = (
     ("USD", re.compile(r"\bUSD\b|US\$|^\s*\$")),
@@ -512,9 +519,11 @@ def detect_currency(amount_raw, supplier,
         for code, pattern in _CURRENCY_RES:
             if pattern.search(amount_raw):
                 return code
-    m = _DESC_CURRENCY_RE.search(str(description or ""))
-    if m:
-        return m.group(1)
+    desc = str(description or "")
+    if not _DESC_RATE_NOTE_RE.search(desc):
+        m = _DESC_CURRENCY_RE.search(desc)
+        if m:
+            return m.group(1)
     sup = clean_text(supplier)
     if sup:
         # 轉檔結果會在非英文名稱後面加英文括號備註，比對時去掉
