@@ -5201,7 +5201,11 @@ register_supplier(
 # 金額；另有裝卸、壓車、吊櫃上下、過磅等費用。發票號碼 = 批號 SỐ LÔ / SỐ INV。
 _VT_ST_COMMON = {"date": "=NGAY", "port": None, "cbm": "SO LUONG CBM",
                  "boxes": {"20": "LOAI CONT 20'", "40": "LOAI CONT 40'", "45": "LOAI CONT 45'"},
-                 "total": "=TONG", "vat_row": True, "vat_last": True, "vat_amount_last": True, "pct_col": "% TANG", "key_comma": True,
+                 # total：表頭文字有兩種版本，"TỔNG " (單字) 跟 "TỔNG CỘNG" (兩字)，
+                 # 改用片段比對 (不加 "=") 兩種都認得 (2026-11-18 抽樣「越南1113」
+                 # 發現：批號 2025.01 ~ 2026.09 幾乎全部帳單表頭都是「TỔNG CỘNG」，
+                 # 原本的 "=TONG" 要求完全相等，抓不到，整批被迫判定「未勾稽」)
+                 "total": "TONG", "vat_row": True, "vat_last": True, "vat_amount_last": True, "pct_col": "% TANG", "key_comma": True,
                  "fields": {"vessel": "SO XE", "container_no": ("SO CONTAINER", "SO XE"),
                             "port_of_loading": ("DIEM DI", "DIEM DI"), "port_of_discharge": "DIEM DEN"}}
 _VT_SONG_TRIEU = [
@@ -5744,6 +5748,10 @@ register_supplier(
 #   VAT 0%，表尾 TOTAL 列勾稽整份 (使用者：運費表核對整份合計)。拖車行：車牌照 CONG THANH
 #   慣例填船名與貨櫃號碼，港口 VIETNAM。
 # "PHI …"：代墊吊櫃費，每列一張第三方紅色發票 (RED INV. NO 當發票號碼)，未稅 + VAT = AMOUNT。
+# "PSUNG"/"PS"：寶盛 (POU SUNG) 廠的同款對帳表 (2026-11-18 抽樣 "POUSUNG EX T10.2026
+#   DOT 1/2.xls")，欄位跟 P.CHEN 幾乎一樣，只是沒有 PO NO/ART.NO/ART.NM 欄，車牌號碼跟
+#   貨櫃號碼分成兩欄 (SO XE / SO CONT)，不是合在一欄的 BIEN SO。發票號碼字軌 PSVY
+#   (寶成是 PCV/VP)。consignee 固定 POU SUNG，不是 POU CHEN。
 _VT_CT_POUCHEN = [
     (r"^P\.?\s?CHEN", {
         "header": "INVOICE #", "two_rows": False, "key": ["INVOICE #"],
@@ -5755,6 +5763,14 @@ _VT_CT_POUCHEN = [
         "ffill_date": True,
         # FCRB/L 欄寫的是 "EFL/SCSC"、"DONG NAI PORT" 這類地點，不當提單號
         "fields": {"order_no": "ORDER NO", "vessel": "BIEN SO", "container_no": "BIEN SO"}}),
+    (r"^PS(?:UNG)?$", {
+        "header": "INVOICE #", "two_rows": False, "key": ["INVOICE #"],
+        "fees": [("PHI DICH VU", None), ("PHI VAN TAI", None), ("PHI LUU CONT", None)],
+        "sum_row": r"^TOTAL", "date": "DATE OF SHIP OUT", "cbm": "=CBM", "kg": "WEIGHT",
+        "boxes": {"45": "=45'", "40": "=40'", "20": "=20'"},
+        "const": {"port_of_loading": "VIETNAM", "port_of_discharge": "VIETNAM", "consignee": "POU SUNG"},
+        "ffill_date": True,
+        "fields": {"order_no": "ORDER NO", "vessel": "SO XE", "container_no": "SO CONT"}}),
     (r"^PHI", {
         "header": "DISCRIPTION", "key": ["RED /INV. NO", "RED INV"],
         "fees": [("EXCLUDING", "@DISCRIPTION")], "vat": "=VAT", "vat_desc": "VAT",
@@ -5766,7 +5782,7 @@ _ct_pc_parse, _ct_pc_totals = _vt_make("CTY TNHHDV GN VT VA TM CONG THANH", _VT_
 
 
 def _ct_is_pouchen(book) -> bool:
-    return any(re.match(r"^P\.?\s?CHEN", _vt_norm(n)) for n, _ in book.sheets)
+    return any(re.match(r"^P\.?\s?CHEN|^PS(?:UNG)?$", _vt_norm(n)) for n, _ in book.sheets)
 
 
 def _ct_pc_invoice_list_sheets(book) -> List[Tuple[str, list]]:
@@ -5802,10 +5818,16 @@ def _ct_pc_extra_notes(book) -> List[Dict]:
     金額查核差了剛好這兩筆的合計才發現：P.CHEN 自己的 TOTAL 列已經把這兩筆
     算進去，明細卻漏了，所以 whole-file 勾稽對不起來)。
     使用者 2026-11-12 確認：這種列算在對帳單批次號 (Số BK) 底下，不併入任何
-    一張出貨發票。"""
+    一張出貨發票。
+    費用完全相同的工作副本 (例如 "P.CHEN 12-1" 跟 "P.CHEN 12-1 (2)"：發票明細
+    一樣，只有 FACT.CODE 這類不影響金額的欄位不同) 要跳過，否則同一筆調整
+    費用算兩次，whole-file 勾稽會多出整整一倍的差額 (2026-11-18 使用者回報
+    抽樣 60 份才發現)。用 _vt_sheets() 篩過的工作表名稱 (跟 _ct_pc_parse 同一套
+    判斷) 當白名單，不用另外比對整張 rows。"""
+    kept_names = {name for name, _rows, _cfg in _vt_sheets(book, _VT_CT_POUCHEN)}
     items: List[Dict] = []
     for name, rows in book.sheets:
-        if not re.match(r"^P\.?\s?CHEN", _vt_norm(name)):
+        if not re.match(r"^P\.?\s?CHEN", _vt_norm(name)) or name not in kept_names:
             continue
         head_i = next((i for i, row in enumerate(rows[:20])
                         if _vt_col(_vt_labels(rows, i, two_rows=False), "INVOICE") is not None), None)
@@ -5853,7 +5875,12 @@ def _ct_pc_totals_all(book) -> List[Dict]:
     表) 算進去——兩者是獨立費用，各自開票，只是同一份檔案。直接把 CH PC 的
     稽核結果加進來會讓 P.CHEN 原本就對得上的 whole-file 勾稽多算一筆、變成
     「不一致」(2026-11-12)：whole-file 的未稅合計要把 CH PC 的未稅合計也加
-    進去，才會等於全部明細 (P.CHEN + CH PC) 的加總。"""
+    進去，才會等於全部明細 (P.CHEN + CH PC) 的加總。
+    「^PHI」命名的代墊吊櫃費工作表 (PHI CH / PHI 01-1.2026…)，由 _VT_CT_POUCHEN
+    的 "^PHI" 設定擷取，只會各自輸出逐組 grand_total 稽核 (見 _vt_make)，沒有
+    把淨額併入這裡的 whole-file 總額，導致幾乎每份帳單都判定不一致 (2026-11-18
+    使用者回報抽樣 60 份幾乎全部(低) 才發現)：whole-file 的未稅合計也要加上
+    這些工作表的淨額。"""
     totals = _ct_pc_totals(book)
     extra_entries: List[Dict] = []
     extra_net = 0.0
@@ -5864,6 +5891,11 @@ def _ct_pc_totals_all(book) -> List[Dict]:
             continue
         extra_entries += extra.get("audit", [])
         extra_net += sum(it.get("amount") or 0 for it in extra["items"])
+        has_extra = True
+    phi_net = sum(it.get("amount") or 0 for p in _ct_pc_parse(book) for it in p["items"]
+                  if re.match(r"^PHI", _vt_norm(it.get("_vt_sheet", ""))))
+    if phi_net:
+        extra_net += phi_net
         has_extra = True
     if has_extra:
         for t in totals:
