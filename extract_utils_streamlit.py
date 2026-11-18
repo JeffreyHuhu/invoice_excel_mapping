@@ -2634,22 +2634,33 @@ def audit_invoice_totals(
             # 合計欄，例如 VN18 SAIGON_TRANSPORT]，原本這裡會直接蓋成 None，把
             # whole 早就算出來的一致/不一致結果洗掉，變成整張發票「沒有可勾稽的
             # 總額」)。只有 own/sheets 明確判定「不一致」或「一致」時才覆蓋。
-            for match_key, diff_key in (("match", "diff"), ("vat_match", "vat_diff"),
-                                         ("grand_match", "grand_diff"), ("final_match", "final_diff")):
+            for match_key, bill_key, diff_key in (
+                    ("match", "invoice_total", "diff"), ("vat_match", "vat_total", "vat_diff"),
+                    ("grand_match", "grand_total", "grand_diff"), ("final_match", "final_total", "final_diff")):
                 failing = next((c for c in ([own] if own else []) + sheets
                                if c.get(match_key) is False), None)
                 if failing:
                     result[match_key] = False
+                    result[bill_key] = failing[bill_key]
                     result[diff_key] = failing[diff_key]
                     if failing.get("blame_sheet"):
                         result["blame_sheet"] = failing["blame_sheet"]
                     continue
                 if own is not None and own.get(match_key) is None and own.get("pool_sheets"):
                     result["unaudited_sheets"] = own["pool_sheets"]
-                vals = [v for v in ([own.get(match_key)] if own else [])
-                        + [s.get(match_key) for s in sheets] if v is not None]
+                sources = ([own] if own else []) + sheets
+                vals = [v for v in (s.get(match_key) for s in sources) if v is not None]
                 if vals:
                     result[match_key] = all(vals)
+                    # result 原本的帳單金額/差額 (來自 whole) 可能是 None (whole 沒有算
+                    # 這一項，例如整份合計只設定未稅總額、沒有逐票 VAT 合計)：全部一致時
+                    # 改用 own/sheets 自己算出來的值，不要留 None 給查驗報表拿去 round()
+                    # 或加總時爆掉 (2026-11-19 使用者回報 local_quality.py write_check_sheet
+                    # 當掉才發現)
+                    for key2 in (bill_key, diff_key):
+                        vals2 = [s.get(key2) for s in sources if s.get(key2) is not None]
+                        if vals2:
+                            result[key2] = vals2[0]
             result["invoice_no"] = group_rows[0].get("invoice_no", NA)
             results.append(result)
         return results
