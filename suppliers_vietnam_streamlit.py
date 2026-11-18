@@ -5228,8 +5228,13 @@ _VT_SONG_TRIEU = [
     # 舊版 (2025 年，沒有 SO XE)，才會往下試舊版設定 (2026-11-11 抽樣 T03.2025)
     (r"XE TAI", {**_VT_ST_COMMON, "header": "SO XE", "key": ["SO INV"], "order_is_key": True,
                  "name_require": "SO XE",
+                 # "CUOC VAN CHUYEN"：有車號欄 (SO XE) 的版面，運費表頭偶爾還是舊式
+                 # 短名「CƯỚC VẬN CHUYỂN」(沒有 "CHƯA TĂNG")；跟 Chuyển kho 不同，
+                 # 這張表每一列運費金額都不一樣 (按里程計價，不是固定合約價)，
+                 # 要照常列成項目，不用排除 (2026-11-19 抽樣 T05.2025)
                  "fees": [("PHI BOC", None), ("NEO XE", None), ("PHAT SINH", None),
-                          ("CUOC VAN CHUYEN CHUA TANG", None), ("SO TIEN % TANG", "SỐ TIỀN % TĂNG {pct}%")]}),
+                          (("CUOC VAN CHUYEN CHUA TANG", "CUOC VAN CHUYEN"), None),
+                          ("SO TIEN % TANG", "SỐ TIỀN % TĂNG {pct}%")]}),
     # 舊版：沒有車號/起迄點/漲價欄，運費就是最終金額，沒有 TỔNG 欄可以勾稽
     # (2026-11-11 抽樣 T03.2025 "Hang Xe Tai")
     (r"XE TAI", {**_VT_ST_COMMON, "header": "SO INV", "key": ["SO INV"], "order_is_key": True,
