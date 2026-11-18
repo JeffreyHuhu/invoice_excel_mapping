@@ -4830,7 +4830,7 @@ _VT_ORIENTAL = [
 def detect_oriental_multimodal(text: str) -> bool:
     norm = _vt_norm(text)
     if "DEBIT NOTE" in norm:
-        return False    # 美金 DEBIT NOTE 是獨立供應商 VN14_USD，見 detect_oriental_usd()
+        return False    # 美金 DEBIT NOTE 是獨立供應商 VN21，見 detect_oriental_usd()
     # 2026-10-28 抽樣：有的對帳表只寫越南文名稱 (… ĐA PHƯƠNG THỨC PHƯƠNG ĐÔNG) 或只有發票符號 C26TOD
     return ("ORIENTAL LOGISTICS MULTIMODA" in norm or "DA PHUONG THUC PHUONG DONG" in norm
             or "VAN TAI DA PHUONG THUC" in norm or re.search(r"\d-?C\d{2}TOD\b", norm) is not None)
@@ -4887,14 +4887,24 @@ def _olm_pdf_grand(text: str):
     return _dsv_vn_dot_amount(_search(r"\(Total payment\):\s*([\d.]+)", text))
 
 
-# --- VN14_USD ORIENTAL LOGISTICS (美金 DEBIT NOTE，獨立供應商，使用者 2026-11-10 指定) ----
+# --- VN21 ORIENTAL LOGISTICS (美金 DEBIT NOTE，獨立供應商，使用者 2026-11-18 指定，
+# 原本暫稱 VN14_USD；VN14 只處理同一家的 VND 帳單，見上面 parse_oriental_pdf()) ------
 # 大多數帳單沒有匯率和越南盾，金額是 USD；但同一種版型偶爾整張是 VND (2026-11-18
 # 使用者回報 "AIR_DEBIT_NOTE-IHAE2507003A"：國內段空運代收費，費用行本身印
-# "HANDLING FEE 240,000 / SET x 1.000 0 VND 240,000")。費用行 "THC 9.000 / CBM x
-# 5.400 8 USD 52.49" (單價/單位 × 數量、稅率、幣別、含稅金額)，未稅 = 單價 × 數量，
-# VAT = 差額 (同一列)；幣別一律照抓到的 CURR 欄位 (見 _OLM_USD_ITEM_RE 的 cur)，不要
-# 寫死 USD。Description 照抄「費用名稱 + 單價/單位 x 數量」；表尾 "AMOUNT: USD 238.14"
-# (或 "AMOUNT: VND 240,000") 是含稅合計。
+# "HANDLING FEE 240,000 / SET x 1.000 0 VND 240,000")，amount 一樣照帳單數字填，
+# 不影響擷取規則。海運費用行 "THC 9.000 / CBM x 5.400 8 USD 52.49" (單價/單位 ×
+# 數量、稅率、幣別、含稅金額)，未稅 = 單價 × 數量，VAT = 差額 (同一列)。Description
+# 只填費用名稱 (例「THC」「PHÍ XẾP DỠ TẠI CẢNG (THC)」「D/O & BREAK BULK AWB」)，不寫
+# 單價/單位/數量，名稱下一行的航程說明 (例「Hành trình: TPE-SGN / Chuyến bay: CI781」)
+# 不填 (2026-11-18 VN21 答案)。表尾 "AMOUNT: USD 238.14" (或 "AMOUNT: VND 240,000")
+# 是含稅合計。
+#
+# 一份 PDF 常是好幾張各自獨立的 DEBIT NOTE (各自的 REF NO/CONSIGNEE/總額)，不是同一張
+# 發票跨頁，所以用 multi_page=True 逐頁各自擷取 (見 register_supplier())。
+#
+# 空運版欄位跟海運版不同 (FLIGHT NO/HAWB INFO/MAWB NO/DEPARTURE AIRP/ARRIVAL AIRP/
+# CHARGE WEIGHT，沒有 VESSEL/VOYAGE、HBL INFO、MBL NO、CONTAINER)，海運欄位抓不到時
+# 才補空運欄位 (2026-11-18 VN21 答案，見 parse_oriental_usd_pdf() 下半段)。
 def detect_oriental_usd(text: str) -> bool:
     norm = _vt_norm(text)
     return "DEBIT NOTE" in norm and (
@@ -4907,23 +4917,80 @@ _OLM_USD_ITEM_RE = re.compile(
     r"(?P<cur>[A-Z]{3})\s+(?P<amt>[\d.,]+)$", re.MULTILINE)
 
 
+def _oriental_usd_scan_pages(pdf_path: str) -> List[str]:
+    """掃描頁 (沒有文字層，例如 C26TOD-2741 的空運頁) 用 psm 4、400 dpi 重新 OCR：
+    預設 300 dpi 常把 REF NO 開頭的 "I" 讀成 "["、MAWB NO 的 ":" 讀成 "+"，psm 4
+    讀出來的版面順序比較正確 (2026-11-18 VN21 答案)。其餘有文字層的頁維持原文字。
+
+    psm 4 這個版面下 "HAWB INFO:" 整行偶爾讀不到 (試過 psm 3/6/11，沒有一種
+    同時讀對 REF NO 又讀到 HAWB INFO)，B/L NO. 這種情況下留 N/A；FLIGHT NO 偶爾
+    把 "CI781" 的 "I" 讀成"1" (這種情況 Vessel 會差一個字元)。這兩個已知的
+    掃描品質限制不影響必填欄位 (INVOICE NO/SUPPLIER/CONSIGNEE/AMOUNT) 或金額
+    稽核，sample4 的回歸答案照實際擷取結果填，不為了衝 100% 另外猜值。"""
+    pages = extract_pages_from_pdf(pdf_path)
+    for i in _scanned_page_indexes(pdf_path):
+        if i < len(pages):
+            pages[i] = _ocr_page_with_psm(pdf_path, i, 4) or pages[i]
+    return pages
+
+
+# "TAOYUAN, TAI" 之類的截斷國名 (DEPARTURE AIRP 欄位寬度不夠，印到這裡就斷掉)，
+# 遇到新的截斷寫法再補 (2026-11-18 VN21 答案："TAI" -> "TAIWAN")
+_OLM_USD_AIRPORT_COUNTRY_FIX = {"TAI": "TAIWAN"}
+
+
 def parse_oriental_usd_pdf(text: str) -> Dict:
     h: Dict[str, Optional[str]] = {"supplier": "ORIENTAL LOGISTICS MULTIMODAL TRANSPORT COMPANY LIMITED."}
-    h["invoice_no"] = _search(r"REF NO\.\s*:\s*(\S+)", text)
-    h["invoice_date"] = _vn_pdf_date(_search(r"ISSUE DATE\s*:\s*(\S+)", text))
+    ref = _search(r"REF NO\.\s*:\s*(\S+)", text)
+    if ref and ref.startswith("["):
+        ref = "I" + ref[1:]   # 掃描頁 OCR 常把開頭的 "I" 讀成 "[" (2026-11-18 VN21 答案)
+    h["invoice_no"] = ref
+    h["invoice_date"] = _vn_pdf_date(_search(r"ISSUE DATE\s*[:\-]\s*(\S+)", text))
     h["consignee"] = _vn_full_consignee(_search(r"NAME & ADDRESS:[^\n]*\n(.+?)\s+ISSUE DATE", text))
     h["vessel"] = _search(r"VESSEL/VOYAGE\s*:\s*(.+?)\s+ONBOARD DATE", text)
     h["onboard_date"] = _vn_pdf_date(_search(r"ONBOARD DATE\s*:\s*(\S+)", text))
-    # 啟運港/目的港這幾個字被 pdfplumber 切成三行 ("PORT OF xxx, PORT OF" /
-    # ": : yyy" / "LOADING/ETD 國名/日期 DISCHARGE/ETA")，國名要接回啟運港後面
-    m = re.search(r"PORT OF\s+(.+?),\s*PORT OF\s*:\s*:\s*(.+?)\s*LOADING/ETD\s+(.+?)/\d{1,2}/\d{1,2}/\d{4}",
-                  text, re.DOTALL)
+    # 海運：啟運港/目的港這幾個字被 pdfplumber 切成雙欄三行表格——
+    #   第 1 行 "PORT OF <p1>, PORT OF"、第 2 行 ": <p2> : <目的港>"、
+    #   第 3 行 "LOADING/ETD <p3> DISCHARGE/ETA"
+    # 啟運港的文字可能分散在 p1/p2/p3 任何一個位置 (p1 常是空的或帶國名逗點，
+    # p2 常是港口名，p3 常是國名)，p2/p3 可能黏著 ETD 日期要去掉；目的港固定在
+    # 第 2 行冒號後面 (2026-11-18 VN21 答案)
+    m = re.search(r"PORT OF\s*(.*?)\s*PORT OF\s*\n\s*:\s*(.*?)\s*:\s*(.*?)\s*\n"
+                  r"LOADING/ETD\s*(.*?)\s*DISCHARGE/ETA", text)
     if m:
-        h["port_of_loading"] = f"{m.group(1).strip()}, {m.group(3).strip()}"
-        h["port_of_discharge"] = m.group(2).strip()
+        p1, p2, pod, p3 = (g.strip() for g in m.groups())
+        p2 = re.sub(r"/\d{1,2}/\d{1,2}/\d{4}$", "", p2).strip()
+        p3 = re.sub(r"/\d{1,2}/\d{1,2}/\d{4}$", "", p3).strip()
+        pol = " ".join(x for x in (p1, p2, p3) if x)
+        if pol:
+            h["port_of_loading"] = pol
+        if pod:
+            h["port_of_discharge"] = pod
     h["mbl_no"] = _search(r"MBL NO\s*:\s*(?!DESTINATION)(\S+)", text)   # MBL 空白時後面是 DESTINATION
     h["bl_no"] = _search(r"HBL INFO:\s*(\S+)", text)
     h["container_no"] = _search(r"CONTAINER:\s*([A-Z]{4}\d{7})", text)
+    # 空運版沒有上面那些海運欄位，改用 FLIGHT NO/HAWB INFO/MAWB NO/DEPARTURE AIRP/
+    # DESTINATION/CHARGE WEIGHT (ARRIVAL AIRP 掃描常截斷，改用讀得乾淨的 DESTINATION)
+    if not h["vessel"]:
+        flight = _search(r"FLIGHT NO\s*:\s*(\S+)", text)
+        h["vessel"] = f"{flight} (Flight)" if flight else None
+    if not h["onboard_date"]:
+        h["onboard_date"] = _vn_pdf_date(_search(r"FLIGHT DATE\s*:\s*(\S+)", text))
+    if not h["bl_no"]:
+        h["bl_no"] = _search(r"HAWB INFO:\s*\W*(\S+)", text)
+    if not h["mbl_no"]:
+        h["mbl_no"] = _search(r"MAWB NO\s*[:+]\s*(\S+)", text)
+    if not h.get("port_of_loading"):
+        dep = _search(r"DEPARTURE AIRP\s*:\s*(.+?)\s+ARRIVAL AIRP", text)
+        if dep:
+            dep = dep.strip()
+            m2 = re.search(r",\s*(\S+)$", dep)
+            fix = _OLM_USD_AIRPORT_COUNTRY_FIX.get(m2.group(1)) if m2 else None
+            if fix:
+                dep = dep[:m2.start(1)] + fix
+            h["port_of_loading"] = dep
+    if not h.get("port_of_discharge"):
+        h["port_of_discharge"] = _search(r"DESTINATION\s*:\s*(\S+(?:\s+\S+)*?)\s*$", text)
     items: List[Dict] = []
     units = set()
     for m in _OLM_USD_ITEM_RE.finditer(text):
@@ -4931,13 +4998,17 @@ def parse_oriental_usd_pdf(text: str) -> Dict:
         net = round(_olm_num(price) * _olm_num(qty), 2)
         amt = _olm_num(m.group("amt"))
         units.add(m.group("unit").upper())
-        items.append({"description": f"{m.group('desc').strip()} ({m.group('cur')} {price} / {m.group('unit')} x {qty})",
+        items.append({"description": m.group("desc").strip(),
                       "amount": net, "vat": round(amt - net, 2) or None})
     # 材積：按 CBM 計價的是散貨 (CBM)，按櫃計價的是整櫃 (櫃型)
     cbm = _search(r"HBL INFO:.*?([\d.]+)\s*CBM", text)
     cbm = f"{float(cbm):g}" if cbm else None
     boxes = re.findall(r"/(\d{2}'[A-Z]{2})\s", text) if "CBM" not in units else []
     h["volume"] = _fmt_volume(containers=[(1, b) for b in boxes], cbm=cbm)
+    if not h["volume"]:
+        # 空運版用 CHARGE WEIGHT (重量跟標籤因 OCR 版面順序顛倒，數字印在標籤前面)
+        kg = _search(r"([\d.]+)-?K\s+CHARGE WEIGHT", text)
+        h["volume"] = f"{float(kg):g} KG" if kg else None
     return {"header": h, "items": items or [{"description": None, "amount": None, "vat": None}]}
 
 
@@ -4954,6 +5025,7 @@ register_supplier(
     # parse_oriental_usd_pdf()，把不同發票的費用行全部加在一起，金額勾稽
     # 當然對不上 (2026-11-18 使用者回報 "PHUONG DONG" 月結單辨識等級(低))。
     multi_page=True,
+    page_text=_oriental_usd_scan_pages,
 )
 
 
@@ -5726,7 +5798,7 @@ def _vn_pdf_date(text: Optional[str]) -> Optional[str]:
     m = re.match(r"(\d{1,2})/(\d{1,2})/(\d{4})", text or "")
     if m:
         return _format_date_en(*m.groups())
-    # ISO 格式 "YYYY-MM-DD" (VN14_USD ORIENTAL_USD 掃描頁 "ISSUE DATE : 2025-01-02"，
+    # ISO 格式 "YYYY-MM-DD" (VN21 ORIENTAL_USD 掃描頁 "ISSUE DATE : 2025-01-02"，
     # 2026-11-18 答案；其餘供應商都是 DD/MM/YYYY，不影響既有行為)
     m = re.match(r"(\d{4})-(\d{1,2})-(\d{1,2})$", text or "")
     return _format_date_en(m.group(3), m.group(2), m.group(1)) if m else None

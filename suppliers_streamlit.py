@@ -4,7 +4,7 @@ suppliers_streamlit.py
 =======================
 供應商規則的統一入口。實際的 detect_xxx()/parse_xxx() 依國家拆在：
   - suppliers_indonesia_streamlit.py：印尼供應商 (ID01~)
-  - suppliers_vietnam_streamlit.py：越南供應商 (VN01~VN20)
+  - suppliers_vietnam_streamlit.py：越南供應商 (VN01~VN21)
   - suppliers_common_streamlit.py：跨國共用小工具
 
 日後新增國家 (柬埔寨/孟加拉/緬甸/中國) 時：
@@ -72,8 +72,9 @@ SUPPLIER_NUMBERS = {
     "BINH_TAN": ("VN06", "100012345", "HỢP TÁC XÃ VẬN TẢI DỊCH VỤ DU LỊCH BÌNH TÂN"),
     "NGUYEN_HUONG": ("VN12", "100009955", "CÔNG TY TNHH NGUYÊN HƯỞNG"),
     "ORIENTAL_MULTIMODAL": ("VN14", "100024393", "Công Ty TNHH Logistics Vận Tải Đa Phương Thức"),
-    # 美金 DEBIT NOTE，使用者 2026-11-10 指定獨立供應商代號 VN14_USD (同一家公司，廠商代號相同)
-    "ORIENTAL_USD": ("VN14_USD", "100024393", "Công Ty TNHH Logistics Vận Tải Đa Phương Thức"),
+    # 美金 DEBIT NOTE，獨立供應商 (同一家公司，廠商代號相同)：原本暫稱 VN14_USD，
+    # 使用者 2026-11-18 指定正式編號為第 21 家越南供應商 VN21
+    "ORIENTAL_USD": ("VN21", "100024393", "Công Ty TNHH Logistics Vận Tải Đa Phương Thức"),
     "SONG_TRIEU": ("VN16", "100010180", "CÔNG TY TNHH SONG TRIỀU"),
     "TIMES_CARGO": ("VN17", "100008880", "CÔNG TY TNHH DỊCH VỤ GIAO NHẬN HÀNG HÓA"),
     "SAIGON_TRANSPORT": ("VN18", "100007723", "CÔNG TY TNHH DỊCH VỤ VẬN CHUYỂN SÀI GÒN"),
