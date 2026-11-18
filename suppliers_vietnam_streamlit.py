@@ -4888,9 +4888,13 @@ def _olm_pdf_grand(text: str):
 
 
 # --- VN14_USD ORIENTAL LOGISTICS (美金 DEBIT NOTE，獨立供應商，使用者 2026-11-10 指定) ----
-# 帳單沒有匯率和越南盾，金額全部是 USD。費用行 "THC 9.000 / CBM x 5.400 8 USD 52.49"
-# (單價/單位 × 數量、稅率、幣別、含稅金額)，未稅 = 單價 × 數量，VAT = 差額 (同一列)；
-# Description 照抄「費用名稱 + 單價/單位 x 數量」；表尾 "AMOUNT: USD 238.14" 是含稅合計。
+# 大多數帳單沒有匯率和越南盾，金額是 USD；但同一種版型偶爾整張是 VND (2026-11-18
+# 使用者回報 "AIR_DEBIT_NOTE-IHAE2507003A"：國內段空運代收費，費用行本身印
+# "HANDLING FEE 240,000 / SET x 1.000 0 VND 240,000")。費用行 "THC 9.000 / CBM x
+# 5.400 8 USD 52.49" (單價/單位 × 數量、稅率、幣別、含稅金額)，未稅 = 單價 × 數量，
+# VAT = 差額 (同一列)；幣別一律照抓到的 CURR 欄位 (見 _OLM_USD_ITEM_RE 的 cur)，不要
+# 寫死 USD。Description 照抄「費用名稱 + 單價/單位 x 數量」；表尾 "AMOUNT: USD 238.14"
+# (或 "AMOUNT: VND 240,000") 是含稅合計。
 def detect_oriental_usd(text: str) -> bool:
     norm = _vt_norm(text)
     return "DEBIT NOTE" in norm and (
@@ -4927,7 +4931,7 @@ def parse_oriental_usd_pdf(text: str) -> Dict:
         net = round(_olm_num(price) * _olm_num(qty), 2)
         amt = _olm_num(m.group("amt"))
         units.add(m.group("unit").upper())
-        items.append({"description": f"{m.group('desc').strip()} (USD {price} / {m.group('unit')} x {qty})",
+        items.append({"description": f"{m.group('desc').strip()} ({m.group('cur')} {price} / {m.group('unit')} x {qty})",
                       "amount": net, "vat": round(amt - net, 2) or None})
     # 材積：按 CBM 計價的是散貨 (CBM)，按櫃計價的是整櫃 (櫃型)
     cbm = _search(r"HBL INFO:.*?([\d.]+)\s*CBM", text)
