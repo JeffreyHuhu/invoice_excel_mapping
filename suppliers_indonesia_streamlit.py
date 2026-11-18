@@ -7022,6 +7022,8 @@ def detect_handal(text: str) -> bool:
 # (TRUCKING、CUSTOM、LIFT ON / LIFT OFF、BONGKARAN BANDARA…)，下一列是各欄合計。
 # 沒有稅額與發票日期。沒有發票號碼的工作表 ("ON ADIDAS" 加收紀錄) 不擷取。
 _HANDAL_XLS_INV_RE = re.compile(r"(?:INVOICE\s*NO|NO\s*INVOICE)\s*[:=]\s*(HE[A-Z]\d{8})")
+# 品牌暱稱 -> 集團公司名稱 (使用者 2026-11-18 確認，跟同系列其他份帳單一致)
+_HANDAL_BRAND_CONSIGNEES = {"ADIDAS": "PT. GLOSTAR INDONESIA", "NIKE": "NIKOMAS GEMILANG"}
 
 
 def _handal_rekap_sheet(rows: List[list]) -> Optional[Tuple[Dict, Dict]]:
@@ -7044,6 +7046,16 @@ def _handal_rekap_sheet(rows: List[list]) -> Optional[Tuple[Dict, Dict]]:
         consignee = next((t for r in rows[:head] for t in (_vn_text(c).strip() for c in r)
                           if re.fullmatch(r"[A-Z][A-Z .&,]{5,}", t.upper()) and not t.startswith('"')
                           and not re.match(r"(TRUCKING|INVOICE|NO\s)", t.upper())), None)
+    if not consignee:
+        # 連 "NIKOMAS GEMILANG" 這種沒有 PT. 的公司名都沒寫，只有引號包住的品牌
+        # 暱稱 ("ADIDAS FACTORY"、"NIKE FACTORY")：用品牌對照表補上同系列其他份
+        # 帳單確認過的公司名 (使用者 2026-11-18 確認：ADIDAS FACTORY = PT.
+        # GLOSTAR INDONESIA，NIKE FACTORY = NIKOMAS GEMILANG)
+        brand = next((t for r in rows[:head] for t in (_vn_text(c).strip() for c in r)
+                      if re.fullmatch(r'"[A-Z ]+ FACTORY"', t.upper())), None)
+        if brand:
+            consignee = _HANDAL_BRAND_CONSIGNEES.get(
+                next((k for k in _HANDAL_BRAND_CONSIGNEES if k in brand.upper()), None))
 
     def label(k):
         sub = _vn_text(_vn_cell(rows[head + 1], k)).strip() if head + 1 < len(rows) else ""
