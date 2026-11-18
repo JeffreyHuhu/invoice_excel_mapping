@@ -2554,6 +2554,20 @@ def _vt_dm_swap(value, bill_month: Optional[Tuple[int, int]]):
     return value
 
 
+def _vt_dm_swap_vs(value, ref):
+    """日期欄日、月放反，跟同一列另一個日期欄比對出來 (不是跟帳單月份比，見
+    date_dm_swap_col；VN14 BANGKE T6-2026 答案，2026-11-19：NGÀY HD 讀成
+    2026-03-06，但同一列 DATE 欄是 2026-06-02，月份不同、NGÀY HD 的「日」(6)
+    等於 DATE 的「月」(6) 時，判定日月顛倒，對調成 2026-06-03)。"""
+    if not (isinstance(value, (datetime.date, datetime.datetime))
+            and isinstance(ref, (datetime.date, datetime.datetime))):
+        return value
+    y, m, d = value.year, value.month, value.day
+    if m != ref.month and d == ref.month and 1 <= m <= 12:
+        return datetime.date(y, d, m)
+    return value
+
+
 def _vt_loose_date(text: str, year: Optional[str]) -> Optional[str]:
     """沒有年份或年份兩位的日期：'04/08'、'14/8'、'AUG.07'、'12/08/26'、'20+21/8/2026' (取第一天)。"""
     m = re.match(r"(\d{1,2})(?:\+\d{1,2})?/(\d{1,2})(?:/(\d{2}|\d{4}))?$", text.strip())
@@ -2918,6 +2932,10 @@ def _vt_parse_sheet(name: str, rows: List[list], cfg: Dict, supplier: str,
             raw_date = _vn_cell(row, col["date"])
             if bill_month is not None:
                 raw_date = _vt_dm_swap(raw_date, bill_month)
+            if cfg.get("date_dm_swap_col") is not None:
+                ref_c = find(cfg["date_dm_swap_col"])
+                if ref_c is not None:
+                    raw_date = _vt_dm_swap_vs(raw_date, _vn_cell(row, ref_c))
             # 日期後面可能接其他字 ("26/08/2026 - 146 KGS"，VN18)
             m_date = re.match(r"(\d{1,2})/(\d{1,2})/(\d{4})", _vn_text(raw_date))
             row_date = _vn_date(raw_date) or (_format_date_en(*m_date.groups()) if m_date else None)
@@ -2977,6 +2995,13 @@ def _vt_parse_sheet(name: str, rows: List[list], cfg: Dict, supplier: str,
             # 同上，有 KG 欄就一律寫 KG (樣本答案 08-AIR：KG 0 寫 "0 KG")
             kg_val = _vn_num(_vn_cell(row, col["kg"])) or 0
             head["volume"] = f"{round(kg_val, 3):g} KG"
+        if cfg.get("volume_extra") is not None:
+            # volume_extra：材積後面加另一欄的文字括號備註 (VN14 BANGKE T2-2026 TRUCK EXP
+            # 的「TẢI TRỌNG XE」車的載重欄，答案 2026-11-19："12.43 CBM (5 TONS)")
+            extra_c = find(cfg["volume_extra"])
+            extra_val = _vn_text(_vn_cell(row, extra_c)) if extra_c is not None else None
+            if extra_val and head.get("volume"):
+                head["volume"] = f"{head['volume']} ({extra_val})"
         if cfg.get("merge_no_fee"):
             # 同一台車的續行列 (沒有費用、只有單號)：併入上一張 (有費用的那一列)，
             # 單號用 ", " 連接、材積用 " + " 連接 (樣本答案 VN06 NB，2026-11-04)
@@ -3029,10 +3054,12 @@ def _vt_parse_sheet(name: str, rows: List[list], cfg: Dict, supplier: str,
                 it["amount"] = amt
         if cfg.get("vnd_rate") and row_items:
             # vnd_rate：費用欄是原幣 (USD)，沒有分攤用的小計欄：金額 = USD × 匯率欄，VAT =
-            # 含稅總額欄 − 這一列換算後的費用加總 (VN14 格式 B BANGKE IMP，2026-11-10 答案)
+            # 含稅總額欄 − 這一列換算後的費用加總 (VN14 格式 B BANGKE IMP，2026-11-10 答案)。
+            # no_vat_row：帳單沒有稅前欄也沒有 VAT 欄時，只做幣別換算，不另外補 VAT 列
+            # (VN14 格式 B2 BANGKE T3-2026 EXP，使用者指定：VAT 填 N/A，不猜稅額)
             rc = cfg["vnd_rate"]
             rate_c = find(rc["rate"])
-            grand_c = find(rc["grand"])
+            grand_c = find(rc["grand"]) if rc.get("grand") else None
             rate_val = _vn_num(_vn_cell(row, rate_c)) if rate_c is not None else None
             grand_val = _vn_num(_vn_cell(row, grand_c)) if grand_c is not None else None
             for it in row_items:
@@ -3040,7 +3067,7 @@ def _vt_parse_sheet(name: str, rows: List[list], cfg: Dict, supplier: str,
                 base_desc = re.sub(r"\s*\(USD\)$", "", it["description"])
                 it["description"] = f"{base_desc} (USD {uv:g})"
                 it["amount"] = round(uv * rate_val) if rate_val else uv
-            if grand_val is not None:
+            if grand_val is not None and not rc.get("no_vat_row"):
                 vat_amt = grand_val - sum(it["amount"] for it in row_items)
                 row_items.append({"description": f"VAT {0 if not round(vat_amt, 2) else 8}%",
                                    "amount": None, "vat": vat_amt, **head})
@@ -4849,6 +4876,17 @@ _VT_ORIENTAL = [
                "grand": "TONG TIEN (VND)", "date": "NGAY HD",
                "boxes_adjacent": {"base": "VOL (CBM) CY QTY", "20": 0, "40": 1},
                "fields": {"bl_no": "H-B/L", "mbl_no": "M-B/L", "order_no": "BOOKING NO"}}),
+    # BANGKE T3-2026 EXP (格式 B2，2026-11-19 答案，工作表 "EXP")：三列表頭，但這次是
+    # "TOTAL" 合併格佔滿費用區段 (不是 BANGKE IMP 的 "VOL (CBM)")，每個費用欄名前面多出
+    # "TOTAL " 前綴，一樣用 fees_re 吃掉；"TOTAL USD"/"TOTAL VND" 兩欄是這一列的小計，
+    # 不是費用，用 fees_skip 排除。沒有稅前欄、沒有 VAT 欄：vnd_rate 只做 USD×匯率換算，
+    # no_vat_row 不補 VAT 列 (VAT 留 N/A，使用者指定)。沒有 CY 20'/40' 欄，Volume 只有
+    # VOL (CBM) 這個數字。
+    (r"(?!)", {"header": "H-B/L", "require": "BOOKING NO", "key": ["=SO HD", "H-B/L"], "key_strip_space": True,
+               "fees": [], "fees_re": r"^TOTAL (.+)$", "fees_skip": r"^TOTAL (USD|VND)$", "fee_cur": "USD",
+               "vnd_rate": {"rate": "EXCHAGRE RATE", "no_vat_row": True},
+               "grand": "=TONG TIEN (VND)", "date": "NGAY HD", "cbm": "VOL (CBM)",
+               "fields": {"bl_no": "H-B/L", "mbl_no": "M-B/L", "order_no": "BOOKING NO"}}),
     (r"^CN", {"header": "BILL NO", "above": True, "key": ["SO HD", "BILL NO"], "fees": _VT_OLM_CN_FEES,
               "key_strip_space": True, "ffill_date": True,   # 同一批第二張發票的 NGÀY HĐ 合併在上一列
               # Ocean Freight 那張發票 (同一個 Bill 的第 2 列) 沒有自己的 Bill No/LOT NO/
@@ -4862,13 +4900,17 @@ _VT_ORIENTAL = [
               "fields": {"bl_no": "BILL NO", "order_no": "LOT NO", "port_of_loading": "ORIGIN PORT"}}),
     (r"TRUCK", {"header": "H-B/L", "key": ["SO HD", "H-B/L", "M-B/L"], "key_strip_space": True,
                 "fees": [(x, None) for x in ("TRUCKING FEE", "BORDER GATE FEE", "CUSTOMS CLEARANCE FEE",
-                                             "TOLL FEE", "LOLO FEE", "FUEL SURCHARGE", "FCR TRUCKING")],
+                                             "TOLL FEE", "LOLO FEE", "FUEL SURCHARGE", "FCR TRUCKING",
+                                             # BANGKE T2-2026 TRUCK EXP 多了這一欄 (答案 2026-11-19)
+                                             "DDU FEE")],
                 "vnd_alloc": {"pretax": "SO TIEN TRUOC THUE", "rate": "EXCHAGRE RATE",
                               "usd_total": "$=TOTAL USD", "vat_included": True},
                 "total": "SO TIEN TRUOC THUE", "grand": "TONG TIEN (VND)",
                 "vat": "=VAT", "vat_pct_desc": True, "vat_zero_ok": True,
                 "date": "NGAY HD", "boxes": {"20": "CY QUANTITY 20", "40": "CY QUANTITY 40"}, "cbm": "CFS CBM",
                 "volume_both": True,
+                # volume_extra：「TẢI TRỌNG XE」車的載重欄沒有時 find() 回 None，不影響其他樣本
+                "volume_extra": "TAI TRONG XE",
                 "fields": {"bl_no": "H-B/L", "mbl_no": "M-B/L", "order_no": "LOT NO",
                            "port_of_loading": "ORIGIN PORT"}}),
     (r"SEA", {"header": "H-B/L", "key": ["SO HD", "H-B/L", "M-B/L"], "key_strip_space": True,
@@ -4878,7 +4920,8 @@ _VT_ORIENTAL = [
                             "usd_total": "$=TOTAL USD", "vat_included": True},
               "total": "SO TIEN TRUOC THUE", "grand": "TONG TIEN (VND)",
               "vat": "=VAT", "vat_pct_desc": True, "vat_zero_ok": True,
-              "date": "NGAY HD", "boxes": {"20": "CY QUANTITY 20", "40": "CY QUANTITY 40"}, "cbm": "CFS CBM",
+              "date": "NGAY HD", "date_dm_swap_col": "=DATE",
+              "boxes": {"20": "CY QUANTITY 20", "40": "CY QUANTITY 40"}, "cbm": "CFS CBM",
               "port": "NOTE PORT", "port_arrow": True,
               "fields": {"bl_no": "H-B/L", "mbl_no": "M-B/L", "order_no": "LOT NO",
                          "onboard_date": "=DATE"}}),
@@ -4890,8 +4933,13 @@ def detect_oriental_multimodal(text: str) -> bool:
     if "DEBIT NOTE" in norm:
         return False    # 美金 DEBIT NOTE 是獨立供應商 VN21，見 detect_oriental_usd()
     # 2026-10-28 抽樣：有的對帳表只寫越南文名稱 (… ĐA PHƯƠNG THỨC PHƯƠNG ĐÔNG) 或只有發票符號 C26TOD
+    # 2026-11-19 抽查 "BANGKE T2-2026 TRUCK EXP"：連公司名稱、越南文名稱、C26TOD 符號都沒有
+    # (只有 TRUCK 一張工作表，沒有頁首)，改用這家自己對帳表固定的拼字錯誤 "EXCHAGRE RATE"
+    # (正確應該是 EXCHANGE RATE) 當最後一道防線——這個打錯字版本在所有既有樣本 (A/B/B2/C/C2/
+    # D/D2/D3) 都出現，是這家公司自己 Excel 範本的固定錯字，不會跟其他供應商混到
     return ("ORIENTAL LOGISTICS MULTIMODA" in norm or "DA PHUONG THUC PHUONG DONG" in norm
-            or "VAN TAI DA PHUONG THUC" in norm or re.search(r"\d-?C\d{2}TOD\b", norm) is not None)
+            or "VAN TAI DA PHUONG THUC" in norm or re.search(r"\d-?C\d{2}TOD\b", norm) is not None
+            or "EXCHAGRE RATE" in norm)
 
 
 # PDF VAT INVOICE (HÓA ĐƠN GIÁ TRỊ GIA TĂNG, FAST e-invoice, Serial C26TOD，2026-11-10 答案)：
