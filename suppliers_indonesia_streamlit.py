@@ -6514,9 +6514,12 @@ register_supplier(
 #       編號+描述+單價+金額的表格列，直接用 pdfplumber 原生文字即可。
 # ============================================================
 
-_HANDAL_NUM = r'\d{1,3}(?:,\d{3})+'  # 要求至少一個千分位逗號 (>=1000)，避免把
+_HANDAL_NUM = r'\d{1,3}(?:[,.]\d{3})+'  # 要求至少一個千分位符號 (>=1000)，避免把
 # 描述文字裡本來就有的小數字 (例如 "TRUCKING LAUT 40 (PPH 23)" 裡的 40、23，
 # 或 "CUSTOM CLEARANCE (PART OFF 10)" 裡的 10) 誤判成金額
+# 千分位符號接受逗號或句點：印尼文原文用句點 (例如 "3.420.000")，但掃描檔
+# OCR 常把句點誤讀成逗號，兩種都要接受，不然那一行會整行配對錯位，金額
+# 套到下一筆費用 (使用者 2026-11-18 樣本 PCI-JUNI 2026 確認)
 # 掃描檔 OCR 會把數量 "3" 讀成 "-" ("SEGEL 25,000 - 75,000")
 _HANDAL_SEP = r'[\s.,;+\-]*'
 
@@ -6551,7 +6554,7 @@ _HANDAL_BL_LINE_RE = re.compile(r'^\s*(\d{6}[A-Z]{1,2}\s*\(\d{6}\))\s*$', re.MUL
 _HANDAL_CONSIGNEE_RE = re.compile(r'\b([A-Z][A-Z\s]{2,40}\.\s*PT)\b')
 # 總額要自己一行：掃描檔 OCR 常漏掉總額那行，舊規則會把最後一筆費用
 # ("COLLECTION FEE 701,000 701,000") 的金額當成總額 (使用者 2026-10 樣本 NIKO-MEI 2025)
-_HANDAL_TOTAL_RE = re.compile(r'^\s*(\d{1,3}(?:,\d{3})+)\s*\n+\s*#', re.MULTILINE)
+_HANDAL_TOTAL_RE = re.compile(r'^\s*(\d{1,3}(?:[,.]\d{3})+)\s*\n+\s*#', re.MULTILINE)
 # 金額大寫 "# Tiga Puluh Dua Juta ... Rupiah #"
 _HANDAL_WORDS_RE = re.compile(r'^\s*#\s*([A-Za-z ]+?)\s+Rupiah\s*#', re.MULTILINE | re.IGNORECASE)
 _INDO_DIGITS = {"satu": 1, "dua": 2, "tiga": 3, "empat": 4, "lima": 5, "enam": 6,
@@ -6589,7 +6592,7 @@ def _indo_words_to_int(words: str) -> Optional[int]:
             return None
     value = total + group + num
     return value or None
-_HANDAL_GROUPED_NUM_RE = re.compile(r'\d{1,3}(?:,\d{3})+')
+_HANDAL_GROUPED_NUM_RE = re.compile(r'\d{1,3}(?:[,.]\d{3})+')
 
 
 def _looks_like_handal_item_desc(line: str) -> bool:
@@ -6641,7 +6644,7 @@ def _looks_like_handal_item_desc(line: str) -> bool:
 def _handal_amount_to_int(s):
     if not s:
         return None
-    s = s.replace(",", "").strip()
+    s = s.replace(",", "").replace(".", "").strip()
     return int(s) if s.isdigit() else None
 
 
