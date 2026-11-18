@@ -1854,20 +1854,22 @@ def _consignee_from_filename(path: str) -> Optional[str]:
     return None
 
 
-# VN09 MOL CONSOLIDATION SERVICE 的草稿發票帳單本身沒有印日期 (Ngày/Date 留空，
-# 缺發票日期不算重大錯誤，見最高指導原則第 5 點，只會停在「中」)。使用者
-# 2026-11-18 要求：檔名內嵌月份 (月結單命名慣例，例如 "MOL LOGICTICS_APR.2025_
-# ....pdf" 的 "APR.2025")時，缺日期用該月最後一天頂替，才能往上修正到「高」。
-# 只有 MOL 用這個規則；檔名抓不到月份格式時回傳 None，不亂猜、不影響其他供應商。
-_MOL_FILENAME_MONTH_RE = re.compile(r"([A-Za-z]{3})\.(\d{4})")  # 檔名用「_」分隔，
-# 前後是 "_APR.2025_" 這種樣式，"_" 跟字母/數字一樣算 regex 的 \w，前後不會有
-# \b 邊界，不能用 \b 錨點 (2026-11-18 發現：\b 版本完全抓不到，fallback 沒生效)
+# 最高指導原則第 7 點 (2026-11-18)：帳單內完全找不到發票日期時，缺發票日期
+# 本身不算重大錯誤 (見最高指導原則第 5 點，只會停在「中」)；但檔名有嵌入月份
+# (月結單命名慣例，例如 "MOL LOGICTICS_APR.2025_....pdf" 的 "APR.2025"，或
+# "POU HUNG-DO-APR-2025.xls" 的 "-APR-2025") 時，用該月最後一天頂替，才能
+# 往上修正到「高」。所有供應商都適用 (原為 VN09 MOL 專用，2026-11-18 推廣為
+# 全供應商通用規則)。檔名抓不到月份格式時回傳 None，不亂猜。
+_FILENAME_MONTH_RE = re.compile(r"([A-Za-z]{3})[.\-_](\d{4})")  # 分隔字元可能是
+# "."、"-"、"_" ("APR.2025"/"-APR-2025"/"_APR_2025")，"-"/"_" 跟字母/數字一樣
+# 算 regex 的 \w，前後不會有 \b 邊界，不能用 \b 錨點 (2026-11-18 發現：\b 版本
+# 完全抓不到，fallback 沒生效)
 
 
-def _mol_last_day_of_month_from_filename(path: str) -> Optional[str]:
-    """檔名的 'APR.2025' -> 該月最後一天的 'DD Mon YYYY' (例如 '30 Apr 2025')。"""
+def _last_day_of_month_from_filename(path: str) -> Optional[str]:
+    """檔名的 'APR.2025'/'-APR-2025' -> 該月最後一天的 'DD Mon YYYY' (例如 '30 Apr 2025')。"""
     from suppliers_common_streamlit import _MONTH_NAME_TO_NUM, _format_date_en
-    m = _MOL_FILENAME_MONTH_RE.search(os.path.basename(path or ""))
+    m = _FILENAME_MONTH_RE.search(os.path.basename(path or ""))
     if not m:
         return None
     month = _MONTH_NAME_TO_NUM.get(m.group(1).upper())
@@ -1878,10 +1880,10 @@ def _mol_last_day_of_month_from_filename(path: str) -> Optional[str]:
     return _format_date_en(last_day, month, year)
 
 
-def _mol_fill_missing_date_from_filename(rows: List[Dict], pdf_path: str) -> None:
+def _fill_missing_date_from_filename(rows: List[Dict], pdf_path: str) -> None:
     """rows 裡缺 invoice_date 的列，補上檔名月份的最後一天 (見上方說明)；
     檔名抓不到月份、或這一列本來就有日期時，原樣保留，不覆蓋。"""
-    fallback = _mol_last_day_of_month_from_filename(pdf_path)
+    fallback = _last_day_of_month_from_filename(pdf_path)
     if not fallback:
         return
     for row in rows:
@@ -1914,13 +1916,14 @@ def parse_invoice_pdf(pdf_path: str, supplier_key: Optional[str] = None,
             for row in rows:
                 if row.get("consignee") in (None, "", NA):
                     row["consignee"] = customer
-        return key, rows or expand_to_rows({"header": {}, "items": [{}]}), text
+        rows = rows or expand_to_rows({"header": {}, "items": [{}]})
+        _fill_missing_date_from_filename(rows, pdf_path)
+        return key, rows, text
 
     # PDF 只看註冊時的 multi_page (同時有 Excel 規則的供應商，multi_page 只是比對分組用)
     if key in SUPPLIER_REGISTRY and SUPPLIER_REGISTRY[key].get("multi_page_pdf"):
         rows = _parse_multi_page_pdf(pdf_path, key, **pdfplumber_kwargs)
-        if key == "MOL":
-            _mol_fill_missing_date_from_filename(rows, pdf_path)
+        _fill_missing_date_from_filename(rows, pdf_path)
         return key, rows, text
 
     if key and key in SUPPLIER_REGISTRY:
@@ -1928,6 +1931,7 @@ def parse_invoice_pdf(pdf_path: str, supplier_key: Optional[str] = None,
     else:
         parsed = {"header": {}, "items": [{}]}
     rows = expand_to_rows(parsed)
+    _fill_missing_date_from_filename(rows, pdf_path)
     return key, rows, text
 
 

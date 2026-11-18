@@ -5379,13 +5379,18 @@ def _imx_old_items(name: str, rows: List[list]) -> Tuple[List[Dict], Optional[fl
     if rate and total_vnd is not None and items:
         items[-1]["amount"] += round(total_vnd) - sum(it["amount"] for it in items)
     if vat_amt is not None:
-        # 整張表只有一列稅金 (D/O FEE 表)：獨立一個品項，amount=None，vat 填金額
+        # 整張表只有一列稅金 (D/O FEE 表)：獨立一個品項，amount=None，vat 填金額。
+        # invoice_no 用 "{工作表名稱} VAT" (跟 _vt_make 的 vat_row 慣例一致，見
+        # validation_streamlit.py 的 _is_batch_vat_summary_row 註解)，不要填
+        # "N/A"：這一列是整張表的彙總列，沒有自己的發票號碼，但 "N/A" 會被
+        # _check_header 當成必填欄位缺值而判定 ERROR，拖累整張發票信心等級。
         vat_desc = f"V.A.T TAX ({vat_pct}%) (VAT {vat_pct}%)" if vat_pct else "V.A.T TAX"
         items.append({
             "supplier": "IMX EXPRESS SERVICE COMPANY LIMITED", "consignee": consignee,
-            "invoice_no": "N/A", "invoice_date": "N/A", "bl_no": "N/A", "shipper": "N/A",
-            "port_of_loading": "N/A", "port_of_discharge": "N/A", "volume": "N/A",
-            "description": vat_desc, "amount": None, "vat": round(vat_amt), "_vt_sheet": name,
+            "invoice_no": f"{name.strip()} VAT", "invoice_date": "N/A", "bl_no": "N/A",
+            "shipper": "N/A", "port_of_loading": "N/A", "port_of_discharge": "N/A",
+            "volume": "N/A", "description": vat_desc, "amount": None, "vat": round(vat_amt),
+            "_vt_sheet": name,
         })
     return (items, (round(total_vnd) if total_vnd is not None else None),
             (round(vat_amt) if vat_amt is not None else None))
