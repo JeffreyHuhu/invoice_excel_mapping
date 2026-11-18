@@ -2908,7 +2908,9 @@ def _vt_parse_sheet(name: str, rows: List[list], cfg: Dict, supplier: str,
                 if code.endswith("_date"):
                     # 日期前面可能接船務慣用縮寫 ("ATD 02/09/2026"，VN14 POUYUEN EXP on board date)
                     stripped = re.sub(r"^(ATD|ETD|ATA|ETA)\s+", "", _vn_text(value))
-                    head[code] = _vn_date(value) or _vn_date(stripped) or _vn_text(value)
+                    # 沒有年份 ("22/4"，VN14 BANGKE T4-2026 答案 2026-11-19)：用同一張表的年份補
+                    head[code] = (_vn_date(value) or _vn_date(stripped)
+                                  or _vt_loose_date(stripped, sheet_year) or _vn_text(value))
                 else:
                     head[code] = _vn_text(value)
             # field_suffix：欄位值後面加固定文字 (VN19 IMX 船名/航班加 " (Flight)"，答案 2026-11-05)

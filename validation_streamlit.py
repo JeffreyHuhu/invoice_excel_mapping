@@ -72,8 +72,13 @@ REQUIRED_HEADER_FIELDS = ("invoice_date", "invoice_no", "supplier", "consignee")
 # VN12 NGUYEN_HUONG 舊版 (T01-2025~T2-2026) 的整張 VAT 8% 彙總列故意把 INVOICE NO
 # 填 N/A (suppliers_vietnam_streamlit.py 的 vat_na_fields，2026-11-10 答案)：這不是
 # 一張真的發票，沒有字軌可填。每票本身 (日期當發票號碼) 不受影響，仍是 ERROR。
+# VN14 ORIENTAL_MULTIMODAL 有幾種版面 (格式 C2/D2/D3，例如 BANGKE TRUCK/SEA (2) 系列)
+# 帳單本身完全沒有 "TO:" 客戶欄，檔名也沒有集團公司名稱可以頂替：CONSIGNEE 填 N/A
+# 是使用者 2026-11-19 在 VN14_Claude_Code_修改說明.md 確認過的行為 (不是抓錯)，
+# 缺值降為 WARN。帳單上真的有 "TO:" 時仍正常擷取，不受影響。
 SUPPLIER_WARN_ONLY_HEADER_FIELDS = {"VINH_HUNG_LONG": {"invoice_no"}, "APL_VN": {"invoice_no"},
-                                     "NGUYEN_HUONG": {"invoice_no"}}
+                                     "NGUYEN_HUONG": {"invoice_no"},
+                                     "ORIENTAL_MULTIMODAL": {"consignee"}}
 
 # 個別供應商另外的必要欄位 (使用者在答案 Excel 提示列標「(必要)」的欄位)：
 # {供應商: {欄位: 缺值時的等級}}。"container_no" 只在整櫃 (材積是「數量X櫃型」) 時才必要。
