@@ -6430,13 +6430,14 @@ def _ecomet_extract_grand_total(text: str) -> Optional[int]:
 _ECOMET_SUPPLIER = "PT. TRANS ECOMET GLOBAL"
 
 
-def _ecomet_rekap_items(rows: List[list]) -> Tuple[List[Dict], List[Tuple[str, float]]]:
-    # 回傳 (費用明細, [(JOB NO, 該列 JUMLAH)])。找不到表頭時回傳空值。
+def _ecomet_rekap_items(rows: List[list]) -> Tuple[List[Dict], List[Tuple[str, float]], Dict[str, str]]:
+    # 回傳 (費用明細, [(JOB NO, 該列 JUMLAH)], {JOB NO: 原帳單問題說明})。
+    # 找不到表頭時回傳空值。
     # 客戶抬頭每個分頁各自不同 (ASICS 是 POU CHEN，NIKE/ADIDAS 是 NIKOMAS)，所以放在明細上。
     head = next((i for i, r in enumerate(rows[:20])
                  if {"TRUCKING", "JUMLAH", "CONTAINER"} <= {_vn_text(c).strip().upper() for c in r}), None)
     if head is None:
-        return [], []
+        return [], [], {}
     labels = [_vn_text(c).strip().upper() for c in rows[head]]
     start, end = labels.index("TRUCKING"), labels.index("JUMLAH")
     col = {k: labels.index(k) for k in ("CONTAINER", "NO POLISI", "JOB NO :") if k in labels}
@@ -6449,8 +6450,11 @@ def _ecomet_rekap_items(rows: List[list]) -> Tuple[List[Dict], List[Tuple[str, f
 
     items: List[Dict] = []
     jumlah: List[Tuple[str, float]] = []
+    notes: Dict[str, str] = {}                           # JOB NO -> 原帳單 JUMLAH 問題說明
+    blank_run = 0                                        # 連續整列空白的列數
     for r in rows[head + 1:]:
         if _vn_num(_vn_cell(r, 0)) is not None:          # 明細列 (NO 欄是序號)
+            blank_run = 0
             job = _vn_text(_vn_cell(r, col["JOB NO :"])).strip() if "JOB NO :" in col else ""
             if not job:
                 continue
@@ -6461,14 +6465,30 @@ def _ecomet_rekap_items(rows: List[list]) -> Tuple[List[Dict], List[Tuple[str, f
             extra = {"invoice_no": job, "invoice_date": date, "consignee": consignee,
                      "container_no": container or None, "vessel": plate or None,
                      "volume": None, "order_no": None}
+            fee_sum = 0.0
             for k in range(start, end):
                 amount = _vn_amount(_vn_cell(r, k))
                 if amount:
                     items.append({"description": label(k), "amount": amount, "vat": None, **extra})
-            jumlah.append((job, _vn_num(_vn_cell(r, end)) or 0))
-        elif not _vn_text(_vn_cell(r, 0)).strip() and _vn_num(_vn_cell(r, start)) is not None:
+                    fee_sum += amount
+            row_total = _vn_num(_vn_cell(r, end))
+            jumlah.append((job, row_total or 0))
+            # 原帳單常見問題：這一列加了費用，但 JUMLAH (該列小計) 沒跟著更新
+            # (使用者 2026-11-18 確認：原帳單問題，金額稽核仍是 ERROR，只附上原因)
+            if fee_sum and abs(fee_sum - (row_total or 0)) > 1 and job not in notes:
+                notes[job] = ("原帳單本列 JUMLAH 留空" if not row_total
+                              else "原帳單本列 JUMLAH 未把新增費用算入")
+        elif _vn_num(_vn_cell(r, start)) is not None:
             break                                        # 各欄合計列：第一段到這裡結束 (後面是舊範本)
-    return items, jumlah
+        elif all(not _vn_text(c).strip() for c in r):
+            blank_run += 1
+            if blank_run >= 2:
+                break                                    # 連續兩列整列空白，且沒有合計列：
+                                                           # 本段資料已結束 (原帳單沒填 JUMLAH)，
+                                                           # 不往下讀到舊範本殘留資料
+        else:
+            blank_run = 0
+    return items, jumlah, notes
 
 
 def _ecomet_sheets(book) -> Tuple[List[Dict], List[Dict]]:
@@ -6476,22 +6496,28 @@ def _ecomet_sheets(book) -> Tuple[List[Dict], List[Dict]]:
     # 合計 = 所有分頁的該列 JUMLAH 加總。
     items_by_job: Dict[str, List[Dict]] = {}
     jumlah: Dict[str, float] = {}
+    notes: Dict[str, str] = {}
     revised = {n.upper().replace("REVISE", "").strip() for n, _ in book.sheets if "REVISE" in n.upper()}
     for name, rows in book.sheets:
         if name.upper().strip() in revised:
             continue                                     # 有 REVISE 版時以 REVISE 為準
-        got, jl = _ecomet_rekap_items(rows)
+        got, jl, nts = _ecomet_rekap_items(rows)
         for it in got:
             items_by_job.setdefault(it["invoice_no"], []).append(it)
         for job, v in jl:
             jumlah[job] = jumlah.get(job, 0) + v
+        for job, note in nts.items():
+            notes.setdefault(job, note)
     if not items_by_job:
         return [{"header": {}, "items": [{"description": None, "amount": None}]}], []
     docs, totals = [], []
     for job, items in items_by_job.items():
         header = {"invoice_no": job, "supplier": _ECOMET_SUPPLIER, "consignee": None, "invoice_date": None}
         docs.append({"header": header, "items": items})
-        totals.append({"invoice_no": job, "total": jumlah.get(job, 0), "grand_total": None, "final_total": None})
+        total_entry = {"invoice_no": job, "total": jumlah.get(job, 0), "grand_total": None, "final_total": None}
+        if job in notes:
+            total_entry["note"] = notes[job]
+        totals.append(total_entry)
     return docs, totals
 
 
