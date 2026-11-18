@@ -3053,6 +3053,13 @@ def _vt_parse_sheet(name: str, rows: List[list], cfg: Dict, supplier: str,
                 # 直接對原始越南盾金額套 divisor 就是同一個答案，誤差小很多
                 allocated = [round(raw / divisor) if it.get("_vnd_col") else round(uv / divisor * rate_val)
                              for it, uv, raw in zip(row_items, usd_vals, raw_vals)]
+            elif pretax_val is None and rate_val:
+                # 沒有未稅小計欄 (pretax_c 找不到) 時也要獨立換算，不能落到最後的「沒換算、
+                # 原封不動留美金」(2026-11-19 VN14 抽查 "BANGKE T01-2026 EXP" SEA 表
+                # 2151/2532：這張表沒有 SO TIEN TRUOC THUE 欄，也沒有 VAT 欄——本來就不算
+                # VAT，不套 divisor (÷1.08)；THC+BILL FEE × 匯率剛好對上 TONG TIEN (VND)
+                allocated = [round(raw) if it.get("_vnd_col") else round(uv * rate_val)
+                             for it, uv, raw in zip(row_items, usd_vals, raw_vals)]
             elif pretax_val is not None and usd_sum:
                 allocated, running = [], 0
                 for i, uv in enumerate(usd_vals):
@@ -4849,6 +4856,11 @@ _VT_OLM_CN_FEES = [(x, None) for x in (
     # 空運進口 (2026-10-28 抽樣 "POU HUNG 06-2026 PHƯƠNG ĐÔNG air import")
     "=AIR FREIGHT")]
 _VT_OLM_SEA_FEES = [(x, None) for x in (
+    # THC 沒有拆 VND/USD 子欄、只有一欄 (2026-11-19 抽查 "BANGKE T01-2026 EXP" SEA 表)。
+    # 少數檔案這張表的費用欄名前面會多一個 "VOL (CBM) " 前綴 (跟 BANGKE IMP 同一種三列
+    # 合併表頭問題，但這裡不是每個月都會出現)，"=" 完全比對會抓不到，兩種都接住；其他
+    # "=" 開頭的欄位 (EBS、BAF、RR、LSS、SEAL…) 如果以後也遇到這個前綴，照這個寫法補一筆
+    ("=THC", "=VOL (CBM) THC"),
     "THC VND", "THC USD", "=EBS", "EFS USD", "CFS VND", "CFS USD", "=TRUCKING", "=LOCAL CHARGE",
     "TCS CHARGE", "=AMS", "=BAF", "=EDI", "=SCANNING", "=RR", "=LSS", "OCEAN FREIGHT",
     "AIR FREIGHT", "HANDLING FEE VND", "HANDLING FEE USD", "FUMIGATION VND",
@@ -4890,22 +4902,25 @@ _VT_ORIENTAL = [
                "fees": [("=SO TIEN", "Amount")], "date": "=NGAY XUAT HOA DON",
                "fields": {"bl_no": "=SO VAN DON"}}),
     # BANGKE IMP (2026-11-10 答案，工作表 "T5-2026")：沒有未稅小計欄，用 BOOKING NO 區分。
-    # 三列表頭 ("VOL (CBM)" 合併格佔滿整列)：費用欄的名稱其實是在表頭下一列 (D/O、THC…)，
-    # 跟兩列表頭的供應商一樣用兩列合併比對時，每個費用欄名前面都會多出被合併儲存格帶
-    # 進來的 "VOL (CBM) " (兩列表頭合併的結果)，改用 fees_re 吃掉這個固定前綴。CY QTY
-    # 20'/40' 兩欄因為同一個理由沒有子標題可分，兩欄名稱相同 ("VOL (CBM) CY QTY")，
-    # 用第一個/最後一個符合取代。
-    # require 同時收 "LOT NO"：少數帳單這個版面沒有 BOOKING NO、只有 LOT NO. 欄
-    # (2026-11-19 VN14 抽查 "BANGKE T01-2026 IMP" 工作表 "IMP"：require 只認
-    # BOOKING NO 時這張表配不到這個設定，退而掉到 SEA/TRUCK 的裸費用名稱清單，
-    # "VOL (CBM) " 前綴沒被吃掉，exact match 的費用 (=EBS、CFS VND/USD…) 全部
-    # 比對失敗、整張發票只抓到 1、2 個費用，勾稽當然對不上)
-    (r"(?!)", {"header": "H-B/L", "require": ["BOOKING NO", "LOT NO"], "key": ["=SO HD"], "key_strip_space": True,
+    # 三列表頭 (合併格佔滿整列，merge 的文字看版本是 "VOL (CBM)" 或 "CY QTY")：費用欄的
+    # 名稱其實是在表頭下一列 (D/O、THC…)，跟兩列表頭的供應商一樣用兩列合併比對時，每個
+    # 費用欄名前面都會多出被合併儲存格帶進來的前綴 (兩列表頭合併的結果)，改用 fees_re
+    # 吃掉這個固定前綴 (兩種前綴都要接住，2026-11-19 VN14 抽查 "BANGKE T02-2026 IMP"：
+    # 這份合併的是 "CY QTY" 不是 "VOL (CBM)")。CY QTY 20'/40' 兩欄因為同一個理由沒有子
+    # 標題可分，兩欄名稱相同 ("VOL (CBM) CY QTY" 或 "CY QTY")，用第一個/最後一個符合取代。
+    # require 改成 "CY QTY" (兩種前綴變體都含這個字串)：少數帳單這個版面連 BOOKING NO、
+    # LOT NO 都沒有 (2026-11-19 VN14 抽查 "BANGKE 04-2026 IMP"/"BANGKE T02-2026 IMP"：
+    # 原 require 只認 BOOKING NO/LOT NO 時這張表配不到，退而掉到 SEA/TRUCK 的裸費用名稱
+    # 清單，前綴沒被吃掉，exact match 的費用全部比對失敗，整張發票只抓到 1、2 個費用，
+    # 勾稽當然對不上)。不能完全不設 require："BK 122025 IMP-EXP" 的 "EXP"/"EXP-TRUCK"
+    # 工作表欄名不含 "CY QTY"，完全移除 require 會搶走那張表、CONSIGNEE 反而抓不到
+    # (2026-11-19 發現的回歸)；"CY QTY" 只在這個版面才會出現，比單純 fees_re 命中更窄。
+    (r"(?!)", {"header": "H-B/L", "require": "CY QTY", "key": ["=SO HD"], "key_strip_space": True,
                "carry_fields": ("bl_no",), "carry_volume": True,
-               "fees": [], "fees_re": r"^VOL \(CBM\) (?!CY QTY)(.+)$", "fees_skip": r"CHECK",
+               "fees": [], "fees_re": r"^(?:VOL \(CBM\)|CY QTY) (?!CY QTY)(.+)$", "fees_skip": r"CHECK",
                "vnd_rate": {"rate": "EXCHAGRE RATE", "grand": "TONG TIEN (VND)"},
                "grand": "TONG TIEN (VND)", "date": "NGAY HD",
-               "boxes_adjacent": {"base": "VOL (CBM) CY QTY", "20": 0, "40": 1},
+               "boxes_adjacent": {"base": ("VOL (CBM) CY QTY", "=CY QTY"), "20": 0, "40": 1},
                "fields": {"bl_no": "H-B/L", "mbl_no": "M-B/L", "order_no": "BOOKING NO"}}),
     # BANGKE T3-2026 EXP (格式 B2，2026-11-19 答案，工作表 "EXP")：三列表頭，但這次是
     # "TOTAL" 合併格佔滿費用區段 (不是 BANGKE IMP 的 "VOL (CBM)")，每個費用欄名前面多出
