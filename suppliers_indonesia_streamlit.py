@@ -7730,8 +7730,12 @@ def _opl_pages(pdf_path: str) -> List[str]:
             # "SE25011500013"、"JKTHCSE2501061E"、"OLCXML2501085C01") 這兩種都救不回來，改用
             # psm 3 (全自動版面分析，不假設單欄) 才讀得出來，分別要搭配 500/600/700 dpi
             # ("OLJKT2502015" 的合計行整個被漏讀，600 dpi psm 3 才讀得到)
+            # psm 6 + 黑白二值化在 500/700 dpi 對平總額 ("OLCXMF25090013"、"SPOE2501058"、
+            # "SHKJKT25090059A-F"、"HKGJKT25090200A"、"JKTHCSE2503011A")，預設 600 dpi 或
+            # 彩階 (bw=False) 讀不到這個組合
             for retry in ({"dpi": 500, "bw": True}, {"psm": 6}, {"psm": 3}, {"dpi": 500, "psm": 3},
-                          {"dpi": 700, "psm": 3, "bw": True}, {"dpi": 700, "psm": 4}):
+                          {"dpi": 700, "psm": 3, "bw": True}, {"dpi": 700, "psm": 4},
+                          {"dpi": 500, "psm": 6, "bw": True}, {"dpi": 700, "psm": 6, "bw": True}):
                 if score == 2:
                     break
                 alt = _opl_scan_ocr(pdf_path, page_index, **retry)
