@@ -7562,7 +7562,7 @@ def _opl_dn_total(text: str) -> Optional[float]:
     # 千分位逗號後面偶爾多讀出一個空白 ("US$ = -3, 982.68"，"SHKJKT25040021A-K"；
     # "US$ 5, 558. 00"，"SHKJKT25100703A-N")
     found = re.findall(r"(?m)^[^A-Za-z\n]{0,8}?(?:[a-z]{1,2}\s+){0,2}(?:TOTAL\s*:\s*)?US\$\s*[=:.\s\-—~]*?\s*"
-                       r"(\d(?:\s*[,.]\s*\d+)*)\s*(?:NT\$\s*[\d,.]+)?\s*$",
+                       r"(\d+(?:\s*[,.]\s*\d+)*)\s*(?:NT\$\s*[\d,.]+)?\s*$",
                        text)
     if not found:
         # 合計行被其他文字黐成一行 ("--BBAANNKK DDEETTAAIILLSS:: US$ 987.60"，"OLJKT2507006"：
@@ -7572,7 +7572,7 @@ def _opl_dn_total(text: str) -> Optional[float]:
         # 要排除明細列常見的單位字樣，不然會把某一筆費用誤判成總額)
         for line in reversed(text.splitlines()):
             if line.count("US$") == 1 and not re.search(r"\b(?:SET|KGS|CBM|USD|HKD|CIN)\b", line.upper()):
-                m = re.search(r"US\$\s*[=:.\s\-—~]*?\s*(\d(?:\s*[,.]\s*\d+)*)\s*$", line)
+                m = re.search(r"US\$\s*[=:.\s\-—~]*?\s*(\d+(?:\s*[,.]\s*\d+)*)\s*$", line)
                 if m:
                     found = [m.group(1)]
                     break
