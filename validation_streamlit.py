@@ -499,17 +499,37 @@ def validate_extraction(
     rows 可能包含好幾張發票 (multi_page 供應商或 LLM 擷取)，依 invoice_no
     分組各自驗證。extra_issues 會附加到每張發票上 (例如「本次為 LLM 擷取」)。
     """
+    groups = _group_rows_by_invoice(rows, supplier_key) if rows else {"": [{}]}
     audit_by_invoice = {}
     for ar in audit_results or []:
-        # 跟 _group_rows_by_invoice() 用同一套正規化+分組規則，才能把稽核結果
-        # 對回發票 (VN09 MOL 的草稿發票要多帶 Order No.，見 _build_result()
-        # 多回傳的 "order_no" 欄位)
+        # 優先用 audit_invoice_totals() 回傳的 "_group_key" (已經是重開號後的
+        # 真正分組 key，見該處說明)；沒有的稽核路徑 (例如 Excel sheet_totals)
+        # 才退回用 invoice_no+order_no 重算 (VN09 MOL 的草稿發票要多帶 Order
+        # No.，見 _build_result() 多回傳的 "order_no" 欄位)。
+        group_key = ar.get("_group_key")
+        if group_key and group_key in groups:
+            audit_by_invoice[group_key] = ar
+            continue
         key = normalize_value(ar.get("invoice_no"))
         if supplier_key == "MOL" and _mol_is_draft_series(key):
             order = normalize_value(ar.get("order_no"))
             if order not in ("N/A", "", None):
                 key = f"{key}#{order}"
-        audit_by_invoice[key] = ar
+        target = key
+        if target in audit_by_invoice:
+            # VN09 MOL 重開號分組 (同一個 Order No. 其實是兩張各自獨立的草稿
+            # 發票，見 _group_rows_by_invoice())：稽核結果本身不知道 "-2"、"-3"
+            # 字尾，兩張各自的稽核結果 key 會一樣，直接覆蓋會讓其中一張變成
+            # NO_TOTAL_AUDIT——改成找 groups 裡「同一個 key 加上 -2/-3...」還
+            # 沒配過稽核結果的那一組 (使用者 2026-11-18 VN09 回報)。
+            n = 2
+            while f"{key}-{n}" in groups:
+                alt = f"{key}-{n}"
+                if alt not in audit_by_invoice:
+                    target = alt
+                    break
+                n += 1
+        audit_by_invoice[target] = ar
     # 整份帳單合計的勾稽 (invoice_no 為 None)
     has_whole_audit = any(ar.get("invoice_no") is None for ar in audit_results or [])
 
@@ -519,7 +539,6 @@ def validate_extraction(
                                   "無法辨識供應商，沒有對應的擷取規則"))
 
     results = []
-    groups = _group_rows_by_invoice(rows, supplier_key) if rows else {"": [{}]}
     for inv_key, group_rows in groups.items():
         issues = list(base_issues)
         issues.extend(_check_header(group_rows[0], supplier_key))

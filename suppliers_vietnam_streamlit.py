@@ -1964,7 +1964,11 @@ def detect_mol(text: str) -> bool:
 # 裡的訂艙號碼)。明細 "1 PHÍ CHỨNG TỪ (FCR fee) Bill 1.00 1,000,000 1,000,000"，名稱太長時折到
 # 上下兩行；整張一個 VAT 單獨一列。
 _MOLCS_ITEM_RE = re.compile(
-    r"^\d+\s+(?:(?P<desc>.+?)\s+)?(?P<unit>[A-Za-z]{2,6})\s+(?P<qty>[\d.,]+)\s+[\d.,]+\s+(?P<amount>[\d.,]+)$")
+    # 單位 (ĐVT) 不是永遠是英文字母：2026-11-18 VN09 抽查發現 "3 Cái 2.00 1,456,000
+    # 2,912,000" (PALLETISATION 費) 用越南文單位「Cái」(có dấu á)，原本只收 ASCII
+    # [A-Za-z] 整列比對失敗、這筆費用整個漏算，金額勾稽對不起來——改成「非空白、非
+    # 數字」就算單位，中英越文單位都收。
+    r"^\d+\s+(?:(?P<desc>.+?)\s+)?(?P<unit>[^\s\d]{1,10})\s+(?P<qty>[\d.,]+)\s+[\d.,]+\s+(?P<amount>[\d.,]+)$")
 # 訂艙號碼 (Order No.)／括號內的號碼 (B/L NO.)，例如 "VN2085282 (620112501501)"；多筆用「/」分隔
 # 時 Order No. 用「, 」連接 (使用者 2026-11-10 答案)。整行獨立，不要跟其他文字黏在一起判斷。
 # 2026-11-18 VN09 抽查發現：有些月份的括號改印「船名+航次」(例如 "VN2089104 (Tàu MAERSK
@@ -2089,6 +2093,7 @@ def _molcs_parse_page(page: str) -> List[Dict]:
 # 排列)，這份檔案目前只出現這 4 種，直接整句替換成乾淨文字；之後遇到新代碼再補進這個字典。
 _MOL_DN_CHARGE_GARBLE = {
     "OPAhWí vBậFnE đEơn hàng không": "Phí vận đơn hàng không",
+    "Phí vận đơEn hàng không": "Phí vận đơn hàng không",  # 另一種疊字殘字 (2026-11-18 JUL.2026 抽查)
     "WPAhMí ASMS": "Phí AMS",
     "OPXhRí AsoYi chiếu": "Phí soi chiếu",
     "OPThHí CXếp Dỡ": "Phí Xếp Dỡ",
@@ -2097,11 +2102,18 @@ _MOL_DN_EN_NOTE = {
     "Phí vận đơn hàng không": "Air Waybill Fee",
     "Phí AMS": "AMS Filing Fee",
     "Phí soi chiếu": "X-ray Screening Fee",
+    "Phí làm hàng": "Local Handling Fee",
     "Phí Xếp Dỡ": "Terminal Handling / Loading-Unloading Fee",
 }
 _MOL_DN_ITEM_RE = re.compile(
-    r"^(?P<desc>.+?)\s+(?P<qty>[\d.]+)\s*-\s*(?P<unit>\S+)\s+(?P<rate>[\d.]+)\s+(?P<vatpct>\d+)\s*%\s+"
-    r"(?P<cur>[A-Z]{3})\.?\s+(?P<pdfamt>[\d.]+)$", re.MULTILINE)
+    # 數字通常是小數點格式 ("0.05"、"10.00")，但 2026-11-18 JUL.2026 抽查發現本地代收費
+    # "Phí làm hàng 1 - Shipment 822,500 8 % VND 888,300" 改用千分位逗號、沒有小數點——
+    # 原本只收 "." 整列比對失敗，這筆 VND 費用整個漏算，GRAND TOTAL (VND) 對不起來；
+    # 改成「逗號、小數點都收」，轉數字前再把逗號去掉 (見 _parse_mol_air_dn())。desc 設成
+    # 選填：同一份樣本發現 "Phí xếp dỡ" 的名稱印在數字那一行的下一行 (跟其他列「名稱在前」
+    # 相反)，數字列單獨比對時抓不到 desc，要跟 _molcs_parse_page() 一樣用前後行補 (見下)。
+    r"^(?:(?P<desc>.+?)\s+)?(?P<qty>[\d,.]+)\s*-\s*(?P<unit>\S+)\s+(?P<rate>[\d,.]+)\s+(?P<vatpct>\d+)\s*%\s+"
+    r"(?P<cur>[A-Z]{3})\.?\s+(?P<pdfamt>[\d,.]+)$", re.MULTILINE)
 _MOL_DN_GROUP_RE = re.compile(
     r"^(POUYUEN VIETNAM COMPANY LIMITED|POU (?:LI|HUNG|SUNG|CHEN) VIETNAM COMPANY LIMITED)\b")
 _MOL_DN_FLIGHT_RE = re.compile(r"^(\S+)\s*/\s*(\d{1,2}-[A-Za-z]{3})\s+(\d{5,})\s+(\S+)$", re.MULTILINE)
@@ -2169,15 +2181,33 @@ def _parse_mol_air_dn(page: str) -> List[Dict]:
             h["shipper"] = sm.group(1)
 
     rows = []
-    for m in _MOL_DN_ITEM_RE.finditer(page):
-        desc = m.group("desc").strip()
-        qty, rate, pdf_amt = float(m.group("qty")), float(m.group("rate")), float(m.group("pdfamt"))
+    last = 0
+    for i, line in enumerate(lines):
+        m = _MOL_DN_ITEM_RE.match(line)
+        if not m:
+            continue
+        desc = m.group("desc")
+        if not desc:
+            # 名稱折到數字列的下一行 (例如 "Phí xếp dỡ")：跟 _molcs_parse_page() 同一套
+            # 「前後行都試，已經被上一筆品項吃掉的行不要重複借用」邏輯。
+            before = lines[i - 1].strip() if i - 1 > last and not _MOL_DN_ITEM_RE.match(lines[i - 1]) else ""
+            after = lines[i + 1].strip() if i + 1 < len(lines) and not _MOL_DN_ITEM_RE.match(lines[i + 1]) else ""
+            desc = f"{before} {after}".strip()
+        else:
+            desc = desc.strip()
+        last = i + (0 if m.group("desc") else 1)
+        qty, rate, pdf_amt = (float(m.group("qty").replace(",", "")),
+                               float(m.group("rate").replace(",", "")),
+                               float(m.group("pdfamt").replace(",", "")))
         amount = round(qty * rate, 2)
         vat = round(pdf_amt - amount, 2)
         en = _MOL_DN_EN_NOTE.get(desc)
         # 英文備註 + 幣別備註都直接寫在 description 裡 (位置不是句尾，不是 english_note() 自動
-        # 加得出來的格式，使用者 2026-11-10 答案："Phí AMS (AMS Filing Fee) (USD)")
-        full_desc = f"{desc} ({en}) (USD)" if en else f"{desc} (USD)"
+        # 加得出來的格式，使用者 2026-11-10 答案："Phí AMS (AMS Filing Fee) (USD)")；幣別跟著
+        # 這一列自己的 CURR. 欄位，不是整張發票固定 USD (本地代收費 "Phí làm hàng" 是 VND，
+        # 2026-11-18 JUL.2026 抽查)
+        cur = m.group("cur")
+        full_desc = f"{desc} ({en}) ({cur})" if en else f"{desc} ({cur})"
         rows.append({**h, "description": full_desc, "amount": amount, "vat": vat})
     return rows
 
@@ -4915,6 +4945,11 @@ def _olm_usd_pdf_grand(text: str):
 register_supplier(
     "ORIENTAL_USD", "ORIENTAL LOGISTICS (DEBIT NOTE, USD)", detect_oriental_usd, parse_oriental_usd_pdf,
     extract_grand_total=_olm_usd_pdf_grand,
+    # 一份 PDF 常是好幾張各自獨立的 DEBIT NOTE (各自的 REF NO/CONSIGNEE/總額)，
+    # 不是同一張發票跨頁。沒設 multi_page 時全部頁面文字會被接在一起餵給
+    # parse_oriental_usd_pdf()，把不同發票的費用行全部加在一起，金額勾稽
+    # 當然對不上 (2026-11-18 使用者回報 "PHUONG DONG" 月結單辨識等級(低))。
+    multi_page=True,
 )
 
 
@@ -5685,7 +5720,12 @@ def _vn_pdf_num(text: Optional[str]):
 
 def _vn_pdf_date(text: Optional[str]) -> Optional[str]:
     m = re.match(r"(\d{1,2})/(\d{1,2})/(\d{4})", text or "")
-    return _format_date_en(*m.groups()) if m else None
+    if m:
+        return _format_date_en(*m.groups())
+    # ISO 格式 "YYYY-MM-DD" (VN14_USD ORIENTAL_USD 掃描頁 "ISSUE DATE : 2025-01-02"，
+    # 2026-11-18 答案；其餘供應商都是 DD/MM/YYYY，不影響既有行為)
+    m = re.match(r"(\d{4})-(\d{1,2})-(\d{1,2})$", text or "")
+    return _format_date_en(m.group(3), m.group(2), m.group(1)) if m else None
 
 
 # --- VN07 MAERSK LOGISTICS & SERVICES VIỆT NAM ---------------------------------

@@ -2504,12 +2504,17 @@ def audit_invoice_totals(
 
     def _build_result(group_rows: List[Dict], invoice_total, grand_total, final_total,
                       grand_tolerance: float = base_tolerance, final_tolerance: float = base_tolerance,
-                      vat_total=None, net_tolerance: float = base_tolerance) -> Dict:
+                      vat_total=None, net_tolerance: float = base_tolerance,
+                      group_key: Optional[str] = None) -> Dict:
         """grand_tolerance / final_tolerance：含稅總額 / 實付金額允許的誤差
         (預設 ±1)。帳單合計的稅額若是「未稅合計 × 稅率」、明細稅額卻是逐列四捨
         五入 (例如 CONG THANH 代墊款)，Excel 供應商可透過 sheet_totals 放寬到
         「每列 0.5」。vat_total：帳單本身的 VAT 合計 (Excel 帳單的合計列)，
-        跟擷取到的 VAT 加總勾稽 (容許誤差同 final_tolerance)。"""
+        跟擷取到的 VAT 加總勾稽 (容許誤差同 final_tolerance)。group_key：這筆
+        稽核結果對應 _group_rows_by_invoice() 的哪一組 (帶重開號 "-2" 字尾)，
+        只有 multi_page_pdf 分支會傳。validate_extraction() 用它精確比對，
+        不用再靠 invoice_no+order_no 重算 (兩張重開號發票重算出來的 key 會
+        一樣，見該處說明)。"""
         extracted_sum = _sum_rows(group_rows)
         vat_sum = deduction_sum = None
         if need_vat_split:
@@ -2525,6 +2530,7 @@ def audit_invoice_totals(
         result = {
             "invoice_no": group_rows[0].get("invoice_no", NA),
             "order_no": group_rows[0].get("order_no"),  # VN09 MOL 草稿發票分組用，見 _group_rows_by_invoice()
+            "_group_key": group_key,
             "extracted_sum": extracted_sum,
             "invoice_total": invoice_total,
             "diff": extracted_sum - invoice_total if invoice_total is not None else None,
@@ -2692,8 +2698,25 @@ def audit_invoice_totals(
             if isinstance(value, dict):
                 for k, v in value.items():
                     nk = normalize_value(k)
-                    if nk in raw_invoice_no and v is not None:
-                        _merge(found, nk, v)
+                    if v is None or nk not in raw_invoice_no:
+                        continue
+                    target = nk
+                    if target in found:
+                        # VN09 MOL 的重開號分組 (同一個 Order No. 其實是兩張各自
+                        # 獨立的草稿發票，見 _group_rows_by_invoice())：擷取函式
+                        # 本身不知道重開號的 "-2"、"-3" 字尾，兩頁各自算出來的
+                        # key 會一樣；這裡改成找 raw_invoice_no 裡「同一個 key 加
+                        # 上 -2/-3...」還沒填過總額的那一組，不要把兩張金額合併
+                        # 進同一組 (使用者 2026-11-18 回報 VN09 多筆
+                        # TOTAL_NET_MISMATCH/TOTAL_GRAND_MISMATCH)。
+                        n = 2
+                        while f"{nk}-{n}" in raw_invoice_no:
+                            alt = f"{nk}-{n}"
+                            if alt not in found:
+                                target = alt
+                                break
+                            n += 1
+                    _merge(found, target, v)
                 return
             # 冒號亂跑的帳單 (例如 ECOMET) 可能把發票號碼本身切開
             # (例如 "No C:25-01-0009")，比對前先把冒號拿掉，不影響其他
@@ -2751,6 +2774,7 @@ def audit_invoice_totals(
                 group_rows, totals_found.get(inv_key), grand_totals_found.get(inv_key),
                 final_totals_found.get(inv_key),
                 grand_tolerance=tol, final_tolerance=tol, net_tolerance=tol,
+                group_key=inv_key,
             ))
     else:
         # 只用帳單頁勾稽 (附件頁的金額不算，見 invoice_text())
