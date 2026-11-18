@@ -65,8 +65,10 @@ _KH01_GRAND_TOTAL_RE = re.compile(
 # 費用列："名稱 數量 x 單位 USD 單價 USD 金額 VAT 含稅小計"，例如
 # "IMPORT CLEARANCE 1.000 x SET USD 90.000 USD 90.00 9.00 99.00"、
 # "THC FEE 3.640 x CBM USD 9.000 USD 32.76 3.28 36.04"。
+# 名稱可能帶括號/連字號，例如 "DOCUMENT (B/L) FEE"、"X-RAY"；也可能大小寫
+# 混用，例如 "EIB Fee"、"filing Fee" (2026-11-18)。
 _KH01_ITEM_RE = re.compile(
-    r"^(?P<desc>[A-Z][A-Z ]+?)\s+(?P<qty>[\d.,]+)\s*x\s*(?P<unit>\S+)\s+"
+    r"^(?P<desc>[A-Za-z][A-Za-z0-9 ()/\-]*?)\s+(?P<qty>[\d.,]+)\s*x\s*(?P<unit>\S+)\s+"
     r"USD\s+(?P<price>[\d.,]+)\s+USD\s+(?P<amount>[\d.,]+)\s+"
     r"(?P<vat>[\d.,]+)\s+(?P<total>[\d.,]+)\s*$")
 _KH01_HBL_RE = re.compile(r"HBL INFO:\s*(\S+)\s+(.+)")
