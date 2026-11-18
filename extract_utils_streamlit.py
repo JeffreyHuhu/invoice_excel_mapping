@@ -764,6 +764,8 @@ def excel_formula_issues(path: str) -> Optional[List[Dict]]:
             issues.extend(grouped.values())
             issues.extend(_rate_total_issues(ws.title, formulas, sums, grid))
             issues.extend(_row_gap_issues(ws.title, formulas, grid))
+            issues.extend(_embedded_subtotal_issues(ws.title, sums, grid))
+            issues.extend(_hardcoded_total_issues(ws.title, formulas, sums, grid))
             # 公式沒有存計算結果 (用程式產生、沒在 Excel 開過的 xlsx)：讀不到金額，
             # 使用者 2026-10-27 規定標 ERROR
             blank = [f"{col}{r}" for (r, col) in formulas
@@ -891,6 +893,79 @@ def _row_gap_issues(sheet: str, formulas: Dict[Tuple[int, str], str], grid: List
     return list(grouped.values())
 
 
+def _embedded_subtotal_issues(sheet: str, sums: list, grid: list) -> List[Dict]:
+    """合計公式的 SUM 範圍裡夾了一列小計 (這一列本身就是範圍內其他列的加總)，
+    小計被重複算進最終合計，總額變成接近兩倍 (2026-11-18 SAIGON_TRANSPORT
+    "File RAF AIR" 抽樣：F81 '=SUM(F13:F79)'，範圍內第 64 列本身是 F13:F63
+    的小計，F81 算出來的總額變成正確值的 2 倍)。回傳
+    {"kind": "embedded_subtotal", "sheet", "row", "col", "formula",
+    "subtotal_row", "subtotal_value"}。"""
+    from openpyxl.utils import column_index_from_string
+
+    issues = []
+    for f_row, col, start, end, formula in sums:
+        c = column_index_from_string(col) - 1
+        vals = {}
+        for r in range(start, end + 1):
+            v = grid[r - 1][c] if r - 1 < len(grid) and c < len(grid[r - 1]) else None
+            if isinstance(v, (int, float)) and not isinstance(v, bool):
+                vals[r] = v
+        if len(vals) < 4:
+            continue   # 列太少時，某一列剛好等於其他列加總的機率不低，不算這個檢查
+        total_all = sum(vals.values())
+        for r, v in vals.items():
+            rest = total_all - v
+            # 數量/件數欄常常是個位數小整數，剛好等於其他列加總只是巧合
+            # (2026-11-18 抽樣 RONG_A_CHAU/VINH_HUNG_LONG 誤判：小計只有 0~5)。
+            # 金額欄的小計通常是四位數以上，拉高門檻排除這種巧合
+            if rest >= 1000 and abs(v - rest) <= 1:
+                issues.append({"kind": "embedded_subtotal", "sheet": sheet, "row": f_row,
+                               "col": col, "formula": formula, "subtotal_row": r,
+                               "subtotal_value": v})
+                break
+    return issues
+
+
+def _hardcoded_total_issues(sheet: str, formulas: Dict[Tuple[int, str], str],
+                            sums: list, grid: list) -> List[Dict]:
+    """合計列裡同一列其他欄都是 SUM 公式，這一欄卻是寫死的數字，且跟同一
+    範圍的明細加總不符 (2026-11-18 SAIGON_TRANSPORT POUYUEN T03/T04 抽樣：
+    Local Charge 欄的合計是兩個月份共用的同一個舊數字，沒有跟著當月資料
+    更新)。回傳 {"kind": "hardcoded_total", "sheet", "row", "col", "value",
+    "detail_sum", "start", "end"}。"""
+    from openpyxl.utils import column_index_from_string as ci, get_column_letter as gl
+
+    issues = []
+    by_row: Dict[int, List[tuple]] = {}
+    for f_row, col, start, end, formula in sums:
+        by_row.setdefault(f_row, []).append((col, start, end))
+    for f_row, siblings in by_row.items():
+        if len(siblings) < 2:
+            continue   # 至少兩欄都用公式，才夠篤定這一列是合計列
+        sibling_cols = {ci(c) for c, _, _ in siblings}
+        cmin, cmax = min(sibling_cols), max(sibling_cols)
+        start = min(s for _, s, _ in siblings)
+        end = max(e for _, _, e in siblings)
+        for c in range(cmin, cmax + 1):
+            if c in sibling_cols:
+                continue
+            col = gl(c)
+            if (f_row, col) in formulas:
+                continue   # 這欄自己也有公式，不是我們要找的「寫死數字」
+            v = grid[f_row - 1][c - 1] if f_row - 1 < len(grid) and c - 1 < len(grid[f_row - 1]) else None
+            if not isinstance(v, (int, float)) or isinstance(v, bool):
+                continue
+            detail = sum(
+                grid[r - 1][c - 1] for r in range(start, end + 1)
+                if r - 1 < len(grid) and c - 1 < len(grid[r - 1])
+                and isinstance(grid[r - 1][c - 1], (int, float))
+                and not isinstance(grid[r - 1][c - 1], bool))
+            if abs(v - detail) > 1:
+                issues.append({"kind": "hardcoded_total", "sheet": sheet, "row": f_row, "col": col,
+                               "value": v, "detail_sum": detail, "start": start, "end": end})
+    return issues
+
+
 def format_formula_issue(issue: Dict) -> str:
     """公式問題 -> 說明文字 (給驗證異常、轉檔總表、查驗結果用)。"""
     if issue.get("kind") == "row_gap":
@@ -912,6 +987,16 @@ def format_formula_issue(issue: Dict) -> str:
                 f"用 {issue['formula']} 計算，不是加總明細稅額{fix}；合計 {issue['total']:,.2f}，"
                 f"明細加總 {issue['detail_sum']:,.2f}，差額 {issue['total'] - issue['detail_sum']:,.2f}"
                 + (f"；明細 {blank} 空白 (有淨額，沒有稅額)" if blank else ""))
+    if issue.get("kind") == "embedded_subtotal":
+        return (f"原帳單問題 (Excel 公式有誤)：[{issue['sheet'].strip()}] {issue['col']}{issue['row']} "
+                f"用 {issue['formula']} 計算，範圍裡第 {issue['subtotal_row']} 列本身是上面明細列的"
+                f"小計 ({issue['subtotal_value']:,.2f})，被這個公式重複加總進最終合計，"
+                f"導致總額不正確")
+    if issue.get("kind") == "hardcoded_total":
+        diff = issue["value"] - issue["detail_sum"]
+        return (f"原帳單問題 (Excel 公式有誤)：[{issue['sheet'].strip()}] {issue['col']}{issue['row']} "
+                f"是寫死的數字 {issue['value']:,.2f}，不是公式，跟第 {issue['start']}~{issue['end']} "
+                f"列明細加總 {issue['detail_sum']:,.2f} 不一致 (差額 {diff:,.2f})")
     cols = list(issue["missing"])
     amounts = "、".join(f"{c} 欄 {v:,.2f}" for c, v in issue["missing"].items() if v)
     return (f"原帳單問題 (Excel 公式有誤)：[{issue['sheet'].strip()}] 第 {issue['row']} 列 "
