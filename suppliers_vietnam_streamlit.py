@@ -2609,7 +2609,7 @@ def _vt_parse_sheet(name: str, rows: List[list], cfg: Dict, supplier: str,
 
     col = {k: find(v) for k, v in cfg.items()
            if k in ("total", "total_add", "total_check", "grand", "vat", "date", "cbm", "kg", "port",
-                     "group_col", "base_key")}
+                     "group_col", "base_key", "fixed_rate_fee")}
     keys = [_vt_col(labels, k) for k in cfg["key"]]
     # inv_col：整張沒有單一發票號碼 (doc_key) 時，改用這一欄當每一列的發票號碼 (VN APL
     # Inv# 欄，原文照填包含 "+" 連接符號)；這一欄不存在 (例如 POUYUEN DN 沒有 Inv# 欄) 時
@@ -3014,10 +3014,16 @@ def _vt_parse_sheet(name: str, rows: List[list], cfg: Dict, supplier: str,
                                        "volume": head.get("volume")})
             head["_grp"] = cur_grp
         # 費用名稱 "@欄位" 代表取該欄的文字 (例如 VN07 Remark 欄 "Late come charge")
+        # fixed_rate_fee：固定合約運費欄 (不管這一列是不是好幾個發票號碼合併)，
+        # 答案不另外列成一筆項目，只有裝卸/吊櫃/過磅等額外費用才各自成一筆
+        # (VN16 Chuyển kho/Cont Nhập/Xuất 沒有漲價機制的舊版，2026-11-19 樣本
+        # sample2 答案確認)；這欄仍算在帳單自己的 TỔNG CỘNG 裡，稽核時要把它
+        # 加回去，見下面 "value" 計算
         row_items = [{"description": (_vn_text(_vn_cell(row, find(desc[1:]))) or desc[1:])
                       if desc.startswith("@") else _fee_desc(desc, row, c),
                       "amount": _vn_amount(_vn_cell(row, c)), "vat": None, **head}
-                     for c, desc in fees if _vn_amount(_vn_cell(row, c))]
+                     for c, desc in fees if _vn_amount(_vn_cell(row, c))
+                     and col.get("fixed_rate_fee") != c]
         if cfg.get("vnd_alloc") and row_items:
             # vnd_alloc：費用欄是原幣 (USD)，金額改成越南盾：正常情況下把這一列的未稅
             # 小計 (pretax) 依 USD 比例分攤到每個費用、尾差放最後一列；小計欄跟目前列出的
@@ -3183,10 +3189,17 @@ def _vt_parse_sheet(name: str, rows: List[list], cfg: Dict, supplier: str,
             continue
         # 合計欄空白 (公式沒有存計算結果) 時當成沒有合計，不是 0
         t = totals.setdefault(key, [None, None])
+        # fixed_rate_fee 這欄不列進 row_items (答案規定)，但帳單的 TỔNG CỘNG／
+        # TOTAL PLV CHECK 本來就把它算進去，稽核基準要先扣掉，才能跟少了這筆
+        # 的擷取加總對得起來 (2026-11-19)
+        fixed_rate_val = (_vn_num(_vn_cell(row, col["fixed_rate_fee"])) or 0) \
+            if col.get("fixed_rate_fee") is not None else 0
         # total_add：另一個幣別的合計 (VN14 費用有 USD 也有 VND，使用者 2026-10-27 要求
         # 兩種都稽核)：USD 合計 + VND 合計 = 兩種費用的加總，任一幣別對不上都會不通過
         for i, name_ in ((0, "total"), (0, "total_add"), (1, "grand")):
             value = _vn_num(_vn_cell(row, col[name_])) if col.get(name_) is not None else None
+            if name_ == "total" and value is not None and fixed_rate_val:
+                value -= fixed_rate_val
             if name_ == "grand" and value is None and col.get("grand") is not None and row_items:
                 # 這一列有費用但「TỔNG」欄留空 (例如補差額的調整列，只填在費用欄，
                 # 沒有另外算進每列合計)：用這一列的費用加總 (含稅) 當這一列對合計的
@@ -3208,6 +3221,8 @@ def _vt_parse_sheet(name: str, rows: List[list], cfg: Dict, supplier: str,
                 # 有值但兩邊都對不上，保留 TỔNG 讓稽核照常抓出不一致 (真的異常)
                 row_sum = round(sum(it.get("amount") or 0 for it in row_items), 2)
                 check_val = _vn_num(_vn_cell(row, col["total_check"]))
+                if check_val is not None and fixed_rate_val:
+                    check_val -= fixed_rate_val
                 if check_val is not None:
                     if abs(row_sum - check_val) <= 1 or (value is not None and abs(row_sum - value) <= 1):
                         value = row_sum
@@ -5222,14 +5237,25 @@ _VT_SONG_TRIEU = [
                  "fees": [("PHI BOC", None), ("PHAT SINH", None), ("CUOC VAN CHUYEN", None)]}),
     (r"CHUYEN KHO", {**_VT_ST_COMMON, "header": "SO CONTAINER", "key": ["SO INV", "SO CONTAINER"], "order_is_key": True,
                      "total_skip_multi_key": True,
-                     "fees": [("TROUBLE", None), ("=NEO", None), ("CUOC VAN CHUYEN CHUA TANG", None),
+                     # "CUOC VAN CHUYEN"：2025.01~2026.02 帳單沒有漲價機制，表頭只寫
+                     # 「CƯỚC VẬN CHUYỂN」(沒有 "CHƯA TĂNG")，加這個片段當退路
+                     # (2026-11-19 抽樣「越南1113」發現；"CUOC VAN CHUYEN CHUA TANG"
+                     # 排前面優先比對，兩種版面都在運費欄左邊，不會誤比對到右邊的
+                     # "SAU KHI TĂNG %" 欄)。fixed_rate_fee：只限沒有漲價機制的舊版
+                     # (表頭剛好等於「CƯỚC VẬN CHUYỂN」，用 "=" 完全比對，不會跟新版
+                     # 「CƯỚC VẬN CHUYỂN CHƯA TĂNG」搞混)——這欄答案不列成項目 (樣本
+                     # 答案 sample1 新版/sample2 舊版都要通過，2026-11-19)
+                     "fixed_rate_fee": "=CUOC VAN CHUYEN",
+                     "fees": [(("CUOC VAN CHUYEN CHUA TANG", "CUOC VAN CHUYEN"), None), ("TROUBLE", None), ("=NEO", None),
                               ("SO TIEN % TANG", "SỐ TIỀN % TĂNG {pct}%")]}),
     (r"CONT (XUAT|NHAP)", {**_VT_ST_COMMON, "header": "SO CONTAINER", "key": ["=SO LO", "SO CONTAINER"], "bl_is_key": True,
                            # total_check / TOTAL PLV CHECK：帳單自己核對明細加總用的欄 (2026
                            # 年版才有，舊版 2025 樣本沒有這欄)；跟 TỔNG 常常各自缺漏、對不上，
                            # 符合任一欄就算通過 (2026-11-11 使用者確認，見 _vt_parse_sheet)
                            "total_check": "TOTAL PLV CHECK",
-                           "fees": [("CUOC VC CHUA TANG", None), ("SO TIEN % TANG", "SỐ TIỀN % TĂNG {pct}%"),
+                           # "CUOC VC"：同上，2025.01~2026.02 沒有漲價機制，表頭只寫「CƯỚC VC」
+                           "fixed_rate_fee": "=CUOC VC",
+                           "fees": [(("CUOC VC CHUA TANG", "CUOC VC"), None), ("SO TIEN % TANG", "SỐ TIỀN % TĂNG {pct}%"),
                                     ("BD NANG", None), (("PHI KHAC PHI", "PHI KHAC SO TIEN"), None),
                                     (("PHI NANG/HA NANG", "PHI NANG / HA NANG"), "PHÍ NÂNG (SHĐ {shd})"),
                                     (("PHI NANG/HA HA", "PHI NANG / HA HA"), "PHÍ HẠ (SHĐ {shd})"),
