@@ -3031,12 +3031,28 @@ def _vt_parse_sheet(name: str, rows: List[list], cfg: Dict, supplier: str,
             pretax_val = _vn_num(_vn_cell(row, pretax_c)) if pretax_c is not None else None
             rate_val = _vn_num(_vn_cell(row, rate_c)) if rate_c is not None else None
             recorded_usd = _vn_num(_vn_cell(row, usd_total_c)) if usd_total_c is not None else None
-            usd_vals = [it["amount"] for it in row_items]
+            raw_vals = [it["amount"] for it in row_items]
+            # 先整列都當 USD (不管表頭有沒有寫 VND) 直接加總，跟帳單自己的 TOTAL (USD)
+            # 對一次：對得上就照這樣用，不管表頭說法 (POUYUEN 的 FUMIGATION 欄位分
+            # USD/VND 兩個子欄，但同一個固定金額 32.4 有時填在 VND 子欄，表頭不可信，
+            # 2026-11-19 答案 POUYUEN T08-2025 EXP-DC 等多份)。對不上才回頭看表頭哪一欄
+            # 寫了 VND，把那一欄當成已經是越南盾 (CFS VND 768,705、FUEL SURCHARGE
+            # 415,520 這種欄位真的是原幣越南盾，不能照 USD 加總)
+            all_usd_sum = sum(raw_vals)
+            use_label_vnd = not (recorded_usd is not None and abs(recorded_usd - all_usd_sum) <= 0.5)
+            label_vnd = [bool(re.search(r"\bVND\b", labels[c])) for c, desc in fees if _vn_amount(_vn_cell(row, c))]
+            for it, lv in zip(row_items, label_vnd):
+                it["_vnd_col"] = use_label_vnd and lv
+            usd_vals = [(v / rate_val if it.get("_vnd_col") and rate_val else v)
+                        for it, v in zip(row_items, raw_vals)]
             usd_sum = sum(usd_vals)
             divisor = 1.08 if ac.get("vat_included") else 1.0
             mismatch = recorded_usd is not None and abs(recorded_usd - usd_sum) > 0.5
             if mismatch and rate_val:
-                allocated = [round(uv / divisor * rate_val) for uv in usd_vals]
+                # VND 欄不用先 ÷ 匯率再 × 匯率繞一圈 (兩個運算互相抵消、只留下多的浮點誤差)，
+                # 直接對原始越南盾金額套 divisor 就是同一個答案，誤差小很多
+                allocated = [round(raw / divisor) if it.get("_vnd_col") else round(uv / divisor * rate_val)
+                             for it, uv, raw in zip(row_items, usd_vals, raw_vals)]
             elif pretax_val is not None and usd_sum:
                 allocated, running = [], 0
                 for i, uv in enumerate(usd_vals):
@@ -3048,11 +3064,14 @@ def _vt_parse_sheet(name: str, rows: List[list], cfg: Dict, supplier: str,
                         allocated.append(pretax_val - running)
             else:
                 allocated = usd_vals
-            for it, uv, amt in zip(row_items, usd_vals, allocated):
+            for it, uv, amt, raw in zip(row_items, usd_vals, allocated, raw_vals):
                 # 欄位表頭本身寫了幣別 (子標題 "USD") 時，前面已經自動加過裸的 "(USD)"，
                 # 這裡要換成含金額的版本，不要兩個都留 ("TRUCKING FEE (USD) (USD 442.8)")
-                base_desc = re.sub(r"\s*\(USD\)$", "", it["description"])
-                it["description"] = f"{base_desc} (USD {uv:g})"
+                base_desc = re.sub(r"\s*\((?:USD|VND)[^)]*\)$", "", it["description"])
+                if it.pop("_vnd_col", None):
+                    it["description"] = f"{base_desc} (VND {raw:g})"
+                else:
+                    it["description"] = f"{base_desc} (USD {uv:g})"
                 it["amount"] = amt
         if cfg.get("vnd_rate") and row_items:
             # vnd_rate：費用欄是原幣 (USD)，沒有分攤用的小計欄：金額 = USD × 匯率欄，VAT =
@@ -4860,18 +4879,28 @@ _VT_ORIENTAL = [
     # NGÀY XUẤT HÓA ĐƠN | SỐ HÓA ĐƠN | SỐ TIỀN；沒有 VAT 欄 (最高指導原則 VAT 分類第 3
     # 種：完全沒有稅金)。客戶名稱寫在表格上方 "TO: <公司>"，不是欄位，_vt_make() 的
     # sheet_parse() 會用 _vt_consignee() 逐張工作表補 (同一個活頁簿三張表常開給三個
-    # 不同客戶，不能整本只套一個客戶名稱)。合計列公式偶爾壞掉 ("#REF!")，算不出
-    # grand_total 時這張表就是 NO_TOTAL_AUDIT，不是程式問題。
+    # 不同客戶，不能整本只套一個客戶名稱)。
+    # 不設 sum_row：這張表一本活頁簿是好幾張各自獨立的發票，只有一個整份合計
+    # (沒有每張發票自己的總額可以核對)。audit_invoice_totals() 的 sum_row 機制是
+    # 「整份合計套用到每一張發票」(VN05/VN18 那種一份檔案等於一張發票才適用)，
+    # 這裡套用會把好幾張發票的加總跟單張發票的金額比，比出離譜的假差額
+    # (2026-11-19 答案：ORIENTAL 062025~122025 全部誤判成「未稅不一致」)。
+    # 沒有 sum_row 時每張發票正確顯示「沒有總額可勾稽」，不會誤判。
     (r"(?!)", {"header": "SO VAN DON", "two_rows": False, "require": "=SO TIEN", "key": ["=SO HOA DON"],
                "fees": [("=SO TIEN", "Amount")], "date": "=NGAY XUAT HOA DON",
-               "sum_row": r"^TONG\s+SO\s+TIEN", "fields": {"bl_no": "=SO VAN DON"}}),
+               "fields": {"bl_no": "=SO VAN DON"}}),
     # BANGKE IMP (2026-11-10 答案，工作表 "T5-2026")：沒有未稅小計欄，用 BOOKING NO 區分。
     # 三列表頭 ("VOL (CBM)" 合併格佔滿整列)：費用欄的名稱其實是在表頭下一列 (D/O、THC…)，
     # 跟兩列表頭的供應商一樣用兩列合併比對時，每個費用欄名前面都會多出被合併儲存格帶
     # 進來的 "VOL (CBM) " (兩列表頭合併的結果)，改用 fees_re 吃掉這個固定前綴。CY QTY
     # 20'/40' 兩欄因為同一個理由沒有子標題可分，兩欄名稱相同 ("VOL (CBM) CY QTY")，
     # 用第一個/最後一個符合取代。
-    (r"(?!)", {"header": "H-B/L", "require": "BOOKING NO", "key": ["=SO HD"], "key_strip_space": True,
+    # require 同時收 "LOT NO"：少數帳單這個版面沒有 BOOKING NO、只有 LOT NO. 欄
+    # (2026-11-19 VN14 抽查 "BANGKE T01-2026 IMP" 工作表 "IMP"：require 只認
+    # BOOKING NO 時這張表配不到這個設定，退而掉到 SEA/TRUCK 的裸費用名稱清單，
+    # "VOL (CBM) " 前綴沒被吃掉，exact match 的費用 (=EBS、CFS VND/USD…) 全部
+    # 比對失敗、整張發票只抓到 1、2 個費用，勾稽當然對不上)
+    (r"(?!)", {"header": "H-B/L", "require": ["BOOKING NO", "LOT NO"], "key": ["=SO HD"], "key_strip_space": True,
                "carry_fields": ("bl_no",), "carry_volume": True,
                "fees": [], "fees_re": r"^VOL \(CBM\) (?!CY QTY)(.+)$", "fees_skip": r"CHECK",
                "vnd_rate": {"rate": "EXCHAGRE RATE", "grand": "TONG TIEN (VND)"},
