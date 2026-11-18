@@ -2668,6 +2668,20 @@ def audit_invoice_totals(
         final_totals_found: Dict[str, float] = {}
         # 每張發票用它的總額所在頁的容許誤差 (見 register_supplier() 的 audit_tolerance_fn)
         tolerance_found: Dict[str, float] = {}
+        def _merge(found: Dict[str, float], nk: str, v: float) -> None:
+            """同一張發票的總額在不同頁各出現一次：同號碼重印的續頁 (數值相同)
+            不重複計入；數值不同代表是另一份獨立文件 (例如 DHL_VN 同一個
+            SHIPMENT 開兩張 PRO FORMA INVOICE，一份裝卸費、一份只有 Freight，
+            各自的 SUBTOTAL 要加總才等於全部明細加總)，兩者相加——跟
+            _cw_totals() 「同一個 SHIPMENT 開兩張時，總額相加」同一套邏輯，
+            只是那邊是同一次呼叫內的好幾個 doc，這裡是分開呼叫的好幾個頁面
+            (2026-11-18 使用者回報 VN13 DHL_VN 多筆 TOTAL_NET_MISMATCH，查出
+            第二張 PRO FORMA INVOICE 的 SUBTOTAL 被這裡的 setdefault 直接丟掉)。"""
+            if nk in found and found[nk] != v:
+                found[nk] += v
+            else:
+                found.setdefault(nk, v)
+
         def _assign(found: Dict[str, float], value, page_upper: str) -> None:
             """這一頁抓到的總額歸給頁面上印的那張發票 (整個字比對，避免 "4521"
             誤配 "45217")；擷取函式回傳 {發票號碼: 總額} 時逐票歸屬 (越南 KN 附件清單)。"""
@@ -2675,17 +2689,17 @@ def audit_invoice_totals(
                 for k, v in value.items():
                     nk = normalize_value(k)
                     if nk in raw_invoice_no and v is not None:
-                        found.setdefault(nk, v)
+                        _merge(found, nk, v)
                 return
             # 冒號亂跑的帳單 (例如 ECOMET) 可能把發票號碼本身切開
             # (例如 "No C:25-01-0009")，比對前先把冒號拿掉，不影響其他
             # 供應商 (發票號碼本身不會含冒號)。
             page_clean = page_upper.replace(":", "")
             for inv_key, inv_raw in raw_invoice_no.items():
-                if inv_key in found or not inv_raw:
+                if not inv_raw:
                     continue
                 if re.search(rf"(?<![A-Z0-9]){re.escape(str(inv_raw).upper())}(?![A-Z0-9])", page_clean):
-                    found[inv_key] = value
+                    _merge(found, inv_key, value)
                     break
 
         for page_text in pages:
