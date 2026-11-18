@@ -1255,6 +1255,14 @@ def _cw_invoice_no(text: str) -> Optional[str]:
     return f"S{hawb}" if hawb else None
 
 
+def _cw_srn_no(text: str) -> Optional[str]:
+    """"REFERENCE TYPE & NUMBERS" 區塊的 SRN (每張 SHIPMENT 各自獨有，不像
+    CONSOL NUMBER/MAWB 同一批合併託運會共用)。Freight-only 的續頁字少，SHIPMENT
+    號碼整段讀壞時，SRN 這一行通常還讀得到，用來補 _cw_invoice_no() (2026-11-18
+    抽查 JUN.2026 S2602635859/S2602635808 Freight 頁)。"""
+    return _search(r"SRN[:\s]{1,3}(\d{6,})", text)
+
+
 def _cw_docs(text: str, page_nums: Optional[List[int]] = None):
     """一份 PDF 有好幾張發票時切開：每頁抬頭都有 SHIPMENT 號碼，連續幾頁號碼
     相同 (或續頁讀不到號碼) 就是同一張；"Page 1 of N" 一定是新的一張 (同一個
@@ -1314,6 +1322,23 @@ def _cw_docs(text: str, page_nums: Optional[List[int]] = None):
             doc_pages.append([num])
             doc_inv.append(inv)
             current = inv
+    # SHIPMENT 號碼整頁讀壞 (None) 時，用 SRN 從同份帳單裡找得到號碼的那張借
+    # (同一個 SHIPMENT 的 Freight-only 續頁字少，常常連 SHIPMENT 都讀不到；
+    # CONSOL NUMBER/MAWB 不能借，同一批合併託運的不同 SHIPMENT 會共用同一個
+    # 號碼，借了會把金額併錯對象，2026-11-18 抽查 JUN.2026 發現)
+    srn_inv: Dict[str, str] = {}
+    for i, inv in enumerate(doc_inv):
+        if inv:
+            srn = _cw_srn_no("\n".join(docs[i]))
+            if srn and srn not in srn_inv:
+                srn_inv[srn] = inv
+    for i, inv in enumerate(doc_inv):
+        if not inv:
+            srn = _cw_srn_no("\n".join(docs[i]))
+            borrowed = srn_inv.get(srn) if srn else None
+            if borrowed:
+                docs[i][0] = f"SHIPMENT {borrowed}\n{docs[i][0]}"
+                doc_inv[i] = borrowed
     # 同一張單據掃描兩次 (號碼與 TOTAL 都相同) 只留一張 (使用者 2026-10-28：DHL 合輯第 19、20 頁
     # S2601526262)。同號碼但總額不同的是另一張發票 (YUSEN SSGN0316461)，照常保留
     out, out_pages, seen = [], [], set()
@@ -1611,20 +1636,32 @@ def _cw_parse(text: str, supplier: Optional[str]) -> Dict:
     return {"header": {}, "items": items}
 
 
-def _cw_totals(text: str, patterns, conv=_cw_vn_number, key_fn=_cw_invoice_no):
+def _cw_totals(text: str, patterns, conv=_cw_vn_number, key_fn=_cw_invoice_no,
+                require_integer: bool = False):
     """每張發票的總額 {SHIPMENT 號碼: 金額}。patterns 依序試，第一個抓得到的
     為準 (同一個 pattern 抓到好幾個就加總，例如 MOL 每個幣別一行 GRAND TOTAL)。
     key_fn：發票號碼不是 SHIPMENT 號碼時可以換一個 (VN13 DHL 的「INVOICE」頁用
-    F 號碼，2026-11-10)。"""
+    F 號碼，2026-11-10)。require_integer：只有「這組 patterns 一定是 VND」時
+    才傳 True (例如 SUBTOTAL 這一行)。VND 金額一定是整數；OCR 把數字讀壞時
+    conv() 偶爾把截斷的字串誤判成外幣小數 (例如 "2.216.828" 漏讀成帶逗號的
+    殘字，conv() 當成 2.216)，這種結果當作沒抓到，不要拿去當真的總額比對出
+    假的 ERROR (2026-11-18 抽查 JUN.2026)。預設 False：有些 patterns 同時比對
+    VND 跟外幣 (例如 "TOTAL VND|USD")，外幣本來就有小數，不能要求整數。"""
     out, missing = {}, set()
     for doc in _cw_docs(text):
         inv = key_fn(doc)
         for pattern in patterns:
             vals = re.findall(pattern, doc, re.MULTILINE)
-            if inv and vals:
-                # 同一個 SHIPMENT 開兩張時，總額相加 (明細也會併在同一組勾稽)
-                out[inv] = out.get(inv, 0) + sum(conv(v) for v in vals)
-                break
+            if not (inv and vals):
+                continue
+            nums = [conv(v) for v in vals]
+            if any(n is None for n in nums):
+                continue
+            if require_integer and any(not float(n).is_integer() for n in nums):
+                continue
+            # 同一個 SHIPMENT 開兩張時，總額相加 (明細也會併在同一組勾稽)
+            out[inv] = out.get(inv, 0) + sum(nums)
+            break
         else:
             missing.add(inv)
     # 同號碼的另一張讀不到總額 (掃描頁 OCR)：只有一半的總額，不勾稽這個號碼
@@ -1645,7 +1682,8 @@ def _cw_extract_total(text: str):
                              # "Charge Sheet" 版面 (_cw_charge_sheet_items()) 沒有 SUBTOTAL，
                              # 用 "Job Total" 這一列的第一個數字 (未稅加總，2026-11-16 抽查
                              # DHL_VN OCT.2026)
-                             r"^Job Total[ \t]+(\d{1,3}(?:\.\d{3})*(?:,\d+)?)"])
+                             r"^Job Total[ \t]+(\d{1,3}(?:\.\d{3})*(?:,\d+)?)"],
+                      require_integer=True)
 
 
 def _cw_extract_grand_total(text: str):
@@ -1882,7 +1920,7 @@ def _dhl_vn_extract_total(text: str):
                             # 沒有 SUBTOTAL，用 "Job Total" 這一列的第一個數字 (未稅加總，
                             # 2026-11-16 抽查 OCT.2026 S2604933241)
                             r"^Job Total[ \t]+(\d{1,3}(?:\.\d{3})*(?:,\d+)?)"],
-                     key_fn=_dhl_vn_doc_key)
+                     key_fn=_dhl_vn_doc_key, require_integer=True)
     for doc in _dhl_vn_vat_docs(text):
         net, _grand = _dhl_vn_vat_totals(doc)
         key = _dhl_vn_vat_key(doc)
