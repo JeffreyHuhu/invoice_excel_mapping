@@ -3334,7 +3334,17 @@ def _vt_make(supplier: str, cfgs: List[Tuple[str, Dict]]):
     def sheet_parse(book) -> List[Dict]:
         items = []
         for name, rows, cfg in _vt_sheets(book, cfgs):
-            items += _vt_parse_sheet(name, rows, cfg, supplier, _vt_year(book))[0]
+            sheet_items = _vt_parse_sheet(name, rows, cfg, supplier, _vt_year(book))[0]
+            # 客戶名稱寫在表格上方的自由文字 ("TO: <公司>")、不是欄位時，用這張工作表
+            # 自己的 rows 補 (同一本活頁簿常好幾張工作表各開給不同客戶，不能整本只套
+            # 一個客戶名稱，見 _vt_consignee()；2026-11-18 VN14 ORIENTAL 月結單答案)
+            if any(not it.get("consignee") for it in sheet_items):
+                sheet_customer = _vt_consignee(rows)
+                if sheet_customer:
+                    for it in sheet_items:
+                        if not it.get("consignee"):
+                            it["consignee"] = sheet_customer
+            items += sheet_items
         # 同一張發票在某張表才有的欄位 (例如材積只在 LCC 表)，補到其他列
         known: Dict[str, Dict] = {}
         for it in items:
@@ -4778,6 +4788,16 @@ _VT_ORIENTAL = [
     (r"(?!)", {"header": "BILL NO", "two_rows": False, "require": "=AMOUNT", "key": ["INVOICE NO"],
                "fees": [("=AMOUNT", "Amount")], "date": "INVOICE DATE",
                "sum_row": r"^TOTAL", "fields": {"bl_no": "BILL NO"}}),
+    # 每月發票清單 (越南文標題版，2026-11-18 VN14 抽查 "ORIENTAL 062025~122025" 辨識等級(低)：
+    # 跟上面同一種清單，只是表頭換成越南文 "BẢNG KÊ THÁNG" -> STT | SỐ VẬN ĐƠN |
+    # NGÀY XUẤT HÓA ĐƠN | SỐ HÓA ĐƠN | SỐ TIỀN；沒有 VAT 欄 (最高指導原則 VAT 分類第 3
+    # 種：完全沒有稅金)。客戶名稱寫在表格上方 "TO: <公司>"，不是欄位，_vt_make() 的
+    # sheet_parse() 會用 _vt_consignee() 逐張工作表補 (同一個活頁簿三張表常開給三個
+    # 不同客戶，不能整本只套一個客戶名稱)。合計列公式偶爾壞掉 ("#REF!")，算不出
+    # grand_total 時這張表就是 NO_TOTAL_AUDIT，不是程式問題。
+    (r"(?!)", {"header": "SO VAN DON", "two_rows": False, "require": "=SO TIEN", "key": ["=SO HOA DON"],
+               "fees": [("=SO TIEN", "Amount")], "date": "=NGAY XUAT HOA DON",
+               "sum_row": r"^TONG\s+SO\s+TIEN", "fields": {"bl_no": "=SO VAN DON"}}),
     # BANGKE IMP (2026-11-10 答案，工作表 "T5-2026")：沒有未稅小計欄，用 BOOKING NO 區分。
     # 三列表頭 ("VOL (CBM)" 合併格佔滿整列)：費用欄的名稱其實是在表頭下一列 (D/O、THC…)，
     # 跟兩列表頭的供應商一樣用兩列合併比對時，每個費用欄名前面都會多出被合併儲存格帶
