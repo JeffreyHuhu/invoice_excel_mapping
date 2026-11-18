@@ -5280,22 +5280,32 @@ def detect_imx(text: str) -> bool:
             or ("MA BANG KE" in norm and "AWB.NO" in norm and "D/O FEE" in norm))
 
 
-# --- VN19 IMX 舊版 (2025) AIR FREIGHT CHARGE INVOICE：單一工作表，費用只有 USD，沒有
-# VAT、沒有發票號碼 (用 AWB.No)。整張表只有 1 個 EX. RATE 與 1 個 TOTAL (VND)：每列每個
-# 費用 = ROUND(USD × EX.RATE)，四捨五入的尾差加在最後一筆費用，讓合計 = TOTAL (VND)
+# --- VN19 IMX 舊版 (2025) D/O FEE INVOICE / AIR FREIGHT CHARGE INVOICE：每列費用都是
+# USD，沒有發票號碼 (用 AWB.No)。整張表只有 1 個 EX.RATE 與 1 個 VND 總額列：每列費用 =
+# ROUND(USD × EX.RATE)，四捨五入的尾差加在最後一筆費用，讓合計 = 表尾 VND 總額
 # (答案 POU HUNG-AIR-APR-2025，2026-11-12 使用者確認)。版型跟新版 (D.O FEE/AIR FREIGHT
-# 兩張表、VND 直接列出) 完全不同，不套用 _VT_IMX 那組 DSL 設定。
-def _imx_old_sheet(book) -> Optional[List[list]]:
-    for _, rows in book.sheets:
-        if any(_vn_text(_vn_cell(row, 0)).upper() == "AIR FREIGHT CHARGE INVOICE" for row in rows[:10]):
-            return rows
-    return None
+# 兩張表、VND 直接列出、"Ký Hiệu" 發票號碼) 完全不同，不套用 _VT_IMX 那組 DSL 設定。
+# 2026-11-18 補上 D/O FEE 版型 (同樣 USD + EX.RATE，表尾多一列 V.A.T TAX)，並修正：
+#   - "EX.RATE" 常常沒有空格 (跟既有樣本 "EX. RATE" 不同)，原本的字首比對漏接。
+#   - AIR FREIGHT 表的 VND 總額列常誤標成 "TOTAL (USD)" (內容其實是 VND)。
+#   - 一本工作簿可能同時有 D.O FEE 跟 AIR FREIGHT 兩張舊版表 (例如 "POU YUEN AIR
+#     LIST" 系列)，要分開讀每張表的費用欄/EX RATE/VND 總額/VAT，再合併成同一份明細。
+_IMX_OLD_LABELS = {"AIR FREIGHT CHARGE INVOICE", "D/O FEE INVOICE"}
 
 
-def _imx_old_items(rows: List[list]) -> Tuple[List[Dict], Optional[float]]:
+def _imx_old_sheets(book) -> List[Tuple[str, List[list]]]:
+    result = []
+    for name, rows in book.sheets:
+        if any(_vn_text(_vn_cell(row, 0)).upper() in _IMX_OLD_LABELS for row in rows[:10]):
+            result.append((name, rows))
+    return result
+
+
+def _imx_old_items(name: str, rows: List[list]) -> Tuple[List[Dict], Optional[float], Optional[float]]:
+    """回傳 (這張表的明細, 這張表未稅 VND 總額, VAT 金額)。"""
     header_idx = next((i for i, row in enumerate(rows) if _vn_text(_vn_cell(row, 0)) == "No."), None)
     if header_idx is None:
-        return [], None
+        return [], None, None
     header = rows[header_idx]
 
     def col(*keywords):
@@ -5303,23 +5313,41 @@ def _imx_old_items(rows: List[list]) -> Tuple[List[Dict], Optional[float]]:
 
     c_date, c_awb, c_shipper, c_consignee = col("DATE"), col("AWB"), col("SHIPPER"), col("CONSIGNEE")
     c_weight = col("WEIGHT")
-    c_af, c_fuel, c_pu, c_handling = col("A/F", "CHARGE"), col("FUEL"), col("P/U"), col("HANDLING")
-    c_port_load = c_shipper + 1 if c_shipper is not None else None
-    c_port_disc = c_consignee + 1 if c_consignee is not None else None
+    # 費用欄：D/O FEE 表只有一欄 "D/O FEE"；AIR FREIGHT 表有 A/F/FUEL/P/U/HANDLING 四欄
+    c_do_fee = col("D/O FEE")
+    fee_cols = ([(c_do_fee, "D/O FEE")] if c_do_fee is not None else
+                [(col("A/F", "CHARGE"), "A/F CHARGE"), (col("FUEL"), "FUEL"),
+                 (col("P/U"), "P/U"), (col("HANDLING"), "HANDLING")])
+    # 起迄港 (沒有獨立表頭文字，緊接著 SHIPPER/CONSIGNEE 後面的空白欄)：下一欄不是
+    # 空白代表這個版型沒有這一欄 (例如 D/O FEE 表的 CONSIGNEE 後面直接接 PKGS)
+    c_port_load = (c_shipper + 1 if c_shipper is not None
+                   and _vn_text(_vn_cell(header, c_shipper + 1)) == "" else None)
+    c_port_disc = (c_consignee + 1 if c_consignee is not None
+                   and _vn_text(_vn_cell(header, c_consignee + 1)) == "" else None)
 
     # 舊版表頭 CONSIGNEE 是舊字型編碼 ("COÂNG TY TNHH POU HUNG VIEÄT NAM")，重音字母
     # 常normalize 不掉：直接比對明文關鍵字 "POU HUNG"/"POUYUEN" (使用者 2026-11-12 確認)
     consignee_raw = (_vt_consignee(rows) or "").upper()
     consignee = ("POU HUNG VIETNAM COMPANY LIMITED" if "POU HUNG" in consignee_raw
                  else "POUYUEN VIETNAM COMPANY LIMITED" if "POUYUEN" in consignee_raw else None)
-    rate = total_vnd = None
+    rate = total_vnd = vat_amt = vat_pct = None
+    rate_seen = False
     data_rows = []
     for row in rows[header_idx + 2:]:
         label = _vn_label(_vn_cell(row, 0))
-        if label.startswith("EX. RATE") or label.startswith("EX RATE"):
+        stripped = label.replace(" ", "")
+        if stripped.startswith("EX.RATE") or stripped.startswith("EXRATE"):
             rate = next((v for v in row if isinstance(v, (int, float))), None)
-        elif label.startswith("TOTAL (VND)"):
+            rate_seen = True
+        elif rate_seen and label.startswith("TOTAL"):
+            # VND 總額列：D/O FEE 表標 "TOTAL (VND)"，AIR FREIGHT 表常誤標
+            # "TOTAL (USD)" (內容其實是 VND)，都當 VND 總額 (只認 EX RATE 後面那列，
+            # 避免跟 EX RATE 前面的 USD 小計 "TOTAL (USD)" 混淆)
             total_vnd = next((v for v in row if isinstance(v, (int, float))), None)
+        elif label.startswith("V.A.T") or label.startswith("VAT"):
+            m = re.search(r"(\d+(?:\.\d+)?)\s*%", label)
+            vat_pct = m.group(1) if m else None
+            vat_amt = next((v for v in row if isinstance(v, (int, float))), None)
         elif isinstance(_vn_cell(row, 0), (int, float)):
             data_rows.append(row)
 
@@ -5334,8 +5362,9 @@ def _imx_old_items(rows: List[list]) -> Tuple[List[Dict], Optional[float]]:
             "port_of_loading": _vn_text(_vn_cell(row, c_port_load)) or None,
             "port_of_discharge": _vn_text(_vn_cell(row, c_port_disc)) or None,
             "volume": _fmt_volume(kg=f"{round(kg_val, 3):g}" if kg_val else None),
+            "_vt_sheet": name,
         }
-        for c, label in ((c_af, "A/F CHARGE"), (c_fuel, "FUEL"), (c_pu, "P/U"), (c_handling, "HANDLING")):
+        for c, label in fee_cols:
             usd = _vn_num(_vn_cell(row, c)) if c is not None else None
             if not usd:
                 continue
@@ -5346,32 +5375,52 @@ def _imx_old_items(rows: List[list]) -> Tuple[List[Dict], Optional[float]]:
                           "amount": round(usd * rate) if rate else None, "vat": None})
     if rate and total_vnd is not None and items:
         items[-1]["amount"] += round(total_vnd) - sum(it["amount"] for it in items)
-    return items, (round(total_vnd) if total_vnd is not None else None)
+    if vat_amt is not None:
+        # 整張表只有一列稅金 (D/O FEE 表)：獨立一個品項，amount=None，vat 填金額
+        vat_desc = f"V.A.T TAX ({vat_pct}%) (VAT {vat_pct}%)" if vat_pct else "V.A.T TAX"
+        items.append({
+            "supplier": "IMX EXPRESS SERVICE COMPANY LIMITED", "consignee": consignee,
+            "invoice_no": "N/A", "invoice_date": "N/A", "bl_no": "N/A", "shipper": "N/A",
+            "port_of_loading": "N/A", "port_of_discharge": "N/A", "volume": "N/A",
+            "description": vat_desc, "amount": None, "vat": round(vat_amt), "_vt_sheet": name,
+        })
+    return (items, (round(total_vnd) if total_vnd is not None else None),
+            (round(vat_amt) if vat_amt is not None else None))
 
 
 def _parse_imx_old(book) -> List[Dict]:
-    rows = _imx_old_sheet(book)
-    items, _ = _imx_old_items(rows) if rows else ([], None)
+    items: List[Dict] = []
+    for name, rows in _imx_old_sheets(book):
+        sheet_items, _, _ = _imx_old_items(name, rows)
+        items += sheet_items
     return [{"header": {}, "items": items or [{"description": None, "amount": None}]}]
 
 
 def _imx_old_totals(book) -> List[Dict]:
-    rows = _imx_old_sheet(book)
-    if not rows:
+    sheets = _imx_old_sheets(book)
+    if not sheets:
         return []
-    _, total_vnd = _imx_old_items(rows)
-    return [{"invoice_no": None, "total": total_vnd}] if total_vnd is not None else []
+    total = vat = None
+    for name, rows in sheets:
+        _, sheet_total, sheet_vat = _imx_old_items(name, rows)
+        if sheet_total is not None:
+            total = (total or 0) + sheet_total
+        if sheet_vat is not None:
+            vat = (vat or 0) + sheet_vat
+    if total is None:
+        return []
+    return [{"invoice_no": None, "total": total, "grand_total": (total + vat) if vat is not None else None}]
 
 
 _imx_new_parse, _imx_new_totals = _vt_make("IMX EXPRESS SERVICE COMPANY LIMITED", _VT_IMX)
 
 
 def _imx_sheet_parse(book):
-    return _parse_imx_old(book) if _imx_old_sheet(book) else _imx_new_parse(book)
+    return _parse_imx_old(book) if _imx_old_sheets(book) else _imx_new_parse(book)
 
 
 def _imx_sheet_totals(book):
-    return _imx_old_totals(book) if _imx_old_sheet(book) else _imx_new_totals(book)
+    return _imx_old_totals(book) if _imx_old_sheets(book) else _imx_new_totals(book)
 
 
 register_supplier(
