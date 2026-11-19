@@ -420,6 +420,9 @@ _RAC_CHARGE_LABELS = {
     "CFS,THC,CIC PER P/L", "D/O, H/L FEE PER P/L", "STORAGE PER P/L", "THC/CIC/ DO VS CONT",
     "LIFT ON/OFF", "CFS,THC, CIC FEE", "CFS,THC,CIC FEE", "D/O, H/L FEE",
     "TOLL",  # NHAP FCL DOT 1 的過路費 (使用者 2026-11-09 答案)
+    # 2026-11-20 抽樣 POU SUNG EX "FCL, LCL, AIR IKEA - EXPORT" 表：欄名多了 "PENDING"
+    # 字尾 (技術性標記，不是不同費用)，照 "PER P/L" 的規則去掉字尾還原成乾淨欄名
+    "TRUCKING FEE PENDING",
 }
 # SERVICE ALL 存在時，它的組成欄不另外轉 (避免重複計算)
 _RAC_SERVICE_ALL_PARTS = {"SERVICE FEE", "EXTRA CUSTOM SHEET"}
@@ -523,12 +526,14 @@ def _rac_table(rows: List[list]):
             charge = "PHI DICH VU" if label == "THANH TIEN" else None
         elif has_service_all and label in _RAC_SERVICE_ALL_PARTS:
             components.add(j)
-        elif label in _RAC_CHARGE_LABELS or label.startswith("PHỤ PHÍ XĂNG DẦU"):
-            # 欄名去掉 "PER P/L" (使用者 2026-11-09 答案，費用名稱不要帶這個技術性
-            # 標記)；"CFS,THC,CIC PER P/L" 左表的乾淨欄名是 "CFS,THC,CIC FEE"
-            # (多一個 "FEE")，這裡補上，其他欄 (STORAGE、D/O, H/L FEE…) 單純去掉
-            # 字尾就是乾淨欄名，不用再處理
-            charge = re.sub(r"\s*PER\s*P/L\s*$", "", original, flags=re.I).strip() or original
+        elif label in _RAC_CHARGE_LABELS or (label.startswith("PHỤ PHÍ") and "DẦU" in label):
+            # 欄名去掉 "PER P/L"/"PENDING" 字尾 (使用者 2026-11-09 答案，費用名稱不要
+            # 帶這個技術性標記)；"CFS,THC,CIC PER P/L" 左表的乾淨欄名是 "CFS,THC,CIC
+            # FEE" (多一個 "FEE")，這裡補上，其他欄 (STORAGE、D/O, H/L FEE…) 單純去掉
+            # 字尾就是乾淨欄名，不用再處理。燃油附加費欄名有 "PHỤ PHÍ XĂNG DẦU"
+            # (2026-10) 跟 "PHỤ PHÍ DẦU" (2026-11-20 抽樣 POU PHONG NHAP LCL+AIR+NKTC/
+            # NHAP FCL 表) 兩種寫法，都算同一種費用。
+            charge = re.sub(r"\s*(PER\s*P/L|PENDING)\s*$", "", original, flags=re.I).strip() or original
             if charge.upper() == "CFS,THC,CIC":
                 charge += " FEE"
         if charge:
