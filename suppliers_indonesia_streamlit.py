@@ -4384,7 +4384,11 @@ def _dhl_common_header(text: str) -> Dict[str, Optional[str]]:
         spaced = _search(r"(?:Invoice|Credit)\s+Number\s*:\s*([A-Za-z]{3,6}[O0]*\s*\d[\d ]{5,})", text)
         header["invoice_no"] = fix_zero(
             (spaced.replace(" ", "") if spaced else None)
-            or _search(r"(?:Invoice|Credit)\s+Number\s*:\s*(\S+)", text)
+            # 一定要有數字：掃描版有時把發票號碼印在標籤「前面」，OCR 順序
+            # 亂掉後「Invoice Number:」後面接到的是別的欄位的文字 (例如
+            # "MR."，2026-11-18 低等級 JKTZR00635043)，純 \S+ 會誤抓，
+            # 加上至少一個數字才當候選，抓不到才退到下面的全文件掃描
+            or _search(r"(?:Invoice|Credit)\s+Number\s*:\s*(\S*\d\S*)", text)
             or _search(r"\b([A-Z]{2,6}[O0-9]{6,})\b", text)
         )
         header["invoice_date"] = _dhl_parse_date(
@@ -4829,7 +4833,12 @@ def _parse_dhl_scanned_customs(text: str) -> Dict:
 #     "07-05-2026 IMPORT EXPORT DUTIES 370,461 z 370,461" (名稱、金額、稅別、[VAT]、含稅)，
 #     左邊可能夾著 "Description of Goods: SLAB TEST: 09 SET " 這段貨物說明。
 _DHL_DUTY_ITEM_RE = re.compile(
-    r"(?P<desc>[A-Z][A-Z &/]*[A-Z])\s+(?P<amount>[\d,]+)\s+(?P<code>[A-Za-z]{1,2})\s+"
+    # 稅別代碼 OCR 常把 "A" 讀成數字 "4" (兩者字形相近)，code 多容許這個值
+    # (2026-11-18 低等級 JKTZR00625305 等多份：缺的正是 DISBURSEMENT 這筆帶
+    # VAT 的費用，第二筆代碼 "A" 被讀成 "4"，整行比對不到，整筆費用漏掉)
+    # 代碼後面 OCR 有時多一個雜訊符號 "A." (2026-11-18 低等級 JKTZR00635043 等)，
+    # 用 [.,]? 容許
+    r"(?P<desc>[A-Z][A-Z &/]*[A-Z])\s+(?P<amount>[\d,]+)\s+(?P<code>[A-Za-z]{1,2}|4)[.,]?\s+"
     r"(?:(?P<vat>[\d,]+)\s+)?(?P<total>[\d,]+)\s*$")
 
 
@@ -4884,6 +4893,18 @@ def _parse_dhl_duty(text: str) -> Dict:
         else:
             vat = total - amount if amount is not None and total is not None else None
         items.append({"description": im.group("desc").strip(), "amount": amount, "vat": vat})
+    # 掃描檔「DISBURSEMENT」那一行常被貨物說明欄的雜訊字元插在費用名稱跟
+    # 金額中間 (OCR 把這些雜訊字元也印出來)，整行 regex 比對失敗，漏掉這一
+    # 整筆費用 (2026-11-18 低等級 JKTZR00651097 等)。"Analysis of VAT" 稅別
+    # 表的課稅基礎不會被貨物說明欄污染，比較乾淨：缺這筆費用時才用它補回，
+    # 已經抓到的 (amount 對得上) 不重複加。
+    for m in _DHL_VAT_CODE_RE.finditer(text):
+        if m.group("rate") in ("0", "0.0"):
+            continue
+        base = _dhl_clean_amount(m.group("base"))
+        vat = _dhl_clean_amount(m.group("vat"))
+        if base and not any(it.get("amount") == base for it in items):
+            items.append({"description": "DISBURSEMENT", "amount": base, "vat": vat or 0})
     _dhl_clear_unused_header(header, keep=("bl_no", "onboard_date", "port_of_loading",
                                            "port_of_discharge"), use_setdefault=True)
     # 一筆費用都擷取不到：判無法判讀 (同掃描版型，使用者 2026-10-31 確認)
@@ -4967,6 +4988,15 @@ def _parse_dhl_forwarding(text: str) -> Dict:
               "vat": _dhl_fwd_amount(m.group("vat"))}
              for m in _DHL_FWD_CHARGE_PATTERN.finditer(text)]
     return {"header": header, "items": items}
+
+
+def dhl_invoice_page(text: str) -> bool:
+    """排除海關進口報關文件 (PIB，"Pemberitahuan Impor Barang Untuk Ditimbun") 附件頁：
+    進口帳單常每一票 AWB 各附一份 PIB，頁數一多會把帳單真正的費用明細頁稀釋掉、擾亂判斷
+    (使用者 2026-11-18 低等級 BDOIR00051385：20 頁裡有十幾頁是各票的 PIB)。用完整標題
+    "PEMBERITAHUAN IMPOR BARANG" 判斷，不能只用 "PEMBERITAHUAN" (真正帳單頁有時也會印到
+    這個詞，JKTZR00561616 低等級樣本，_dhl_is_unreadable() 的註解也提過這個陷阱)。"""
+    return "PEMBERITAHUAN IMPOR BARANG" not in text.upper()
 
 
 def _dhl_is_unreadable(text: str) -> bool:
@@ -5162,6 +5192,161 @@ def _parse_dhl_scan_multi(text: str) -> Optional[Dict]:
     return {"header": header, "items": items}
 
 
+# ---------------------------------------------------------------------------
+# (F) 掃描版多票 AWB 帳單，psm 12 重新 OCR (2026-11-18 低等級 BDOIR00051385、
+#     INV JKTIR002732507 等)
+# ---------------------------------------------------------------------------
+#
+# 跟 (A) 一樣是「清楚」版面 (有 Air Waybill/Shippers Reference 表頭)，但掃描
+# 品質不夠好，預設 OCR (相當於 psm 3) 會把同一票的欄位拆成好幾個不相鄰的
+# 文字區塊、順序打亂，_parse_dhl_regular() 的單行 regex 完全抓不到。改用
+# psm 12 (把每一塊文字當獨立區塊，不嘗試重組成段落) 重新 OCR 這一頁 (見
+# register_supplier() 的 ocr_psm 清單)，輸出會變成「一行一個值」，但還是
+# 按照每一票的視覺順序排列 (票號 → 日期+起運地 → 目的地 → EXPRESS →
+# 重量代碼 → 件數/運費 → VAT/代碼 → 含稅小計 → 寄件人 → 收件人 → …接著
+# 額外費用 → 下一票)，只是中間常夾雜地址、聯絡人這些雜訊行。
+#
+# 策略跟逐行比對硬湊不同：一票的「主要 9 個值」用一個鎖定連續 9 行的
+# regex 整段比對 (這 9 行之間沒有雜訊夾雜，掃描夠清楚的票一定連續)；額外
+# 費用則在這一票範圍內找「名稱 (白名單) + 金額 + VAT/代碼 + 小計」這 4 行
+# 連續出現的地方，中間的雜訊行會被跳過。任何一個數字被 OCR 讀壞 (例如
+# "2L341A" 應該是 "20,341 A") 就讓該 regex 整段比對不到，這一票 (或這筆
+# 額外費用) 直接漏掉，不湊假數字；整張一票都拼不出來就回傳 None，讓
+# parse_dhl() 退回「無法判讀」。只救得回掃描品質夠好、OCR 沒把數字讀錯的
+# 部分，不是每一份都能救回來 (使用者 2026-11-18 確認接受這個取捨)。
+
+_PSM12_MAIN_RE = re.compile(
+    # psm 12 常在每個文字區塊之間多印空白行，欄位之間一律用 \s+ (可以跨過
+    # 空白行)；只有「同一行」的欄位 (票號+Shippers Reference、件數+運費同一
+    # 行時) 才用 [ \t]+ (不能跨行，避免吃到下一個欄位)
+    r"(?P<awb>\d{6,12})(?:[ \t]+(?P<ref>\S{5,}))?\s+"
+    # 日期可能印成 "24-12-2024"，掃描品質差時日跟月中間的 "-" 會被 OCR 吃掉
+    # 變成 "0409-2026" (日 04、月 09、年 2026)，兩種寫法都接受
+    # 日期跟起運地可能同一行 ("24-12-2024 JKT, JAKARTA")，也可能各佔一行
+    # (2026-11-18 低等級 INV JKTIR002732507 第 2 票)，用 \s+ 兩種都接受
+    r"(?:(?P<d1>\d{2})-(?P<m1>\d{2})-(?P<y1>\d{4})|(?P<d2>\d{2})(?P<m2>\d{2})-(?P<y2>\d{4}))\s+"
+    r"(?P<origin>[A-Z]{2,4},\s*[A-Z][A-Z ().'’\-&]*?)\s+"
+    r"(?P<dest>[A-Z]{2,4},\s*[A-Z][A-Z ().'’\-&]*?)\s+"
+    r"EXPRESS\s+"
+    r"(?P<weight>-?\d+(?:\.\d+)?)[ \t]*(?P<wcode>[A-Za-z])\s+"
+    # 件數/運費可能同一行 ("2 6,834,533")，也可能各佔一行
+    r"(?:(?P<items1>\d+)[ \t]+(?P<charge1>[\d,]+)|(?P<items2>\d+)\s+(?P<charge2>[\d,]+))\s+"
+    r"(?P<vat>[\d,]+)[ \t]*[A-Za-z]\s+"
+    r"(?P<total>[\d,]+)"
+)
+
+
+_PSM12_AWB_LINE_HAS_BOTH_PORTS_RE = re.compile(
+    r"^\d{6,12}\b.*[A-Z]{2,4},\s*[A-Z][A-Za-z ().'-]+.*[A-Z]{2,4},\s*[A-Z][A-Za-z ().'-]+", re.MULTILINE)
+
+
+def _dhl_is_scan_awb_scrambled(text: str) -> bool:
+    """(A) 乾淨版面「掃描品質不好」的頁才用 psm 12 重新 OCR。只看
+    _dhl_is_regular()/_parse_dhl_regular() 抓不抓得到不夠準：DUTIES & TAXES
+    這種子版型，起運地/目的地印在同一行 (跟票號同一行)，單獨這一頁本來就
+    抓不到 (要跟第 1 頁合看)，但那不代表掃描品質差，psm 12 反而會把它搞亂
+    (2026-11-18 迴歸測試 sample1 低等級)。真正需要 psm 12 的掃描品質差版面，
+    起運地跟目的地中間夾著收發件人姓名/地址，不會印在票號同一行，用這個
+    區分 (BDOIR00051385、INV JKTIR002732507)。"""
+    if not _dhl_is_regular(text):
+        return False
+    if _PSM12_AWB_LINE_HAS_BOTH_PORTS_RE.search(text):
+        return False
+    upper = text.upper()
+    if "NUMBER OF PAGES: 2 OF" in upper or "NUMBER OF PAGES: 3 OF" in upper:
+        # 這是 (E) 掃描版 3 頁多票帳單專用的頁碼標記 (_parse_dhl_scan_multi())，
+        # 已經有專門的拆解邏輯處理，不要用 psm 12 蓋過去 (2026-11-18 迴歸測試
+        # sample19 低等級)
+        return False
+    return _parse_dhl_regular(text) is None
+
+
+def _parse_dhl_scan_awb_psm12(text: str) -> Optional[Dict]:
+    main_matches = list(_PSM12_MAIN_RE.finditer(text))
+    if not main_matches:
+        return None  # psm 12 也拼不出乾淨的一票，讓 parse_dhl() 退回「無法判讀」
+
+    svc_m = _DHL_SERVICE_NAME_PATTERN.search(text)
+    service_name = svc_m.group("svc").strip() if svc_m else "EXPRESS WORLDWIDE"
+    subtotal_matches = list(_DHL_SERVICE_SUBTOTAL_PATTERN.finditer(text))
+
+    def _service_name_for(pos: int) -> str:
+        for sm in subtotal_matches:
+            if sm.start() >= pos:
+                return sm.group("name").strip().upper()
+        return service_name
+
+    # 這份帳單的「Analysis of Extra Charges」只列名稱、沒有附金額時，
+    # _dhl_extract_charge_name_whitelist() 抓不到白名單 (2026-11-18 低等級
+    # INV JKTIR002732507)：退回最常見的兩種額外費用名稱當白名單
+    whitelist = _dhl_extract_charge_name_whitelist(text) or ["DEMAND SURCHARGE", "FUEL SURCHARGE"]
+    alt = "|".join(re.escape(n) for n in sorted(whitelist, key=len, reverse=True))
+    extra_re = re.compile(
+        rf"(?P<desc>{alt})\s+(?P<amount>[\d,]+)\s+"
+        rf"(?P<vat>[\d,]+)[ \t]*[A-Za-z]\s+(?P<total>[\d,]+)")
+
+    boundaries = [m.start() for m in main_matches] + [len(text)]
+    items: List[Dict] = []
+    for idx, m in enumerate(main_matches):
+        block = text[m.end():boundaries[idx + 1]]
+        day, month, year = (m.group("d1", "m1", "y1") if m.group("d1")
+                             else m.group("d2", "m2", "y2"))
+        items_count = m.group("items1") or m.group("items2")
+        charge = m.group("charge1") or m.group("charge2")
+        overrides = {
+            "bl_no": m.group("awb"),
+            "order_no": m.group("ref").split("/")[0] if m.group("ref") else None,
+            "onboard_date": _format_date_en(day, month, year),
+            "port_of_loading": m.group("origin").strip(),
+            "port_of_discharge": m.group("dest").strip(),
+            "volume": (0 if float(m.group("weight")) == 0
+                       else _fmt_volume(kg=f"{float(m.group('weight')):g}")),
+        }
+        items.append({
+            "description": _service_name_for(m.start()),
+            "amount": _dhl_clean_amount(charge),
+            "vat": _dhl_clean_amount(m.group("vat")),
+            **overrides,
+        })
+        if extra_re:
+            for em in extra_re.finditer(block):
+                items.append({
+                    "description": em.group("desc").strip(),
+                    "amount": _dhl_clean_amount(em.group("amount")),
+                    "vat": _dhl_clean_amount(em.group("vat")),
+                    **overrides,
+                })
+
+    header = _dhl_common_header(text)
+    _dhl_clear_unused_header(header)
+    return {"header": header, "items": items}
+
+
+def _dhl_audit_balances(result: Dict, text: str) -> Optional[bool]:
+    """result 的費用加總 (含 VAT) 是否等於整張帳單的含稅總額；沒有總額規則
+    可比對時回傳 None (不判斷，呼叫端當作「沒理由不信任」處理)。"""
+    total = _dhl_extract_grand_total(text)
+    if total is None:
+        return None
+    s = sum((it.get("amount") or 0) + (it.get("vat") or 0) for it in result["items"])
+    return abs(s - total) <= 1
+
+
+def _dhl_pick_regular_or_psm12(regular: Dict, text: str) -> Dict:
+    """(A) 乾淨版面的單行 regex 掃描品質不好時，偶爾會在打散的文字裡誤湊出
+    一筆不完整的假比對 (2026-11-18 低等級 INV JKTIR002732507：只湊到第 1
+    票、漏了第 2 票跟額外費用)。只有在 (A) 的結果金額稽核『不通過』、改用
+    (F) psm 12 重新 OCR 的結果『通過』時才換，其餘情況 (稽核通過、或兩者
+    都不通過、或沒有總額規則可比對) 一律還是信任 (A)，不要亂猜——避免這個
+    備援影響其他原本就該用 (A)/(E)/(B)/(C)/(D) 的既有樣本 (2026-11-18 迴歸
+    測試 sample1/sample19 曾被誤蓋過，見這兩份樣本的既有正確答案)。"""
+    if _dhl_audit_balances(regular, text) is False:
+        psm12 = _parse_dhl_scan_awb_psm12(text)
+        if psm12 is not None and _dhl_audit_balances(psm12, text) is True:
+            return psm12
+    return regular
+
+
 def parse_dhl(text: str) -> Dict:
     if _dhl_is_unreadable(text):
         # 標記值要跟 validation_streamlit.UNREADABLE_DESC 一致 (驗證層判 ERROR)
@@ -5174,9 +5359,12 @@ def parse_dhl(text: str) -> Dict:
     elif _dhl_is_duty(text):
         result = _parse_dhl_duty(text)
     elif _dhl_is_regular(text) and (regular := _parse_dhl_regular(text)) is not None:
-        result = regular
+        result = _dhl_pick_regular_or_psm12(regular, text)
     elif _dhl_is_regular(text) and (scan_multi := _parse_dhl_scan_multi(text)) is not None:
         result = scan_multi
+    elif (_dhl_is_regular(text) and (psm12 := _parse_dhl_scan_awb_psm12(text)) is not None
+          and _dhl_audit_balances(psm12, text) is True):
+        result = psm12
     else:
         result = _parse_dhl_scanned_customs(text)
     # OCR 把抬頭讀成 "PT GIROTIKA SEMESTA" 時供應商會抓不到：供應商固定
@@ -5217,8 +5405,16 @@ register_supplier(
     detect_dhl, parse_dhl,
     extract_total=_dhl_extract_total, extract_grand_total=_dhl_extract_grand_total,
     # 掃描版 INBOUND 的 Billing Details 金額欄、Destination 預設 OCR 讀錯 (302,432 → 402,442、JKT → JIT)，
-    # psm 6 (整頁當成一個文字區塊) 讀得對；只對掃描版 INBOUND 頁換 OCR 模式 (2026-11-03 D000794106)
-    ocr_psm=6, ocr_psm_if=_dhl_is_scan_reimburse,
+    # psm 6 (整頁當成一個文字區塊) 讀得對；只對掃描版 INBOUND 頁換 OCR 模式 (2026-11-03 D000794106)。
+    # 掃描版多票 AWB 帳單預設 OCR 把欄位拆散、順序打亂時，改用 psm 12 (離散文字區塊)，
+    # 看 _dhl_is_scan_awb_scrambled() 說明 (2026-11-18 低等級 BDOIR00051385 等)
+    # 多票 AWB 那組 verify=False：這一頁單獨拿出來核算總額沒有意義 (含稅總額
+    # 要跟第 1 頁彙總表合看)，改信任 _parse_dhl_scan_awb_psm12() 自己的嚴格比對
+    # 多票 AWB 那組 verify=False (原因見上)，require_detect=False：這一頁單獨
+    # 拿出來常抓不到供應商關鍵字 (只有第 1 頁彙總表有)，signal 不可靠，改信任
+    # gate 自己的內容判斷；INBOUND 那組兩個都維持預設 True，跟原來行為一致
+    ocr_psm=[(6, _dhl_is_scan_reimburse), (12, _dhl_is_scan_awb_scrambled, False, False)],
+    invoice_page=dhl_invoice_page,
 )
 
 

@@ -35,7 +35,7 @@ import calendar
 import threading
 from collections import OrderedDict
 from concurrent.futures import ThreadPoolExecutor
-from typing import Callable, Dict, List, Optional, Tuple
+from typing import Callable, Dict, List, Optional, Tuple, Union
 
 import pdfplumber
 import pandas as pd
@@ -70,6 +70,11 @@ if pytesseract is not None and getattr(sys, "frozen", False) and \
 _OCR_LANG = "eng+vie"
 
 NA = "N/A"  # 抓不到值時，一律填這個 (使用者需求)
+# 供應商規則專用：這一列的 invoice_date「已確認沒有」(不是還沒抓到，是答案已經
+# 驗證過這個版面本來就沒有日期，例如 VINH_HUNG_LONG 壓車表、VAT 獨立列)，不要被
+# _fill_missing_invoice_date() 的第 2/3 項備援覆蓋。寫入 Excel 前一律還原成 NA
+# 顯示 (使用者 2026-11-19：發票日期備援順序擴充時發現，只用 NA 會被誤蓋)
+NA_CONFIRMED = "__NA_CONFIRMED__"
 
 # ---------------------------------------------------------------------------
 # 1. 標準欄位定義
@@ -1346,7 +1351,7 @@ def register_supplier(key: str, label: str,
                        sheet_totals: Optional[Callable[["SheetBook"], List[Dict]]] = None,
                        extract_vat_total: Optional[Callable[[str], Optional[float]]] = None,
                        invoice_page: Optional[Callable[[str], bool]] = None,
-                       ocr_psm: Optional[int] = None,
+                       ocr_psm: Optional[Union[int, List[Tuple[int, Optional[Callable[[str], bool]]]]]] = None,
                        ocr_psm_if: Optional[Callable[[str], bool]] = None,
                        page_text: Optional[Callable[[str], List[str]]] = None,
                        ocr_attachments: bool = True,
@@ -1366,8 +1371,12 @@ def register_supplier(key: str, label: str,
 
     ocr_psm (可選，非 multi_page 供應商用)：這家的掃描帳單頁改用指定的
     tesseract 版面分析模式重新 OCR (例如 GALUH 用 6，預設模式會漏掉金額欄)。
-    ocr_psm_if (可選，要搭配 ocr_psm)：只有預設 OCR 的頁面文字通過這個判斷式時
-    才改用 ocr_psm，同一家供應商的其他版型不受影響 (DHL 掃描版 D000794106)。
+    也可以傳 [(psm, gate), ...] 清單，同一家供應商不同掃描子格式各用各的
+    psm (例如 DHL：INBOUND 用 6、多票 AWB 用 12)，依序比對 gate，第一個
+    符合的就用那組 psm (後面的不會再試)。
+    ocr_psm_if (可選，要搭配單一 int 的 ocr_psm)：只有預設 OCR 的頁面文字
+    通過這個判斷式時才改用 ocr_psm，同一家供應商的其他版型不受影響 (DHL
+    掃描版 D000794106)。用清單寫法時，gate 直接放進清單裡，不用這個參數。
 
     invoice_page (可選，非 multi_page 供應商用)：判斷某一頁是不是這家的帳單
     頁。有給時只擷取/勾稽帳單頁，其他頁 (提單、條款、其他公司的發票等雜訊)
@@ -1691,10 +1700,15 @@ def _parse_multi_page_pdf(pdf_path: str, key: str, **pdfplumber_kwargs) -> List[
         except Exception:
             continue
         parsed = entry["parse"](page_text)
-        page_rows.append(expand_to_rows(parsed))
+        rows_for_page = expand_to_rows(parsed)
+        # 缺 invoice_date 的第 3 項備援 (文字裡任何日期) 要用這一頁自己的文字，
+        # 不能等攤平成 rows 之後才補，否則會混進別張發票 (別頁) 的日期
+        _fill_missing_invoice_date(rows_for_page, pdf_path, page_text)
+        page_rows.append(rows_for_page)
     rows = _drop_duplicate_invoice_pages(page_rows)
     if not rows:
         rows = expand_to_rows({"header": {}, "items": [{}]})
+        _fill_missing_invoice_date(rows, pdf_path, None)
     return rows
 
 
@@ -1816,21 +1830,54 @@ def invoice_text(pdf_path: str, key: Optional[str],
     回傳 (文字, 附件頁的頁碼 (1 起算))；沒有登記或一頁都不符合時用全部頁面。"""
     pages = supplier_pages(pdf_path, key, **pdfplumber_kwargs)
     entry = SUPPLIER_REGISTRY.get(key) if key else None
-    psm = entry.get("ocr_psm") if entry else None
-    if psm and not is_spreadsheet(pdf_path):
-        # 這家供應商的掃描頁要用指定的 OCR 模式 (只重做認得出供應商的頁)
+    psm_rules = entry.get("ocr_psm") if entry else None
+    if psm_rules and not is_spreadsheet(pdf_path):
+        # 單一 int (舊寫法，搭配 ocr_psm_if) 轉成跟清單寫法一致的 [(psm, gate)]；
+        # 清單寫法給同一家供應商、不同掃描子格式各用各的 psm (例如 DHL：掃描版
+        # INBOUND 用 psm 6，掃描版多票 AWB 用 psm 12)，見 _dhl_is_scan_awb_scrambled()
+        # (psm, gate)、或 (psm, gate, verify)、或 (psm, gate, verify, require_detect)；
+        # verify 預設 True (下面的自我檢查)，require_detect 預設 True (要求
+        # detect_supplier(頁) == key 才套用，跟舊行為一致)
+        def _pad(r):
+            r = tuple(r) + (True, True)
+            return r[:4]
+        rules = ([(psm_rules, entry.get("ocr_psm_if"), True, True)]
+                 if isinstance(psm_rules, int) else [_pad(r) for r in psm_rules])
         pages = list(pages)
         for i in _scanned_page_indexes(pdf_path):
-            gate = entry.get("ocr_psm_if")
-            if detect_supplier(pages[i]) == key and (gate is None or gate(pages[i])):
+            page_is_key = detect_supplier(pages[i]) == key
+            for psm, gate, verify, require_detect in rules:
+                if require_detect and not page_is_key:
+                    # require_detect=False 只給明確知道「這一頁單獨拿出來可能抓
+                    # 不到供應商關鍵字」的格式用 (例如多票 AWB 帳單的明細頁單獨
+                    # 一頁常沒有 "PT BIROTIKA SEMESTA/DHL EXPRESS"，只有第 1 頁
+                    # 彙總表才有，2026-11-18 低等級 INV JKTIR002732507)；其餘格式
+                    # 一律要先通過 detect_supplier==key 這層，不能只信 gate 自己
+                    # 的判斷 (2026-11-18 迴歸測試 sample1/sample19 曾被誤蓋過)
+                    continue
+                if gate is not None and not gate(pages[i]):
+                    continue
+                original = pages[i]
                 pages[i] = _ocr_page_with_psm(pdf_path, i, psm)
+                if not verify:
+                    # 這一頁單獨拿出來算金額稽核沒有意義 (例如多票 AWB 帳單的含稅
+                    # 總額要跟第 1 頁彙總表合看)：改用該格式自己的 parse 嚴格驗證，
+                    # 這裡不用再比對單頁總額 (2026-11-18 低等級 INV JKTIR002732507：
+                    # 用單頁總額比對會誤判不平，退回原圖反而抓不到)
+                    break
                 # 自我檢查：這一頁的明細加總對不上帳單總額時，改用灰階 + 自動對比
                 # 再 OCR 一次，對得上才採用 (GALUH 抽樣 0500047、0500071、0500086：
-                # 原圖漏掉 TRUCKING 金額、把 9 讀成 1；有些帳單反而原圖才讀得對)
+                # 原圖漏掉 TRUCKING 金額、把 9 讀成 1；有些帳單反而原圖才讀得對)。
+                # psm 版跟對比版都不平時，退回原圖 (不然會卡住 psm 誤讀的版本，
+                # 2026-11-18 低等級 D000604364：原圖本身正確，psm 6 把 477,800
+                # 讀成 177,600 反而更差)
                 if _page_balances(entry, pages[i]) is False:
                     alt = _ocr_page_with_psm(pdf_path, i, psm, contrast=True)
                     if _page_balances(entry, alt):
                         pages[i] = alt
+                    else:
+                        pages[i] = original
+                break
     check = entry.get("invoice_page") if entry else None
     keep = [i for i, p in enumerate(pages) if check(p)] if check else []
     if not keep:
@@ -1854,41 +1901,164 @@ def _consignee_from_filename(path: str) -> Optional[str]:
     return None
 
 
-# 最高指導原則第 7 點 (2026-11-18)：帳單內完全找不到發票日期時，缺發票日期
-# 本身不算重大錯誤 (見最高指導原則第 5 點，只會停在「中」)；但檔名有嵌入月份
-# (月結單命名慣例，例如 "MOL LOGICTICS_APR.2025_....pdf" 的 "APR.2025"，或
-# "POU HUNG-DO-APR-2025.xls" 的 "-APR-2025") 時，用該月最後一天頂替，才能
-# 往上修正到「高」。所有供應商都適用 (原為 VN09 MOL 專用，2026-11-18 推廣為
-# 全供應商通用規則)。檔名抓不到月份格式時回傳 None，不亂猜。
-_FILENAME_MONTH_RE = re.compile(r"([A-Za-z]{3})[.\-_](\d{4})")  # 分隔字元可能是
-# "."、"-"、"_" ("APR.2025"/"-APR-2025"/"_APR_2025")，"-"/"_" 跟字母/數字一樣
-# 算 regex 的 \w，前後不會有 \b 邊界，不能用 \b 錨點 (2026-11-18 發現：\b 版本
-# 完全抓不到，fallback 沒生效)
+# 最高指導原則第 7 點 (2026-11-18，2026-11-19 擴充成完整優先順序)：帳單內完全
+# 找不到發票日期時，缺發票日期本身不算重大錯誤 (見最高指導原則第 5 點，只會
+# 停在「中」)；但依序試下面三種來源頂替，補到了就能往上修正到「高」。
+# 所有供應商都適用：
+#   1. 檔名嵌入的月份 (月結單命名慣例，例如 "MOL LOGICTICS_APR.2025_....pdf"
+#      的 "APR.2025"、"POU HUNG-DO-APR-2025.xls" 的 "-APR-2025"，或純數字的
+#      "2025-04"/"202504"/"04-2025")，用該月最後一天。
+#   2. 同一列的開船日 (onboard_date)，沒有才用到達日 (arrive_date) (使用者
+#      2026-11-19：開船日優先)。
+#   3. 帳單/對帳表文字裡出現的任何日期：有「到期日」類關鍵字的優先，否則取
+#      文字裡最早的一個 (使用者 2026-11-19)。
+# 三種都找不到時原樣保留 (缺日期仍只標 WARN，見第 5 點)，不亂猜。
+_FILENAME_MONTH_NAME_RE = re.compile(r"([A-Za-z]{3})[.\-_](\d{4})")  # "APR.2025"
+# 分隔字元可能是 "."、"-"、"_"，"-"/"_" 跟字母/數字一樣算 regex 的 \w，前後
+# 不會有 \b 邊界，不能用 \b 錨點 (2026-11-18 發現：\b 版本完全抓不到)
+_FILENAME_YEAR_MONTH_NUM_RE = re.compile(r"(?<!\d)(20\d{2})[.\-_](0[1-9]|1[0-2])(?!\d)")  # "2025-04"
+_FILENAME_MONTH_YEAR_NUM_RE = re.compile(r"(?<!\d)(0[1-9]|1[0-2])[.\-_](20\d{2})(?!\d)")  # "04-2025"
+_FILENAME_YYYYMM_RE = re.compile(r"(?<!\d)(20\d{2})(0[1-9]|1[0-2])(?!\d)")  # "202504" (無分隔)
+# 前後用 (?<!\d)/(?!\d) 擋住更長數字的一部分 (例如發票號碼裡恰好有 6 位數字)，
+# 數字格式風險比英文縮寫月份高，所以放在英文縮寫規則之後、依序比對 (2026-11-19)
 
 
-def _last_day_of_month_from_filename(path: str) -> Optional[str]:
-    """檔名的 'APR.2025'/'-APR-2025' -> 該月最後一天的 'DD Mon YYYY' (例如 '30 Apr 2025')。"""
-    from suppliers_common_streamlit import _MONTH_NAME_TO_NUM, _format_date_en
-    m = _FILENAME_MONTH_RE.search(os.path.basename(path or ""))
-    if not m:
-        return None
-    month = _MONTH_NAME_TO_NUM.get(m.group(1).upper())
-    if month is None:
-        return None
-    year = int(m.group(2))
+def _last_day_of_month_str(year: int, month: int) -> Optional[str]:
+    from suppliers_common_streamlit import _format_date_en
     last_day = calendar.monthrange(year, month)[1]
     return _format_date_en(last_day, month, year)
 
 
-def _fill_missing_date_from_filename(rows: List[Dict], pdf_path: str) -> None:
-    """rows 裡缺 invoice_date 的列，補上檔名月份的最後一天 (見上方說明)；
-    檔名抓不到月份、或這一列本來就有日期時，原樣保留，不覆蓋。"""
-    fallback = _last_day_of_month_from_filename(pdf_path)
-    if not fallback:
-        return
+def _last_day_of_month_from_filename(path: str) -> Optional[str]:
+    """檔名裡的月份 (英文縮寫或純數字年月) -> 該月最後一天的 'DD Mon YYYY'
+    (例如 '30 Apr 2025')。四種寫法都抓不到時回傳 None。"""
+    from suppliers_common_streamlit import _MONTH_NAME_TO_NUM
+    base = os.path.basename(path or "")
+    m = _FILENAME_MONTH_NAME_RE.search(base)
+    if m:
+        month = _MONTH_NAME_TO_NUM.get(m.group(1).upper())
+        if month is not None:
+            return _last_day_of_month_str(int(m.group(2)), month)
+    m = _FILENAME_YEAR_MONTH_NUM_RE.search(base)
+    if m:
+        return _last_day_of_month_str(int(m.group(1)), int(m.group(2)))
+    m = _FILENAME_MONTH_YEAR_NUM_RE.search(base)
+    if m:
+        return _last_day_of_month_str(int(m.group(2)), int(m.group(1)))
+    m = _FILENAME_YYYYMM_RE.search(base)
+    if m:
+        return _last_day_of_month_str(int(m.group(1)), int(m.group(2)))
+    return None
+
+
+# 第 3 項「帳單文字裡任何日期」用的掃描規則：只認系統已知的日期寫法 (見
+# _coerce_to_date() 上方的格式清單)，不亂猜新格式，降低誤判成其他數字的風險。
+# 月份縮寫清單跟下面 _DATE_MONTH_ABBR_TO_NUM 是同一份，這裡先寫一次字面值，
+# 避免模組載入順序問題 (_DATE_MONTH_ABBR_TO_NUM 定義在這份檔案後面)
+_TEXT_SCAN_MONTH_ABBR = "JAN|FEB|MAR|APR|MAY|JUN|JUL|AUG|SEP|OCT|NOV|DEC"
+_TEXT_DATE_DD_MON_YYYY_RE = re.compile(
+    rf"(?<!\w)(\d{{1,2}})[ .](?:{_TEXT_SCAN_MONTH_ABBR})[ .](\d{{4}})(?!\w)", re.IGNORECASE
+)
+_TEXT_DATE_NUMERIC_RE = re.compile(r"(?<!\d)(\d{1,2})[./\-](\d{1,2})[./\-](\d{4})(?!\d)")
+_TEXT_DATE_ISO_RE = re.compile(r"(?<!\d)(\d{4})-(\d{1,2})-(\d{1,2})(?!\d)")
+# 「到期日」類關鍵字 (英/越/印尼)，date 前面 40 字內出現就視為到期日，優先採用
+_DUE_DATE_KEYWORDS = (
+    "DUE DATE", "PAYMENT DUE", "DUE ON",
+    "HAN THANH TOAN", "HẠN THANH TOÁN", "HAN TT", "HẠN TT", "NGAY HAN", "NGÀY HẠN",
+    "JATUH TEMPO", "TANGGAL JATUH TEMPO",
+)
+
+
+def _scan_dates_in_text(text: str) -> List[Tuple[datetime.date, int]]:
+    """掃出文字裡所有系統已知格式的日期，回傳 [(日期, 在文字裡的起始位置), ...]。
+    組不出合法日期 (例如日期範圍超出 1~31/1~12) 的就跳過，不拋例外。"""
+    from suppliers_common_streamlit import _MONTH_NAME_TO_NUM
+    found: List[Tuple[datetime.date, int]] = []
+    for m in _TEXT_DATE_DD_MON_YYYY_RE.finditer(text):
+        month_part = text[m.start():m.end()].upper()
+        month = next((v for k, v in _DATE_MONTH_ABBR_TO_NUM.items() if k in month_part), None)
+        if month is None:
+            continue
+        try:
+            found.append((datetime.date(int(m.group(2)), month, int(m.group(1))), m.start()))
+        except ValueError:
+            continue
+    for m in _TEXT_DATE_NUMERIC_RE.finditer(text):
+        try:
+            found.append((datetime.date(int(m.group(3)), int(m.group(2)), int(m.group(1))), m.start()))
+        except ValueError:
+            continue
+    for m in _TEXT_DATE_ISO_RE.finditer(text):
+        try:
+            found.append((datetime.date(int(m.group(1)), int(m.group(2)), int(m.group(3))), m.start()))
+        except ValueError:
+            continue
+    return found
+
+
+def _any_date_in_text(text: Optional[str]) -> Optional[str]:
+    """帳單/對帳表文字裡找「任何日期」當發票日期的最後手段：有「到期日」類
+    關鍵字在旁邊的優先，否則取文字裡最早的一個 (使用者 2026-11-19)。
+    「旁邊」定義成關鍵字後面 40 字內最近的那個日期 (不是隨便哪個日期的前面
+    40 字內有關鍵字就算)，避免抓到隔壁句子、跟關鍵字無關的另一個日期。"""
+    if not text:
+        return None
+    candidates = _scan_dates_in_text(text)
+    if not candidates:
+        return None
+    upper_text = text.upper()
+    due = []
+    for kw in _DUE_DATE_KEYWORDS:
+        start = 0
+        while True:
+            idx = upper_text.find(kw, start)
+            if idx == -1:
+                break
+            kw_end = idx + len(kw)
+            nearest = min(
+                (c for c in candidates if kw_end <= c[1] <= kw_end + 40),
+                key=lambda c: c[1], default=None,
+            )
+            if nearest:
+                due.append(nearest)
+            start = kw_end
+    pool = due or candidates
+    best_date = min(pool, key=lambda t: t[0])[0]
+    from suppliers_common_streamlit import _format_date_en
+    return _format_date_en(best_date.day, best_date.month, best_date.year)
+
+
+def _fill_missing_invoice_date(rows: List[Dict], pdf_path: str, text: Optional[str] = None) -> None:
+    """rows 裡缺 invoice_date 的列，依序試這些來源頂替 (見上方最高指導原則
+    第 7 點)：1) 檔名月份 2) 同列的開船日/到達日 3) 文字裡任何日期。
+    每一列各自判斷；三種都找不到、或這一列本來就有日期時，原樣保留。
+    供應商規則標成 NA_CONFIRMED 的列 (已確認沒有日期，不是還沒抓到) 永遠不套用
+    這三種備援，直接還原成一般的 NA 顯示。"""
+    filename_fallback = _last_day_of_month_from_filename(pdf_path)
+    text_fallback: Optional[str] = None
+    text_fallback_tried = False
     for row in rows:
-        if row.get("invoice_date") in (None, "", NA):
-            row["invoice_date"] = fallback
+        if row.get("invoice_date") == NA_CONFIRMED:
+            row["invoice_date"] = NA
+            continue
+        if row.get("invoice_date") not in (None, "", NA):
+            continue
+        if filename_fallback:
+            row["invoice_date"] = filename_fallback
+            continue
+        onboard = row.get("onboard_date")
+        arrive = row.get("arrive_date")
+        if onboard not in (None, "", NA):
+            row["invoice_date"] = onboard
+            continue
+        if arrive not in (None, "", NA):
+            row["invoice_date"] = arrive
+            continue
+        if not text_fallback_tried:
+            text_fallback = _any_date_in_text(text)
+            text_fallback_tried = True
+        if text_fallback:
+            row["invoice_date"] = text_fallback
 
 
 def parse_invoice_pdf(pdf_path: str, supplier_key: Optional[str] = None,
@@ -1904,8 +2074,9 @@ def parse_invoice_pdf(pdf_path: str, supplier_key: Optional[str] = None,
 
     if is_spreadsheet(pdf_path):
         entry = SUPPLIER_REGISTRY.get(key) if key else None
+        book = read_spreadsheet(pdf_path)
         if entry and entry.get("sheet_parse"):
-            rows = [row for parsed in entry["sheet_parse"](read_spreadsheet(pdf_path))
+            rows = [row for parsed in entry["sheet_parse"](book)
                     for row in expand_to_rows(parsed)]
         else:
             rows = []
@@ -1917,21 +2088,25 @@ def parse_invoice_pdf(pdf_path: str, supplier_key: Optional[str] = None,
                 if row.get("consignee") in (None, "", NA):
                     row["consignee"] = customer
         rows = rows or expand_to_rows({"header": {}, "items": [{}]})
-        _fill_missing_date_from_filename(rows, pdf_path)
+        book_text = "\n".join(sheet_text(name, sheet_rows) for name, sheet_rows in book.sheets)
+        _fill_missing_invoice_date(rows, pdf_path, book_text)
         return key, rows, text
 
-    # PDF 只看註冊時的 multi_page (同時有 Excel 規則的供應商，multi_page 只是比對分組用)
+    # PDF 只看註冊時的 multi_page (同時有 Excel 規則的供應商，multi_page 只是比對分組用)；
+    # 第 3 項「文字裡任何日期」要用各自那一頁的文字 (不能用整份 PDF，否則會混進
+    # 別張發票的日期)，所以補值動作在 _parse_multi_page_pdf() 裡面逐頁做
     if key in SUPPLIER_REGISTRY and SUPPLIER_REGISTRY[key].get("multi_page_pdf"):
         rows = _parse_multi_page_pdf(pdf_path, key, **pdfplumber_kwargs)
-        _fill_missing_date_from_filename(rows, pdf_path)
         return key, rows, text
 
     if key and key in SUPPLIER_REGISTRY:
-        parsed = SUPPLIER_REGISTRY[key]["parse"](invoice_text(pdf_path, key, **pdfplumber_kwargs)[0])
+        page_text = invoice_text(pdf_path, key, **pdfplumber_kwargs)[0]
+        parsed = SUPPLIER_REGISTRY[key]["parse"](page_text)
     else:
         parsed = {"header": {}, "items": [{}]}
+        page_text = text
     rows = expand_to_rows(parsed)
-    _fill_missing_date_from_filename(rows, pdf_path)
+    _fill_missing_invoice_date(rows, pdf_path, page_text)
     return key, rows, text
 
 

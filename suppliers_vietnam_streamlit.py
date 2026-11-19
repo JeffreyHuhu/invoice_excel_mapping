@@ -29,7 +29,7 @@ from typing import Dict, List, Optional, Tuple
 from extract_utils_streamlit import (
     _mol_is_draft_series, _ocr_page_with_psm, _scanned_page_indexes, extract_pages_from_pdf,
     fix_ocr_confusion, limited_pages, normalize_value, register_supplier, set_supplier_number,
-    SUPPLIER_REGISTRY, SheetBook, VN_AUDIT_TOLERANCE,
+    SUPPLIER_REGISTRY, SheetBook, VN_AUDIT_TOLERANCE, NA_CONFIRMED,
 )
 from suppliers_common_streamlit import (
     INDO_MONTHS, _search, _fmt_volume, _volume_from_text,
@@ -2796,10 +2796,12 @@ def _vt_parse_sheet(name: str, rows: List[list], cfg: Dict, supplier: str,
                 items.append({"description": cfg.get("vat_label") or _vn_text(cells[0]), "amount": None, "vat": vat_amt,
                               **common, "invoice_no": doc_key or f"{name.strip()} VAT"})
                 # vat_no_date：整張 VAT 列沒有日期 (樣本答案 VN06 IMP/EXP，2026-11-04)
-                # 其他欄位也填 N/A，避免表頭層的共用欄位 (提單、材積) 被補進 VAT 列
+                # 其他欄位也填 N/A，避免表頭層的共用欄位 (提單、材積) 被補進 VAT 列。
+                # invoice_date 用 NA_CONFIRMED (不是一般 N/A)：這是答案已經驗證過「確認
+                # 沒有日期」，不能被 _fill_missing_invoice_date() 的備援順序覆蓋 (2026-11-19)
                 if cfg.get("vat_no_date"):
                     # 有 doc_key (整張一個發票號碼) 時，VAT 列仍用該號碼 (VN06 NB)
-                    items[-1].update({k: "N/A" for k in (
+                    items[-1].update({k: (NA_CONFIRMED if k == "invoice_date" else "N/A") for k in (
                         ("invoice_no",) if not doc_key else ()) + (
                         "invoice_date", "bl_no", "order_no", "volume", "port_of_loading", "port_of_discharge",
                         "vessel", "container_no", "shipper", "onboard_date", "arrive_date")})
@@ -2813,11 +2815,13 @@ def _vt_parse_sheet(name: str, rows: List[list], cfg: Dict, supplier: str,
                     items.append({"description": cfg.get("vat_desc", "VAT"), "amount": None,
                                   "vat": nums[-1], **common, "invoice_no": doc_key or f"{name.strip()} VAT"})
                     if cfg.get("vat_na_fields"):
-                        # vat_na_fields：整張 VAT 列指定欄位填 N/A (VN APL 答案)
-                        items[-1].update({k: "N/A" for k in cfg["vat_na_fields"]})
+                        # vat_na_fields：整張 VAT 列指定欄位填 N/A (VN APL 答案)。invoice_date
+                        # 用 NA_CONFIRMED，理由同上
+                        items[-1].update({k: (NA_CONFIRMED if k == "invoice_date" else "N/A")
+                                          for k in cfg["vat_na_fields"]})
                     elif cfg.get("vat_no_date"):
                         # 整張 VAT 列只有發票號碼與金額 (VN12 NGUYÊN HƯỞNG 答案)：其他欄填 N/A
-                        items[-1].update({k: "N/A" for k in (
+                        items[-1].update({k: (NA_CONFIRMED if k == "invoice_date" else "N/A") for k in (
                             "invoice_date", "bl_no", "order_no", "volume", "port_of_loading", "port_of_discharge",
                             "vessel", "container_no", "shipper", "onboard_date", "arrive_date")})
                 break
@@ -4464,7 +4468,9 @@ _VT_VHL_ANSWER = [
                    "grand": "=TONG"}),
     (r"NEO-?DD", {**_VT_VHL_COMMON, "gross_vat": False, "vat_of_amount": True, "date": None,
                   "require": "PHI NEO XE", "key": ["SO LO", "SOA LOA"],
-                  "const": {"invoice_date": "N/A"},  # 工作表沒有提櫃日，填 N/A (答案提示列)
+                  # 工作表沒有提櫃日 (答案提示列)：用 NA_CONFIRMED，不能被
+                  # _fill_missing_invoice_date() 的備援順序覆蓋 (2026-11-19)
+                  "const": {"invoice_date": NA_CONFIRMED},
                   # BK 的 "NEO" 工作表是舊字型編碼 ("SOÁ LÔ"、"SOÁ CONTAINER"、"SOÁ NGÀY NEO"、
                   # "LOAÏI CONT" 讀出來變成 "SOA LOA"、"SOA CONTAINER"、"SOA NGAØY NEO"、
                   # "LOAII CONT")，相關欄位都要多列一個舊編碼寫法
@@ -5685,7 +5691,9 @@ def _imx_old_items(name: str, rows: List[list]) -> Tuple[List[Dict], Optional[fl
         vat_desc = f"V.A.T TAX ({vat_pct}%) (VAT {vat_pct}%)" if vat_pct else "V.A.T TAX"
         items.append({
             "supplier": "IMX EXPRESS SERVICE COMPANY LIMITED", "consignee": consignee,
-            "invoice_no": f"{name.strip()} VAT", "invoice_date": "N/A", "bl_no": "N/A",
+            # invoice_date 用 NA_CONFIRMED (不是一般 N/A)：這一列確認沒有日期，不能被
+            # _fill_missing_invoice_date() 的備援順序覆蓋 (2026-11-19)
+            "invoice_no": f"{name.strip()} VAT", "invoice_date": NA_CONFIRMED, "bl_no": "N/A",
             "shipper": "N/A", "port_of_loading": "N/A", "port_of_discharge": "N/A",
             "volume": "N/A", "description": vat_desc, "amount": None, "vat": round(vat_amt),
             "_vt_sheet": name,

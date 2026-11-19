@@ -172,5 +172,9 @@
   "ORIENTAL_USD": {
     "config": {},
     "score": 1.0
+  },
+  "KH01": {
+    "config": {},
+    "score": 1.0
   }
 }
