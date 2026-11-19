@@ -5989,11 +5989,65 @@ def _rac_sheet_totals(book):
 
 
 def detect_rong_a_chau_any(text: str) -> bool:
-    return detect_rong_a_chau(text) or "ASIA DRAGON FORWARDING" in text.upper()
+    if detect_rong_a_chau(text) or "ASIA DRAGON FORWARDING" in text.upper():
+        return True
+    return detect_rong_a_chau_pdf(text)
+
+
+# --- VN03 RỒNG Á CHÂU 的 PDF 正式發票 (HÓA ĐƠN GIÁ TRỊ GIA TĂNG，2026-11-19 新增版型：
+# 原本只有 Excel 對帳表 (bảng kê)，這批月結單改成供應商直接開立 PDF 電子發票，一份 PDF
+# 一張發票)。品項固定只有 1 筆 (STT=1，ĐVT="Kỳ")。描述常跨 2~3 行換行，pdfplumber 把
+# 「STT/Kỳ/數量/單價/金額」那一行夾在描述文字中間 (跟描述多長、換成幾行有關，不是固定
+# 位置)，用一個涵蓋整段文字的 regex 把這行資料拆出來，前後文字接回 description，不要假設
+# 描述只佔第一行。目前樣本稅率都是 0% (沒有 VAT)；VAT>0 時另建一列 (整張帳單只有一列
+# 稅金的格式，同其他供應商)。發票號碼 = 發票符號 + "-" + 號碼 (跟 VN07 MAERSK/VN01
+# TRANS WAGON PDF 發票同一套慣例，使用者 2026-11-19 確認)。
+_RAC_PDF_TAX_CODE = "0306803195"
+_RAC_PDF_ITEM_RE = re.compile(
+    r"(?P<d1>.*?)\s*\d+\s*(?P<d2>.*?)Kỳ\s+\d+\s+[\d.]+\s+(?P<amount>[\d.]+)\s*(?P<d3>.*)", re.DOTALL)
+
+
+def detect_rong_a_chau_pdf(text: str) -> bool:
+    upper = text.upper()
+    return ("RỒNG Á CHÂU" in upper and _RAC_PDF_TAX_CODE in text
+            and "HÓA ĐƠN GIÁ TRỊ GIA TĂNG" in upper)
+
+
+def parse_rong_a_chau_pdf(text: str) -> Dict:
+    h: Dict[str, Optional[str]] = {"supplier": _RAC_SUPPLIER}
+    series = _search(r"Ký hiệu\(Serial No\):\s*(\S+)", text)
+    number = _search(r"Số\(No\):\s*(\d+)", text)
+    h["invoice_no"] = f"{series}-{number}" if series and number else number
+    m = re.search(r"Ngày\(Date\)\s*(\d{1,2})\s*tháng\(month\)\s*(\d{1,2})\s*năm\s*\(year\)\s*(\d{4})", text)
+    h["invoice_date"] = _format_date_en(*m.groups()) if m else None
+    buyer = _search(r"Tên đơn vị \(Company's name\):\s*([^\n]+)", text)
+    h["consignee"] = _vn_full_consignee(buyer.rstrip(". ")) if buyer else None
+
+    items = []
+    block_m = re.search(r"6=4x5\s*\n(.*?)\nCộng tiền hàng", text, re.DOTALL)
+    item_m = _RAC_PDF_ITEM_RE.match(block_m.group(1)) if block_m else None
+    if item_m:
+        desc = re.sub(r"\s+", " ", "{} {} {}".format(
+            item_m.group("d1"), item_m.group("d2"), item_m.group("d3"))).strip()
+        items.append({"description": desc, "amount": _tw_num(item_m.group("amount")), "vat": None})
+    vat_amount = _tw_num(_search(r"Tiền thuế GTGT\(VAT amount\):\s*([\d.]+)", text))
+    if vat_amount:
+        rate = _search(r"Thuế suất GTGT \(VAT rate\):\s*([\d.,]+)\s*%", text)
+        items.append({"description": f"VAT ({rate}%)" if rate else "VAT", "amount": None, "vat": vat_amount})
+    return {"header": h, "items": items or [{"description": None, "amount": None, "vat": None}]}
+
+
+def _rac_pdf_total(text: str) -> Optional[float]:
+    return _tw_num(_search(r"Cộng tiền hàng\(Amount\):\s*([\d.]+)", text))
+
+
+def _rac_pdf_grand_total(text: str) -> Optional[float]:
+    return _tw_num(_search(r"Tổng tiền hàng thanh toán\(Total amount\):\s*([\d.]+)", text))
 
 
 register_supplier(
-    "RONG_A_CHAU", "CÔNG TY TNHH GIAO NHẬN THƯƠNG MẠI RỒNG Á CHÂU", detect_rong_a_chau_any, None,
+    "RONG_A_CHAU", "CÔNG TY TNHH GIAO NHẬN THƯƠNG MẠI RỒNG Á CHÂU", detect_rong_a_chau_any, parse_rong_a_chau_pdf,
+    extract_total=_rac_pdf_total, extract_grand_total=_rac_pdf_grand_total,
     sheet_parse=_rac_sheet_parse, sheet_totals=_rac_sheet_totals,
 )
 
