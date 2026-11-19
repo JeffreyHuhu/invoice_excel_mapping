@@ -601,7 +601,11 @@ def _rac_parse_sheet(name: str, rows: List[list]):
     for row in rows[start:]:
         invoice_no = _vn_text(_vn_cell(row, meta.get("invoice_no")))
         first = _vn_label(_vn_cell(row, 0))
-        if not invoice_no or first.startswith(("TOTAL", "TỔNG")):
+        # 合計列第一欄 (STT/File No) 本來就是空白；"DOM TRUCKING" 這種新表有的列
+        # 第一欄是正常的 STT 數字，只是這一筆剛好沒填 SO INVOICE (不是沒有發票號
+        # 就代表是合計列)，2026-11-20 抽樣 POU SUNG EX IKEA PART 3 OCT.2026 答案：
+        # 第一欄有數字時一律當資料列，不要誤判成合計列整筆漏掉
+        if (not invoice_no and _vn_num(_vn_cell(row, 0)) is None) or first.startswith(("TOTAL", "TỔNG")):
             # 合計列：明細之後第一列有金額、但沒有發票號的列
             nums = [_vn_num(_vn_cell(row, j)) for j in table["billing"] + table["vat_cols"]]
             if any(n for n in nums):
@@ -5994,7 +5998,14 @@ def _rac_sheet_totals(book):
 
 
 def detect_rong_a_chau_any(text: str) -> bool:
-    if detect_rong_a_chau(text) or "ASIA DRAGON FORWARDING" in text.upper():
+    upper = text.upper()
+    # SAP BPMS LIV 匯出的發票記錄 ("EXPORT_<時間戳記>.xlsx"，欄名 Status/CoCd/Doc.
+    # No./Invoicing Party Name/Invoicing Party English Name…)：不是供應商帳單，只是
+    # 重複記錄已經從 PDF 發票抓到的金額，沒有費用明細可擷取，排除不處理 (使用者
+    # 2026-11-20 確認)
+    if "INVOICING PARTY ENGLISH NAME" in upper or "BPMS LIV" in upper:
+        return False
+    if detect_rong_a_chau(text) or "ASIA DRAGON FORWARDING" in upper:
         return True
     return detect_rong_a_chau_pdf(text)
 
