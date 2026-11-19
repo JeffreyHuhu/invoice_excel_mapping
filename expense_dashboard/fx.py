@@ -3,8 +3,9 @@
 fx.py — 匯率表 (換算成 USD 用)
 
 fx_rates 資料表：每個幣別一筆「1 USD = 多少該幣別」(per_usd)。
-  - 作帳匯率 (使用者 2026-10-28 指定，唯一的自動來源)：資料庫旁邊的
-          「作帳匯率 YYYYMMDD-MMDD.xlsm」，檔名日期最新的那份。讀「ALL」工作表，
+  - 作帳匯率 (使用者 2026-10-28 指定，唯一的自動來源；2026-11-19 搬到固定
+          資料夾 D:\匯率)：BOOK_FOLDER 裡「作帳匯率 YYYYMMDD-MMDD.xlsm」，
+          檔名日期最新的那份。讀「ALL」工作表，
           每個幣別只取最新一期，所有發票都用這個匯率換算 (不分發票月份)。
           不再上網抓匯率 (台灣銀行、ECB 都已移除)。
   - 手動：source = '手動' 的列 (在儀表板「資料管理」頁修改的)。只用在
@@ -21,6 +22,7 @@ import duckdb
 
 SOURCE_MANUAL = "手動"
 SOURCE_BOOK = "作帳匯率"
+BOOK_FOLDER = Path(r"D:\匯率")
 BOOK_FILE_GLOB = "作帳匯率 *.xls*"
 BOOK_SHEET = "ALL"
 # 期間文字，例如 "2026/10/21-2026/10/31"
@@ -68,11 +70,12 @@ def read_book_rates(path: Path) -> Dict[str, Tuple[str, datetime, float]]:
         wb.close()
 
 
-def update_book_rates(con: duckdb.DuckDBPyConnection, folder: Path) -> str:
+def update_book_rates(con: duckdb.DuckDBPyConnection, folder: Optional[Path] = None) -> str:
     """用最新的作帳匯率檔更新 fx_rates，回傳結果說明。檔案裡有的幣別先刪掉
-    全部舊匯率 (含手動)，再寫入最新一期一筆；舊的上網來源 (ECB/台灣銀行) 一併清掉。"""
+    全部舊匯率 (含手動)，再寫入最新一期一筆；舊的上網來源 (ECB/台灣銀行) 一併清掉。
+    folder 不給時用固定資料夾 BOOK_FOLDER (D:\\匯率)。"""
     ensure_table(con)
-    path = latest_book_file(folder)
+    path = latest_book_file(folder or BOOK_FOLDER)
     if path is None:
         return f"找不到作帳匯率檔 ({Path(folder) / BOOK_FILE_GLOB})，沿用資料庫裡現有的匯率"
     rates = read_book_rates(path)

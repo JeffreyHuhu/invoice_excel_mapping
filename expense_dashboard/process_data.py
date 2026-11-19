@@ -431,7 +431,7 @@ def run(roots: List[Path], db_path: Path, level: str = "高",
         fx_message = None
         if update_fx:
             try:
-                fx_message = fx.update_book_rates(con, db_path.parent)
+                fx_message = fx.update_book_rates(con, fx.BOOK_FOLDER)
             except Exception as e:  # noqa: BLE001  匯率檔損壞等狀況不影響資料匯入
                 fx_message = f"匯率更新失敗 (沿用資料庫裡現有的匯率)：{e}"
                 log.warning("匯率更新失敗 | %s", e)

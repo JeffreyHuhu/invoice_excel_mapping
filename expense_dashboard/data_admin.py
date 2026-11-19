@@ -128,11 +128,11 @@ if not db_path.is_file():
     st.stop()
 
 col_a, col_b = st.columns([1, 3])
-if col_a.button("📄 套用作帳匯率", help=f"讀 {db_path.parent} 裡檔名日期最新的「{fx.BOOK_FILE_GLOB}」，每幣別取最新一期"):
+if col_a.button("📄 套用作帳匯率", help=f"讀 {fx.BOOK_FOLDER} 裡檔名日期最新的「{fx.BOOK_FILE_GLOB}」，每幣別取最新一期"):
     con = connect_rw()
     try:
         process_data.init_db(con)
-        msg = fx.update_book_rates(con, db_path.parent)
+        msg = fx.update_book_rates(con, fx.BOOK_FOLDER)
         st.cache_data.clear()
         col_b.success(msg)
     except Exception as e:  # noqa: BLE001  匯率檔損壞等
