@@ -4945,7 +4945,7 @@ _VT_ORIENTAL = [
     # 勾稽當然對不上)。不能完全不設 require："BK 122025 IMP-EXP" 的 "EXP"/"EXP-TRUCK"
     # 工作表欄名不含 "CY QTY"，完全移除 require 會搶走那張表、CONSIGNEE 反而抓不到
     # (2026-11-19 發現的回歸)；"CY QTY" 只在這個版面才會出現，比單純 fees_re 命中更窄。
-    (r"(?!)", {"header": "H-B/L", "require": "CY QTY", "key": ["=SO HD"], "key_strip_space": True,
+    (r"(?!)", {"header": "H-B/L", "require": ["CY QTY", "BOOKING NO", "LOT NO"], "key": ["=SO HD"], "key_strip_space": True,
                "carry_fields": ("bl_no",), "carry_volume": True,
                "fees": [], "fees_re": r"^(?:VOL \(CBM\)|CY QTY) (?!CY QTY)(.+)$", "fees_skip": r"CHECK",
                "vnd_rate": {"rate": "EXCHAGRE RATE", "grand": "TONG TIEN (VND)"},
@@ -5013,17 +5013,26 @@ def detect_oriental_multimodal(text: str) -> bool:
     # (只有 TRUCK 一張工作表，沒有頁首)，改用這家自己對帳表固定的拼字錯誤 "EXCHAGRE RATE"
     # (正確應該是 EXCHANGE RATE) 當最後一道防線——這個打錯字版本在所有既有樣本 (A/B/B2/C/C2/
     # D/D2/D3) 都出現，是這家公司自己 Excel 範本的固定錯字，不會跟其他供應商混到
+    # 2026-11-20：VAT 電子發票的「掃描版」(OCR 辨識出文字，不是數位 PDF) 常把 "ORIENTAL"
+    # 這個字 OCR 錯 (CRIENTAL/ORTENTAL)，上面幾個關鍵字因此都抓不到；"LOGISTICS MULTIMODAL
+    # TRANSPORT COMPANY LIMITED" 是純英文、沒有聲調符號，OCR 比較不會認錯，當最後一道防線。
+    # 同一份掃描檔不同頁的 OCR 錯法可能不一樣 (這幾個字本身也可能被認錯)，字軌 "C26TOD" 前面
+    # 原本要求有數字開頭 (發票號碼 "1-C26TOD-xxx")，這裡放寬成數字可有可無，再接住一些樣本
     return ("ORIENTAL LOGISTICS MULTIMODA" in norm or "DA PHUONG THUC PHUONG DONG" in norm
-            or "VAN TAI DA PHUONG THUC" in norm or re.search(r"\d-?C\d{2}TOD\b", norm) is not None
-            or "EXCHAGRE RATE" in norm)
+            or "VAN TAI DA PHUONG THUC" in norm or re.search(r"(?:\d-?)?C\d{2}TOD\b", norm) is not None
+            or "EXCHAGRE RATE" in norm or "LOGISTICS MULTIMODAL TRANSPORT COMPANY LIMITED" in norm)
 
 
 # PDF VAT INVOICE (HÓA ĐƠN GIÁ TRỊ GIA TĂNG, FAST e-invoice, Serial C26TOD，2026-11-10 答案)：
 # 費用行 "1 Cước vận tải quốc tế (O/F) XMNSGN26050461 2 40'HQ 17.076.150 34.152.300"，
 # 表尾 Sub total / VAT / Total payment。VAT 只在合計、沒有逐筆 VAT -> 最後加 1 列 VAT。
+# "mid" (數量/單位) 不拆成固定兩欄，掃描版 OCR 常把這段讀錯 (見下)，只在 BL 跟金額之間
+# 用寬鬆比對抓過去，CBM 材積另外從 mid 裡面試著解析，解析不出來就不補材積 (不影響費用金額)。
 _OLM_EINV_ITEM_RE = re.compile(
-    r"^\d+\s+(?P<desc>.+?)\s+(?P<bl>\S*\d{6,}\S*)\s+(?P<qty>[\d,]+)\s+(?P<unit>\S+)\s+"
-    r"(?P<price>[\d.]+)\s+(?P<amt>[\d.]+)$", re.MULTILINE)
+    # 開頭的項目序號：掃描版偶爾把 "1" 認成單個字母 (例如 "j")，數字跟單個字母都接住
+    r"^\s*(?:\d+|[A-Za-z])\s+(?P<desc>.+?)\s+(?P<bl>\S*\d{6,}\S*)\s+(?P<mid>.*?)\s+"
+    r"(?P<price>[\d.]+)\s+(?P<amt>[\d.]+)[,.]?\s*$", re.MULTILINE)
+_OLM_EINV_MID_RE = re.compile(r"([\d,]+(?:\.\d+)?)\s*(\S+)?")
 
 
 def _olm_num(text: str) -> float:
@@ -5033,13 +5042,26 @@ def _olm_num(text: str) -> float:
 def parse_oriental_pdf(text: str) -> Dict:
     h: Dict[str, Optional[str]] = {"supplier": "ORIENTAL LOGISTICS MULTIMODAL TRANSPORT COMPANY LIMITED."}
     items: List[Dict] = []
-    # INVOICE NO = Mẫu số + "-" + Ký hiệu + "-" + Số (例 1-C25TOD-699，使用者 2026-11-10 確認)
-    mau = _search(r"\(Form No\.\):\s*(\S+)", text)
-    hieu = _search(r"\(Serial No\.\):\s*(\S+)", text)
-    so = _search(r"S[ốo] \(Invoice No\.\):\s*(\d+)", text)
+    # 掃描版 (OCR 辨識出文字，不是數位 PDF) 的已知雜訊：表格直線被認成 "|"、千分位的
+    # "." 偶爾被認成 ","——先清掉／修正，不影響數位 PDF 本身 (本來就沒有這兩種雜訊)
+    # (2026-11-20 抽查 "Hóa đơn Oriental + Bill - T9-2026.pdf")
+    text = re.sub(r"\|", " ", text)
+    text = re.sub(r",\.", ".", text)
+    text = re.sub(r"(\d),(\d{3})\b", r"\1.\2", text)
+    # INVOICE NO = Mẫu số + "-" + Ký hiệu + "-" + Số (例 1-C25TOD-699，使用者 2026-11-10 確認)。
+    # 標籤後面的括號／冒號掃描版常認錯 (句點、分號、漏掉右括號都出現過)，CLOSE 這段比對
+    # 都用 [.):;]* 寬鬆接住；Số 的 "ố" 掃描版有時被認成 "6"，"invoice"/"no" 大小寫也可能
+    # 跟原文不同；Số 本身偶爾被多認出一個句點 (例如 "344.99" 應該是 "34499")，抓到後把
+    # 句點拿掉 (2026-11-20 抽查 "Hóa đơn Oriental + Bill - T9-2026.pdf" 掃描版，同一份文件
+    # 不同頁的 OCR 錯法可能不一樣，這裡盡量接住已知的幾種)
+    CLOSE = r"[.):;]*"
+    mau = _search(rf"\(Form [Nn]o\.?{CLOSE}\s*(\S+)", text)
+    hieu = _search(rf"\(Serial No\.{CLOSE}\s*(\S+)", text)
+    so_raw = _search(rf"S[ốo6]\s*\(\s*[Ii]nvoice [Nn]o\.?\s*{CLOSE}\s*([\d.]+)", text)
+    so = so_raw.replace(".", "") if so_raw else None
     h["invoice_no"] = "-".join(x for x in (mau, hieu, so) if x) or so
     h["invoice_date"] = _vn_pdf_date(_search(r"\(Date\):\s*(\S+)", text))
-    h["consignee"] = _vn_full_consignee(_search(r"\(Company name\):\s*(.+)", text))
+    h["consignee"] = _vn_full_consignee(_search(rf"\(Company name{CLOSE}\s*(.+)", text))
     m = re.search(r"HÀNH TRÌNH:\s*(.+?)\s+-\s+(.+?)\s*/\s*\n?\s*(.+)", text)
     if m:
         h["port_of_loading"], h["port_of_discharge"], h["vessel"] = (x.strip() for x in m.groups())
@@ -5047,12 +5069,14 @@ def parse_oriental_pdf(text: str) -> Dict:
     for m in _OLM_EINV_ITEM_RE.finditer(text):
         h.setdefault("bl_no", m.group("bl"))
         # 數量單位是 KHỐI (= CBM，「,」是小數)；單位 LÔ (批次) 不計入材積 (2026-11-10 答案)
-        if _vt_norm(m.group("unit")).startswith("KH"):
-            cbm = max(cbm, float(m.group("qty").replace(",", ".")))
+        mid_m = _OLM_EINV_MID_RE.match(m.group("mid"))
+        if mid_m and mid_m.group(2) and _vt_norm(mid_m.group(2)).startswith("KH"):
+            cbm = max(cbm, float(mid_m.group(1).replace(",", ".")))
         items.append({"description": m.group("desc").strip(),
                       "amount": _dsv_vn_dot_amount(m.group("amt")), "vat": None})
-    vat = _dsv_vn_dot_amount(_search(r"\(VAT amount\):\s*([\d.]+)", text))
-    rate = _search(r"\(Tax rate\):\s*(\d+%)", text)
+    # 掃描版這兩個標籤的右括號偶爾被認成 "}"，跟 CLOSE 合併多接一種
+    vat = _dsv_vn_dot_amount(_search(rf"\(VAT amount[.):;}}]*\s*([\d.]+)", text))
+    rate = _search(rf"\(Tax rate[.):;}}]*\s*(\d+%)", text)
     if vat:
         # 整張只有一筆合計 VAT，不是某張提單的費用：B/L NO.、Volume 不沿用表頭 (答案 2026-11-10)
         items.append({"description": f"VAT {rate}" if rate else "VAT", "amount": None, "vat": vat,
@@ -5221,6 +5245,11 @@ _olm_sheet_parse, _olm_sheet_totals = _vt_make("ORIENTAL LOGISTICS MULTIMODAL TR
 register_supplier(
     "ORIENTAL_MULTIMODAL", "CÔNG TY TNHH LOGISTICS VẬN TẢI ĐA PHƯƠNG THỨC (ORIENTAL)",
     detect_oriental_multimodal, parse_oriental_pdf,
+    # multi_page=True：PDF 可能一份裝兩張發票 (掃描時把兩張 VAT 電子發票疊在一起，
+    # 2026-11-20 樣本 "Hóa đơn Oriental + Bill - T9-2026.pdf")。沒有這個設定時，整份
+    # PDF 的文字會接在一起當一張發票解析：抬頭 (發票號碼等) 用第一個比對到的，但費用
+    # 明細的 regex 會掃到全文、把兩張發票的品項全部混進同一張發票號碼，金額整個算錯。
+    multi_page=True,
     extract_total=_olm_pdf_total, extract_grand_total=_olm_pdf_grand,
     sheet_parse=_olm_sheet_parse, sheet_totals=_olm_sheet_totals,
 )
@@ -5606,14 +5635,52 @@ def detect_imx(text: str) -> bool:
 #   - AIR FREIGHT 表的 VND 總額列常誤標成 "TOTAL (USD)" (內容其實是 VND)。
 #   - 一本工作簿可能同時有 D.O FEE 跟 AIR FREIGHT 兩張舊版表 (例如 "POU YUEN AIR
 #     LIST" 系列)，要分開讀每張表的費用欄/EX RATE/VND 總額/VAT，再合併成同一份明細。
+# 2026-11-20 抽查 IMX-辨識等級(低) 32 份帳單全部判「低」，發現兩個漏洞並修正：
+#   - 這段文字常被框在括號裡 ("(AIR FREIGHT CHARGE INVOICE)"、"( D.O FEE INVOICE )"，
+#     跟既有樣本的裸字串不同)，原本的精確比對完全比不到，導致整張表被誤判成
+#     走新版 _VT_IMX 規則 (表格名稱也對不到 "D.O FEE"/"AIR FREIGHT"，兩種路徑都
+#     沒套到正確設定)。改用 _imx_old_label() 先去掉外層括號再比對。
+#   - D/O FEE 表尾的 VAT/合計順序可能是「未稅 TOTAL -> EX.RATE -> V.A.T TAX ->
+#     SUBTOTAL (含稅)」(跟既有樣本「TOTAL -> EX.RATE -> TOTAL (VND)」不同)，
+#     原本只認 "TOTAL" 開頭的列，"SUBTOTAL" 抓不到，VND 總額永遠是 None。改成
+#     抓到 SUBTOTAL (含稅) 就回推：未稅總額 = SUBTOTAL - VAT。
+#   - 同一本工作簿偶爾把同一張月結單存兩次 (其中一次多拆了 USD/VND 兩欄的明細，
+#     AWB 號碼跟 VND 總額跟前一張完全一樣)：兩張都算會讓整張發票金額變成兩倍。
+#     用 AWB 號碼集合 + VND 總額當簽章，重複的表只算第一張 (答案
+#     POU HUNG-AIR-MAR-2026："AIR CHARGE (MAR-2026)" vs "...(2)")。
 _IMX_OLD_LABELS = {"AIR FREIGHT CHARGE INVOICE", "D/O FEE INVOICE"}
 
 
+def _imx_old_label(raw: str) -> str:
+    """去掉外層括號與多餘空白，"D.O"／"D/O" 視為同一種寫法，方便跟 _IMX_OLD_LABELS 比對。"""
+    t = re.sub(r"\s+", " ", raw.strip())
+    if t.startswith("(") and t.endswith(")"):
+        t = t[1:-1].strip()
+    return t.upper().replace("D.O FEE", "D/O FEE")
+
+
 def _imx_old_sheets(book) -> List[Tuple[str, List[list]]]:
-    result = []
+    candidates = []
     for name, rows in book.sheets:
-        if any(_vn_text(_vn_cell(row, 0)).upper() in _IMX_OLD_LABELS for row in rows[:10]):
-            result.append((name, rows))
+        # 工作表名稱本身就對得到新版規則 (_VT_IMX，例如 "AIR FREIGHT SEP-2026
+        # (TOTAL)") 時交給新版處理，不要被內文裡括號包住的標題
+        # ("(AIR FREIGHT CHARGE INVOICE)") 誤判成舊版 (2026-11-20 迴歸測試
+        # sample1 發現：這張表名稱跟內文標題都對得到，但版面其實是新版)
+        if any(re.search(pattern, _vt_norm(name)) for pattern, _cfg in _VT_IMX):
+            continue
+        if any(_imx_old_label(_vn_text(_vn_cell(row, 0))) in _IMX_OLD_LABELS for row in rows[:10]):
+            candidates.append((name, rows))
+    if len(candidates) < 2:
+        return candidates
+    seen_sigs = set()
+    result = []
+    for name, rows in candidates:
+        items, total_vnd, _ = _imx_old_items(name, rows)
+        sig = (total_vnd, tuple(sorted(it.get("invoice_no") for it in items)))
+        if sig in seen_sigs:
+            continue
+        seen_sigs.add(sig)
+        result.append((name, rows))
     return result
 
 
@@ -5646,26 +5713,40 @@ def _imx_old_items(name: str, rows: List[list]) -> Tuple[List[Dict], Optional[fl
     consignee_raw = (_vt_consignee(rows) or "").upper()
     consignee = ("POU HUNG VIETNAM COMPANY LIMITED" if "POU HUNG" in consignee_raw
                  else "POUYUEN VIETNAM COMPANY LIMITED" if "POUYUEN" in consignee_raw else None)
-    rate = total_vnd = vat_amt = vat_pct = None
+    rate = total_vnd = vat_amt = vat_pct = subtotal_vnd = None
     rate_seen = False
     data_rows = []
     for row in rows[header_idx + 2:]:
         label = _vn_label(_vn_cell(row, 0))
         stripped = label.replace(" ", "")
         if stripped.startswith("EX.RATE") or stripped.startswith("EXRATE"):
-            rate = next((v for v in row if isinstance(v, (int, float))), None)
+            # 優先從標籤文字本身解析匯率 (例如 "EX. RATE ( 1 USD = 26.144 VND)")，
+            # 不要只抓這一列第一個數字：有些表 (POU HUNG-AIR-MAR-2026 答案，
+            # 2026-11-20) 這一列同時殘留別的數字 (例如前面欄位重複加總的 VND
+            # 總額)，排在真正的匯率數字前面，抓第一個數字會抓錯，乘出離譜的金額。
+            m = re.search(r"=\s*([\d.,]+)\s*VND", label)
+            rate = (float(m.group(1).replace(".", "").replace(",", "")) if m else
+                    next((v for v in row if isinstance(v, (int, float))), None))
             rate_seen = True
         elif rate_seen and label.startswith("TOTAL"):
             # VND 總額列：D/O FEE 表標 "TOTAL (VND)"，AIR FREIGHT 表常誤標
             # "TOTAL (USD)" (內容其實是 VND)，都當 VND 總額 (只認 EX RATE 後面那列，
             # 避免跟 EX RATE 前面的 USD 小計 "TOTAL (USD)" 混淆)
             total_vnd = next((v for v in row if isinstance(v, (int, float))), None)
+        elif rate_seen and label.startswith("SUBTOTAL"):
+            # 含稅合計：有些 D/O FEE 表尾沒有獨立的未稅 "TOTAL (VND)" 列，直接
+            # 接「V.A.T TAX -> SUBTOTAL (含稅)」，事後用 SUBTOTAL 減 VAT 推回
+            # 未稅總額 (2026-11-20 POU HUNG-DO 系列答案)
+            subtotal_vnd = next((v for v in row if isinstance(v, (int, float))), None)
         elif label.startswith("V.A.T") or label.startswith("VAT"):
             m = re.search(r"(\d+(?:\.\d+)?)\s*%", label)
             vat_pct = m.group(1) if m else None
             vat_amt = next((v for v in row if isinstance(v, (int, float))), None)
         elif isinstance(_vn_cell(row, 0), (int, float)):
             data_rows.append(row)
+
+    if total_vnd is None and subtotal_vnd is not None:
+        total_vnd = subtotal_vnd - (vat_amt or 0)
 
     items: List[Dict] = []
     for row in data_rows:
