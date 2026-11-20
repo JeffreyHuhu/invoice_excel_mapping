@@ -4370,10 +4370,16 @@ _VT_VINH_HUNG_LONG = [
     # HỘ」(跨兩欄)、下面子表頭才是「NÂNG」/「HẠ」，兩欄合起來的欄名變成「PHÍ CHI HỘ
     # NÂNG」/「PHÍ CHI HỘ HẠ」(_vt_labels() 的合併規則)。外觀跟下面簡化版「CHI HO」
     # (fees 只有裸的 PHI NANG/PHI HA/VSC) 很像，但欄位順序不同：一定要先用工作表
-    # 名稱帶 "POU YUEN" 比對到這份，不然會被簡化版搶走，把「SỐ HĐ」憑證號當成金額、
-    # 整欄金額跟稽核全部跑掉 (2026-11-20 使用者確認 "PHÍ CHI HỘ" 英文備註用 Disbursement
-    # Fee，見 extract_utils_streamlit.py 的 _EN_FULL)。
-    (r"POU YUEN", {**_VT_VHL_COMMON, "date": "NGAY LAY",
+    # 名稱帶 "CHI HO POU YUEN" 比對到這份，不然會被簡化版搶走，把「SỐ HĐ」憑證號當成
+    # 金額、整欄金額跟稽核全部跑掉 (2026-11-20 使用者確認 "PHÍ CHI HỘ" 英文備註用
+    # Disbursement Fee，見 extract_utils_streamlit.py 的 _EN_FULL)。
+    # 名稱要寫 "CHI HO POU YUEN"、不能只寫 "POU YUEN"：同一客戶另有工作表名稱只叫
+    # "POU YUEN - 6010"／"POU YUEN - XUẤT" 的「CƯỚC VC POU YUEN」版面 (運費表，欄位
+    # 是 CƯỚC VC TRONG/NGOÀI TPHCM + 裸的 PHÍ NÂNG/PHÍ HẠ，跟這份代墊吊櫃費版面完全
+    # 不同)，名稱比對只寫 "POU YUEN" 會把它搶走、表頭退回比對永遠用不到正確設定
+    # (2026-11-20 抽查 "THÁNG 2 (LẦN 1) - CƯỚC VC POU YUEN"：同一份帳單原本靠表頭
+    # 比對判「中」，加了這份設定後被名稱搶先比對掉，整張變成空值、掉成「低」)。
+    (r"CHI HO.*POU YUEN", {**_VT_VHL_COMMON, "date": "NGAY LAY",
                # "=SO LO" 要精確比對：這張表另有一欄「SỐ CONT \nSỐ LÔ」合併標題，字串結尾
                # 也含 "SO LO"，片語比對 (沒有 "=") 會先抓到那一欄 (整欄變成貨櫃號+批號
                # 的合併字串，不是乾淨的批號)。
