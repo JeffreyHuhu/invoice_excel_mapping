@@ -2912,7 +2912,13 @@ def audit_invoice_totals(
             # (例如 "No C:25-01-0009")，比對前先把冒號拿掉，不影響其他
             # 供應商 (發票號碼本身不會含冒號)。
             page_clean = page_upper.replace(":", "")
-            for inv_key, inv_raw in raw_invoice_no.items():
+            # 候選發票號碼有一個是另一個的字首時 (例如 ECOMET 分割發票
+            # "D26-01-0030" / "D26-01-0030.A"：後面的點不算字母數字，前面
+            # 那組的邊界規則會誤配到字首短的那組)，要先試字串較長的，
+            # 不然永遠只會配到短的那組、長的那組金額就漏算 (使用者 2026-11-20
+            # ECOMET 回報「辨識等級(低)」)。
+            for inv_key, inv_raw in sorted(raw_invoice_no.items(),
+                                            key=lambda kv: -len(str(kv[1] or ""))):
                 if not inv_raw:
                     continue
                 if re.search(rf"(?<![A-Z0-9]){re.escape(str(inv_raw).upper())}(?![A-Z0-9])", page_clean):
