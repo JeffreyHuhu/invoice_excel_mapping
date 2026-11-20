@@ -262,19 +262,25 @@ def _check_header(row: Dict, supplier_key: Optional[str] = None) -> List[Dict]:
 RULE_EXCEL_FORMULA = "EXCEL_FORMULA_RANGE"
 
 
-def _explain_by_formula_issue(issues: List[Dict]) -> List[Dict]:
+def _explain_by_formula_issue(issues: List[Dict], formula_unreadable: bool = False) -> List[Dict]:
     """Excel 帳單的查驗順序：先查 Excel 公式，再查每票，最後查整份帳單合計。
     已經查到合計列公式錯誤時，整份帳單合計對不上就是這個錯誤造成的：合計
     不一致註明原因。使用者原則：沒通過金額稽核一律是重大 ERROR，原因是原
-    帳單也一樣，所以不降級。"""
-    if not any(i["rule"] == RULE_EXCEL_FORMULA and i["severity"] != INFO for i in issues):
+    帳單也一樣，所以不降級。
+    formula_unreadable：帳單是 .xls 舊格式 (或讀取例外)，excel_formula_issues()
+    讀不到公式、回傳 None，沒辦法確認合計不一致的具體原因 (2026-11-20 使用者
+    要求，VN18 SAIGON_TRANSPORT POUCHEN 08 - X 抽樣)。這種情況措辭保守，不
+    聲稱知道原因，只說明「為什麼查不出原因」。"""
+    has_formula_error = any(i["rule"] == RULE_EXCEL_FORMULA and i["severity"] != INFO for i in issues)
+    if not has_formula_error and not formula_unreadable:
         return issues
+    suffix = ("（原因：原帳單 Excel 合計列公式有誤，見公式錯誤）" if has_formula_error
+              else "（原帳單為 .xls 舊格式，無法讀取公式確認原因）")
     explained = []
     for issue in issues:
         if issue["rule"] in ("TOTAL_NET_MISMATCH", "TOTAL_FINAL_MISMATCH", "TOTAL_VAT_MISMATCH",
                              "TOTAL_GRAND_MISMATCH"):
-            issue = dict(issue,
-                         message=f"{issue['message']}（原因：原帳單 Excel 合計列公式有誤，見公式錯誤）")
+            issue = dict(issue, message=f"{issue['message']}{suffix}")
         explained.append(issue)
     return explained
 
@@ -492,6 +498,7 @@ def validate_extraction(
     supplier_key: Optional[str],
     audit_results: Optional[List[Dict]] = None,
     extra_issues: Optional[List[Dict]] = None,
+    formula_unreadable: bool = False,
 ) -> List[Dict]:
     """驗證一份 PDF 的擷取結果，回傳每張發票各一筆：
       invoice_no  發票號碼 (抓不到時為 N/A)
@@ -503,6 +510,8 @@ def validate_extraction(
 
     rows 可能包含好幾張發票 (multi_page 供應商或 LLM 擷取)，依 invoice_no
     分組各自驗證。extra_issues 會附加到每張發票上 (例如「本次為 LLM 擷取」)。
+    formula_unreadable：呼叫端的 excel_formula_issues() 讀不到公式 (.xls 舊
+    格式或讀取例外)，見 _explain_by_formula_issue()。
     """
     groups = _group_rows_by_invoice(rows, supplier_key) if rows else {"": [{}]}
     audit_by_invoice = {}
@@ -564,7 +573,7 @@ def validate_extraction(
         issues.extend(audit_issues)
         exempt = SUPPLIER_EXEMPTIONS.get(supplier_key or "", set())
         issues = [i for i in issues if (i["field"], i["rule"]) not in exempt]
-        issues = _explain_by_formula_issue(issues)
+        issues = _explain_by_formula_issue(issues, formula_unreadable)
         issues = _formula_issue_as_info(issues, supplier_key, has_whole_audit)
         issues = _mark_known_source_issues(issues, supplier_key, group_rows[0])
         confidence = _confidence(issues)
