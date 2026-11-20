@@ -526,13 +526,16 @@ def _rac_table(rows: List[list]):
             charge = "PHI DICH VU" if label == "THANH TIEN" else None
         elif has_service_all and label in _RAC_SERVICE_ALL_PARTS:
             components.add(j)
-        elif label in _RAC_CHARGE_LABELS or (label.startswith("PHỤ PHÍ") and "DẦU" in label):
+        elif (label in _RAC_CHARGE_LABELS or (label.startswith("PHỤ PHÍ") and "DẦU" in label)
+              or label.startswith("FUMIGATION")):
             # 欄名去掉 "PER P/L"/"PENDING" 字尾 (使用者 2026-11-09 答案，費用名稱不要
             # 帶這個技術性標記)；"CFS,THC,CIC PER P/L" 左表的乾淨欄名是 "CFS,THC,CIC
             # FEE" (多一個 "FEE")，這裡補上，其他欄 (STORAGE、D/O, H/L FEE…) 單純去掉
             # 字尾就是乾淨欄名，不用再處理。燃油附加費欄名有 "PHỤ PHÍ XĂNG DẦU"
             # (2026-10) 跟 "PHỤ PHÍ DẦU" (2026-11-20 抽樣 POU PHONG NHAP LCL+AIR+NKTC/
-            # NHAP FCL 表) 兩種寫法，都算同一種費用。
+            # NHAP FCL 表) 兩種寫法，都算同一種費用。燻蒸費欄名有 "FUMIGATION FEE" 跟
+            # "FUMIGATION / PHÍ CÂN" (2026-11-20 抽樣 POU PHONG "FCL, LCL, DHL - EXPORT"
+            # 表) 兩種寫法，原本只認前者，後者整欄金額被漏掉造成 TOTAL_NET/FINAL_MISMATCH。
             charge = re.sub(r"\s*(PER\s*P/L|PENDING)\s*$", "", original, flags=re.I).strip() or original
             if charge.upper() == "CFS,THC,CIC":
                 charge += " FEE"
@@ -598,6 +601,7 @@ def _rac_parse_sheet(name: str, rows: List[list]):
     last_port = None
     last_file_no, last_file_box = None, {"container_no": None, "volume": None}
     last_bl_no, last_kgs_of_bl = None, None
+    last_invoice_no = None
     for row in rows[start:]:
         invoice_no = _vn_text(_vn_cell(row, meta.get("invoice_no")))
         first = _vn_label(_vn_cell(row, 0))
@@ -613,6 +617,11 @@ def _rac_parse_sheet(name: str, rows: List[list]):
                 vat_total = sum(_vn_num(_vn_cell(row, j)) or 0 for j in table["vat_cols"])
                 break
             continue
+        # 同一張發票用兩個以上貨櫃時，第 2 個貨櫃起的 SO INVOICE 欄常留空
+        # (使用者 2026-11-20 答案：POU PHONG T10 ĐỢT 3「FCL, LCL, DHL - EXPORT」
+        # 表，STT=6/7 沿用 STT=5 的發票號)：沿用上一列的發票號碼
+        invoice_no = invoice_no or last_invoice_no
+        last_invoice_no = invoice_no
         if table["row_total"] is not None:
             row_total = _vn_num(_vn_cell(row, table["row_total"]))
             has_charge = any(_vn_num(_vn_cell(row, j)) for j, _ in table["charges"])
@@ -3239,8 +3248,6 @@ def _vt_parse_sheet(name: str, rows: List[list], cfg: Dict, supplier: str,
         elif has_vat:
             desc = f"VAT {0 if not vat else 8}%" if cfg.get("vat_pct_desc") else cfg.get("vat_desc", "VAT")
             row_items.append({"description": desc, "amount": None, "vat": vat, **head})
-        if not row_items:
-            continue
         items += row_items
         # total_skip_multi_key：合併好幾個發票號碼的列 (key_comma 的多行儲存格)，
         # 帳單自己的 TỔNG 常常是舊值沒跟著更新 (VN16 Chuyển kho xe cont 沒有
@@ -3248,7 +3255,12 @@ def _vt_parse_sheet(name: str, rows: List[list], cfg: Dict, supplier: str,
         # 避免把帳單本身的殘留舊值誤判成擷取錯誤)
         if multi_key and cfg.get("total_skip_multi_key"):
             continue
-        # 合計欄空白 (公式沒有存計算結果) 時當成沒有合計，不是 0
+        # 合計欄空白 (公式沒有存計算結果) 時當成沒有合計，不是 0。注意：這裡不能因
+        # row_items 空白就整列 continue——AIR 版 H/D 列本身的費用欄是 0 (沒有列成
+        # 品項)，但帳單的合計欄 (TOTAL(VND) NOT VAT LOCAL / TOTAL(VND) VAT LOCAL
+        # CHARGE) 剛好印在這一列，續行 (DO) 列反而沒有這兩欄；如果這裡 continue，
+        # 會整張發票都抓不到合計，變成 NO_TOTAL_AUDIT (2026-11-20 VN01 POU HUNG
+        # IMPORT AIR 抽查：712/714/716/718 四張都降「低」)
         t = totals.setdefault(key, [None, None])
         # fixed_rate_fee 這欄不列進 row_items (答案規定)，但帳單的 TỔNG CỘNG／
         # TOTAL PLV CHECK 本來就把它算進去，稽核基準要先扣掉，才能跟少了這筆
