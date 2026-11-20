@@ -2846,6 +2846,7 @@ def _vt_parse_sheet(name: str, rows: List[list], cfg: Dict, supplier: str,
     for row in rows[start:end]:
         key = next((_vn_text(_vn_cell(row, k)) for k in keys if _vn_text(_vn_cell(row, k))), "")
         multi_key = False
+        is_continuation = False
         if cfg.get("key_comma") and key:
             # key_comma：一格裡換行的多個號碼用 ", " 連接 (VN16 SONG TRIỀU 答案，2026-11-05)
             raw_key = next(str(_vn_cell(row, k)) for k in keys if _vn_text(_vn_cell(row, k)))
@@ -2881,6 +2882,7 @@ def _vt_parse_sheet(name: str, rows: List[list], cfg: Dict, supplier: str,
                     and (not cfg.get("carry_require_date")
                          or (col.get("date") is not None and _vn_date(_vn_cell(row, col["date"]))))):
                 key = last_key
+                is_continuation = True
             else:
                 continue
         # 電子發票保留完整發票符號 ("1C26TSG-7734"、"1-C26TOD-28667"、"C26TOD/17995")，
@@ -3213,13 +3215,16 @@ def _vt_parse_sheet(name: str, rows: List[list], cfg: Dict, supplier: str,
             value = _vn_num(_vn_cell(row, col[name_])) if col.get(name_) is not None else None
             if name_ == "total" and value is not None and fixed_rate_val:
                 value -= fixed_rate_val
-            if name_ == "grand" and value is None and col.get("grand") is not None and row_items:
+            if name_ == "grand" and value is None and col.get("grand") is not None and row_items and not is_continuation:
                 # 這一列有費用但「TỔNG」欄留空 (例如補差額的調整列，只填在費用欄，
                 # 沒有另外算進每列合計)：用這一列的費用加總 (含稅) 當這一列對合計的
                 # 貢獻，不然會漏掉這一列，造成勾稽基準比實際擷取加總多 (2026-11-16
                 # 抽查 "THÁNG 2 (LẦN 1) - CƯỚC VC POU YUEN"「Bù trừ chênh lệch giá
                 # cước của cont 40 và cont 20...」調整列：TỔNG 欄空白，但 CƯỚC VC
-                # TRONG TPHCM 欄填了 -446,040)
+                # TRONG TPHCM 欄填了 -446,040)。is_continuation (單號空白、沿用上一列
+                # 號碼的續行，例如 VN01 FREIGHT STATEMENT 的 DO 續行列) 不能套這個備援：
+                # 這種續行的合計本來就印在「這張發票第一列」，已經算過一次，續行再加
+                # 會重複計入 (2026-11-20 VN01 POU HUNG 抽查，多了一整個 DO+VAT 的金額)
                 value = round(sum((it.get("amount") or 0) + (it.get("vat") or 0) for it in row_items), 2)
             if name_ == "grand" and cfg.get("vat_of_amount") and value is not None:
                 # vat_of_amount：每個品項的 VAT 是另外算的 8% (沒有算進帳單這欄的「未稅」
