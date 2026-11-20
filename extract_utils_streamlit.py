@@ -1064,6 +1064,10 @@ _EN_FULL = {
     "BDNH": "Dispatch Fee",
     "PHI NANG": "Lift-On Fee",
     "PHI HA": "Lift-Off Fee",
+    # "PHÍ CHI HỘ" 表頭合併 NÂNG/HẠ 子表頭 (VN02 "CHI HỘ POU YUEN" 版面)：代墊吊櫃費，
+    # 使用者 2026-11-20 指定英文備註 (不分 NÂNG/HẠ，跟 CUOC VC 系列一樣統一一個譯名)
+    "PHI CHI HO NANG": "Disbursement Fee",
+    "PHI CHI HO HA": "Disbursement Fee",
     "PHI HA SOM": "Early Lift-Off Fee",
     "PHI HA CONT SOM": "Early Lift-Off Fee",
     "PHI HA BAI SOM": "Early Lift-Off Fee",
