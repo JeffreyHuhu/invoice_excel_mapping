@@ -178,6 +178,11 @@ SUPPLIER_EXEMPTIONS: Dict[str, set] = {
     "PUTRA_SEJAHTERA_SENTOSA": {("amount", "AMOUNT_NEGATIVE")},
     # ECOMET 費用 DISCOUNT TERLAMBAT 為負數 = 折讓 (使用者確認，D26-03-0263 -500,000)
     "ECOMET": {("amount", "AMOUNT_NEGATIVE")},
+    # VINH_HUNG_LONG 運費表 (CƯỚC VC POU YUEN) 的補差額調整列為負數 = 折讓/扣款
+    # (使用者 2026-11-20 確認："THÁNG 2 (LẦN 1) - CƯỚC VC POU YUEN" 的「Bù trừ
+    # chênh lệch giá cước của cont 40 và cont 20」調整列，CƯỚC VC TRONG TPHCM
+    # 欄為 -446,040)
+    "VINH_HUNG_LONG": {("amount", "AMOUNT_NEGATIVE")},
 }
 
 
