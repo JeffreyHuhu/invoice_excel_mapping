@@ -5143,10 +5143,30 @@ _OLM_EINV_ITEM_RE = re.compile(
     r"^\s*(?:\d+|[A-Za-z])\s+(?P<desc>.+?)\s+(?P<bl>\S*\d{6,}\S*)\s+(?P<mid>.*?)\s+"
     r"(?P<price>[\d.]+)\s+(?P<amt>[\d.]+)[,.]?\s*$", re.MULTILINE)
 _OLM_EINV_MID_RE = re.compile(r"([\d,]+(?:\.\d+)?)\s*(\S+)?")
+# 標籤後面的括號／冒號掃描版常認錯 (句點、分號、漏掉右括號都出現過)，比對都用
+# [.):;]* 寬鬆接住 (下面多處共用)
+_OLM_EINV_CLOSE = r"[.):;]*"
 
 
 def _olm_num(text: str) -> float:
     return float(text.replace(",", ""))
+
+
+def _olm_einv_invoice_no(text: str) -> Optional[str]:
+    """INVOICE NO = Mẫu số + "-" + Ký hiệu + "-" + Số (例 1-C25TOD-699，使用者
+    2026-11-10 確認)。Số 的 "ố" 掃描版有時被認成 "6"，"invoice"/"no" 大小寫也可能
+    跟原文不同；Số 本身偶爾被多認出一個句點 (例如 "344.99" 應該是 "34499")，抓到後
+    把句點拿掉 (2026-11-20 抽查 "Hóa đơn Oriental + Bill - T9-2026.pdf" 掃描版，
+    同一份文件不同頁的 OCR 錯法可能不一樣，這裡盡量接住已知的幾種)。
+    extract_total/extract_grand_total 也呼叫這個函式 (見下方)，讓金額勾稽用同一
+    組發票號碼跟每頁比對 (這串號碼是三段拼起來的，原文不會連續出現，不能用整段
+    文字比對頁面，見 register_supplier() 底下的說明)。"""
+    CLOSE = _OLM_EINV_CLOSE
+    mau = _search(rf"\(Form [Nn]o\.?{CLOSE}\s*(\S+)", text)
+    hieu = _search(rf"\(Serial No\.{CLOSE}\s*(\S+)", text)
+    so_raw = _search(rf"S[ốo6]\s*\(\s*[Ii]nvoice [Nn]o\.?\s*{CLOSE}\s*([\d.]+)", text)
+    so = so_raw.replace(".", "") if so_raw else None
+    return "-".join(x for x in (mau, hieu, so) if x) or so
 
 
 def parse_oriental_pdf(text: str) -> Dict:
@@ -5158,18 +5178,8 @@ def parse_oriental_pdf(text: str) -> Dict:
     text = re.sub(r"\|", " ", text)
     text = re.sub(r",\.", ".", text)
     text = re.sub(r"(\d),(\d{3})\b", r"\1.\2", text)
-    # INVOICE NO = Mẫu số + "-" + Ký hiệu + "-" + Số (例 1-C25TOD-699，使用者 2026-11-10 確認)。
-    # 標籤後面的括號／冒號掃描版常認錯 (句點、分號、漏掉右括號都出現過)，CLOSE 這段比對
-    # 都用 [.):;]* 寬鬆接住；Số 的 "ố" 掃描版有時被認成 "6"，"invoice"/"no" 大小寫也可能
-    # 跟原文不同；Số 本身偶爾被多認出一個句點 (例如 "344.99" 應該是 "34499")，抓到後把
-    # 句點拿掉 (2026-11-20 抽查 "Hóa đơn Oriental + Bill - T9-2026.pdf" 掃描版，同一份文件
-    # 不同頁的 OCR 錯法可能不一樣，這裡盡量接住已知的幾種)
-    CLOSE = r"[.):;]*"
-    mau = _search(rf"\(Form [Nn]o\.?{CLOSE}\s*(\S+)", text)
-    hieu = _search(rf"\(Serial No\.{CLOSE}\s*(\S+)", text)
-    so_raw = _search(rf"S[ốo6]\s*\(\s*[Ii]nvoice [Nn]o\.?\s*{CLOSE}\s*([\d.]+)", text)
-    so = so_raw.replace(".", "") if so_raw else None
-    h["invoice_no"] = "-".join(x for x in (mau, hieu, so) if x) or so
+    CLOSE = _OLM_EINV_CLOSE
+    h["invoice_no"] = _olm_einv_invoice_no(text)
     h["invoice_date"] = _vn_pdf_date(_search(r"\(Date\):\s*(\S+)", text))
     h["consignee"] = _vn_full_consignee(_search(rf"\(Company name{CLOSE}\s*(.+)", text))
     m = re.search(r"HÀNH TRÌNH:\s*(.+?)\s+-\s+(.+?)\s*/\s*\n?\s*(.+)", text)
@@ -5196,11 +5206,25 @@ def parse_oriental_pdf(text: str) -> Dict:
 
 
 def _olm_pdf_total(text: str):
-    return _dsv_vn_dot_amount(_search(r"\(Sub total\):\s*([\d.]+)", text))
+    v = _dsv_vn_dot_amount(_search(r"\(Sub total\):\s*([\d.]+)", text))
+    if v is None:
+        return None
+    # multi_page=True 時金額勾稽逐頁比對 (見 register_supplier() 下方說明)：這份
+    # 發票號碼是三段拼起來的 (Mẫu số-Ký hiệu-Số)，原文裡不會連續出現，整段字串
+    # 比對一定配不到頁面文字，一律用 {發票號碼: 總額} 讓外層直接用發票號碼比對
+    # (2026-11-20 使用者回報「14-100024393」仍有大量「低」，查出就是這個原因：
+    # 加上 multi_page=True 修掃描版雙發票合併的問題後，連帶讓原本正常的單發票
+    # digital PDF 也配不到總額，全部變成 NO_TOTAL_AUDIT -> 低)
+    inv = _olm_einv_invoice_no(text)
+    return {inv: v} if inv else v
 
 
 def _olm_pdf_grand(text: str):
-    return _dsv_vn_dot_amount(_search(r"\(Total payment\):\s*([\d.]+)", text))
+    v = _dsv_vn_dot_amount(_search(r"\(Total payment\):\s*([\d.]+)", text))
+    if v is None:
+        return None
+    inv = _olm_einv_invoice_no(text)
+    return {inv: v} if inv else v
 
 
 # --- VN21 ORIENTAL LOGISTICS (美金 DEBIT NOTE，獨立供應商，使用者 2026-11-18 指定，
@@ -5774,17 +5798,34 @@ def _imx_old_label(raw: str) -> str:
     return t.upper().replace("D.O FEE", "D/O FEE")
 
 
+def _imx_has_vnd_subheader(rows: List[list]) -> bool:
+    """這張表的費用欄旁邊有沒有直接給 VND 的子欄 (表頭下一列寫 "VND"，例如
+    "D/O FEE" 或 "TOTAL" 底下一欄 USD、一欄 VND)。配合工作表名稱一起判斷
+    這張表是新版 (直接讀 VND，交給 _VT_IMX) 還是舊版 (只有 USD，要靠
+    EX.RATE 換算，見 _imx_old_items)，見 _imx_old_sheets() 說明。"""
+    header_idx = next((i for i, row in enumerate(rows) if _vn_text(_vn_cell(row, 0)) == "No."), None)
+    if header_idx is None or header_idx + 1 >= len(rows):
+        return False
+    return any(_vn_text(v).upper() == "VND" for v in rows[header_idx + 1])
+
+
 def _imx_old_sheets(book) -> List[Tuple[str, List[list]]]:
     candidates = []
     for name, rows in book.sheets:
-        # 工作表名稱本身就對得到新版規則 (_VT_IMX，例如 "AIR FREIGHT SEP-2026
-        # (TOTAL)") 時交給新版處理，不要被內文裡括號包住的標題
-        # ("(AIR FREIGHT CHARGE INVOICE)") 誤判成舊版 (2026-11-20 迴歸測試
-        # sample1 發現：這張表名稱跟內文標題都對得到，但版面其實是新版)
-        if any(re.search(pattern, _vt_norm(name)) for pattern, _cfg in _VT_IMX):
+        if not any(_imx_old_label(_vn_text(_vn_cell(row, 0))) in _IMX_OLD_LABELS for row in rows[:10]):
             continue
-        if any(_imx_old_label(_vn_text(_vn_cell(row, 0))) in _IMX_OLD_LABELS for row in rows[:10]):
-            candidates.append((name, rows))
+        # 工作表名稱對得到新版規則 (_VT_IMX，例如 "AIR FREIGHT SEP-2026
+        # (TOTAL)") 而且費用欄旁邊真的直接給了 VND 子欄，兩個條件都成立才交給
+        # 新版處理：
+        #   - 只看名稱會誤判 "POU YUEN AIR LIST" 系列 (2026-11-21 答案：表名
+        #     一樣叫 "D.O FEE .../AIR FREIGHT ..."，但費用欄只有 USD，沒有
+        #     VND 子欄，仍然要靠 EX.RATE 換算)。
+        #   - 只看有沒有 VND 子欄會誤判 AIR CHARGE 類舊版表 (表尾也多一欄
+        #     VND 合計，但表名對不到新版，2026-11-20 答案)。
+        name_matches_new = any(re.search(pattern, _vt_norm(name)) for pattern, _cfg in _VT_IMX)
+        if name_matches_new and _imx_has_vnd_subheader(rows):
+            continue
+        candidates.append((name, rows))
     if len(candidates) < 2:
         return candidates
     seen_sigs = set()
@@ -5839,7 +5880,9 @@ def _imx_old_items(name: str, rows: List[list]) -> Tuple[List[Dict], Optional[fl
             # 不要只抓這一列第一個數字：有些表 (POU HUNG-AIR-MAR-2026 答案，
             # 2026-11-20) 這一列同時殘留別的數字 (例如前面欄位重複加總的 VND
             # 總額)，排在真正的匯率數字前面，抓第一個數字會抓錯，乘出離譜的金額。
-            m = re.search(r"=\s*([\d.,]+)\s*VND", label)
+            # "VND" 前面偶爾多一個括號 (POU YUEN AIR LIST 答案 "= 25.760 (VND)")，
+            # 容許 "\(?" 吃掉它
+            m = re.search(r"=\s*([\d.,]+)\s*\(?\s*VND", label)
             rate = (float(m.group(1).replace(".", "").replace(",", "")) if m else
                     next((v for v in row if isinstance(v, (int, float))), None))
             rate_seen = True
