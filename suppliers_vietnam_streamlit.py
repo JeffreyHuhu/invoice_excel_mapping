@@ -5341,7 +5341,12 @@ _VT_TIMES_CARGO = [
             # 每個月的費用欄不一樣 (AIR FREIGHT、CLEANING FEE、OTHER CHARGE…)：INVOICE DATE 與 TOTAL
             # 之間的欄都是費用 (2026-10-28 抽樣)
             "fees_between": ("=INVOICE DATE", ("=TOTAL",)),
-            "total": "=TOTAL", "date": "=INVOICE DATE", "cbm": "=QUANTITY",
+            # "grand" 不是 "total"：這個版面的 Total 欄是公式 "=SUM(M:W)" 但帳單存檔時沒有
+            # 存計算結果 (python-calamine 讀回空白)，用 "total" 會整張都抓不到總額變成未
+            # 勾稽「低」。"grand" 欄位空白時，共用引擎會自動退回用這一列費用欄加總當總額
+            # (suppliers_vietnam_streamlit.py `_vt_parse_sheet` 的 grand 備援)，等於自己算
+            # 出公式本來要算的結果，可以正常勾稽 (2026-11-20 SAMPLE_TCL 樣本)
+            "grand": "=TOTAL", "date": "=INVOICE DATE", "cbm": "=QUANTITY",
             "fields": {"bl_no": "=HBL", "shipper": "=SHIPPER", "port_of_loading": "PLACE OF RECEIPT",
                        "port_of_discharge": "PLACE OF DELIVERY", "vessel": "VESSEL",
                        "arrive_date": "=ETA"}}),
