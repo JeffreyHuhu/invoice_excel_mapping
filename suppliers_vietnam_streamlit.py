@@ -3304,8 +3304,10 @@ def _vt_parse_sheet(name: str, rows: List[list], cfg: Dict, supplier: str,
                         value = row_sum
                     else:
                         value = check_val
-                else:
-                    value = None
+                # check_val 空白時保留原來從 TỔNG 算出的 value，不要整列不稽核：抽樣
+                # 「越南1120」發現 TOTAL PLV CHECK 常常留空，但 TỔNG 仍然可信，直接
+                # 丟掉只會白白多出沒勾稽的「低」；少數真的對不上的列照常被抓出
+                # TOTAL_NET_MISMATCH (原帳單問題，不是規則誤判) (2026-11-21)
             if value is not None:
                 t[i] = (t[i] or 0) + value
     if cfg.get("merge_no_fee"):
@@ -5394,11 +5396,15 @@ register_supplier(
 # 金額；另有裝卸、壓車、吊櫃上下、過磅等費用。發票號碼 = 批號 SỐ LÔ / SỐ INV。
 _VT_ST_COMMON = {"date": "=NGAY", "port": None, "cbm": "SO LUONG CBM",
                  "boxes": {"20": "LOAI CONT 20'", "40": "LOAI CONT 40'", "45": "LOAI CONT 45'"},
-                 # total：表頭文字有兩種版本，"TỔNG " (單字) 跟 "TỔNG CỘNG" (兩字)，
+                 # total：表頭文字有三種版本，"TỔNG " (單字)、"TỔNG CỘNG" (兩字)，
                  # 改用片段比對 (不加 "=") 兩種都認得 (2026-11-18 抽樣「越南1113」
                  # 發現：批號 2025.01 ~ 2026.09 幾乎全部帳單表頭都是「TỔNG CỘNG」，
-                 # 原本的 "=TONG" 要求完全相等，抓不到，整批被迫判定「未勾稽」)
-                 "total": "TONG", "vat_row": True, "vat_last": True, "vat_amount_last": True, "pct_col": "% TANG", "key_comma": True,
+                 # 原本的 "=TONG" 要求完全相等，抓不到，整批被迫判定「未勾稽」)。
+                 # "=SONG TRIEU"：T3.2026 PLV CHECK 這一份合計欄表頭直接寫公司名稱
+                 # 「SONG TRIEU」，沒有「TỔNG/TONG」字樣，沒有這個退路整份帳單
+                 # (Hang Xe Tai/Chuyen Kho/Cont Xuất/Cont Nhập 全部工作表) 都抓不到
+                 # 合計欄 (2026-11-21 抽樣「越南1120」發現)
+                 "total": ("TONG", "=SONG TRIEU"), "vat_row": True, "vat_last": True, "vat_amount_last": True, "pct_col": "% TANG", "key_comma": True,
                  "fields": {"vessel": "SO XE", "container_no": ("SO CONTAINER", "SO XE"),
                             "port_of_loading": ("DIEM DI", "DIEM DI"), "port_of_discharge": "DIEM DEN"}}
 _VT_SONG_TRIEU = [
@@ -5419,7 +5425,11 @@ _VT_SONG_TRIEU = [
                  "total": None,
                  "fees": [("PHI BOC", None), ("PHAT SINH", None), ("CUOC VAN CHUYEN", None)]}),
     (r"CHUYEN KHO", {**_VT_ST_COMMON, "header": "SO CONTAINER", "key": ["SO INV", "SO CONTAINER"], "order_is_key": True,
-                     "total_skip_multi_key": True,
+                     # 不設 total_skip_multi_key：抽樣「越南1120」比對 404 筆合併發票號碼的列，
+                     # 396 筆 TỔNG 跟費用加總完全一致，只有 2025.01~04、2025.10 少數 8 筆 TỔNG 是
+                     # 舊值沒更新——這 8 筆原本就因為跳過稽核而判「低」(NO_TOTAL_AUDIT)，拿掉這個
+                     # 設定後改標「不一致」(ERROR) 一樣是「低」，不會變嚴重；但其餘 396 筆能正常
+                     # 勾稽通過，從「低」救回「高」(2026-11-21)
                      # "CUOC VAN CHUYEN"：2025.01~2026.02 帳單沒有漲價機制，表頭只寫
                      # 「CƯỚC VẬN CHUYỂN」(沒有 "CHƯA TĂNG")，加這個片段當退路
                      # (2026-11-19 抽樣「越南1113」發現；"CUOC VAN CHUYEN CHUA TANG"
