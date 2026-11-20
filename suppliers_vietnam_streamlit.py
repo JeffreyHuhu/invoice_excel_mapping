@@ -2512,13 +2512,14 @@ def _vt_doc_date(rows: List[list]) -> Optional[str]:
 
 
 # BINH_TAN 對帳表內部的批號代碼 -> 客戶簡稱 (使用者 2026-11-20 確認：比對原始資料夾
-# 結構 "…\POU HUNG\…"、"…\POU LI\…"、"…\YUEDE\…"，PFQ 只出現在 POU HUNG 底下的檔案、
-# PFP 只出現在 POU LI 底下、YBH 只出現在 YUE DE 底下 (YBH 是 YUE DE 的 "Pay No" 批號
-# 前綴，沒有交叉)。"PTT No."/"Supplier no:" 表頭旁邊、或 "Pay No" 欄本身常常填這個
-# 代碼，不是公司全名，要先轉換成客戶簡稱才能繼續往下流程 (接 _vn_full_consignee()
-# 展開成全名)。這樣即使檔案被搬出原本的 "POU xxx"/"YUEDE" 資料夾
-# (_vt_path_customer() 找不到客戶)，也能直接從代碼辨識客戶。
-_VT_BINH_TAN_CODES = {"PFQ": "POU HUNG", "PFP": "POU LI", "YBH": "YUE DE"}
+# 結構 "…\POU HUNG\…"、"…\POU LI\…"、"…\YUEDE\…"、"…\POUYUEN\…"，PFQ 只出現在 POU
+# HUNG 底下的檔案、PFP 只出現在 POU LI 底下、YBH 只出現在 YUE DE 底下、PYV 只出現在
+# POUYUEN 底下 (YBH/PYV 是 "Pay No" 批號前綴，沒有交叉)。"PTT No."/"Supplier no:"
+# 表頭旁邊、或 "Pay No" 欄本身常常填這個代碼，不是公司全名，要先轉換成客戶簡稱才能
+# 繼續往下流程 (接 _vn_full_consignee() 展開成全名)。這樣即使檔案被搬出原本的
+# "POU xxx"/"YUEDE" 資料夾 (_vt_path_customer() 找不到客戶)，也能直接從代碼辨識客戶。
+_VT_BINH_TAN_CODES = {"PFQ": "POU HUNG", "PFP": "POU LI", "YBH": "YUE DE", "YBY": "YUE DE",
+                       "PYV": "POUYUEN"}
 
 
 def _vt_consignee(rows: List[list]) -> Optional[str]:
@@ -2769,16 +2770,22 @@ def _vt_parse_sheet(name: str, rows: List[list], cfg: Dict, supplier: str,
     # 表內沒有客戶名稱時，看工作表名稱的寶成廠別 ("FCL POU CHEN" -> POU CHEN)
     pou = re.search(r"(?<![A-Z])POU\s*-?\s*(YUEN|HUNG|CHEN|SUNG|LI|SHENG|YI)(?![A-Z])", _vt_norm(name))
     # code_col：客戶名稱藏在某欄的批號前綴，整張表沒有「Khách hàng／PTT No./Supplier no:」
-    # 可以比對 (VN06 BINH_TAN YUE DE 的 "Pay No" 欄 "YBH20250106…"，使用者 2026-11-20
-    # 確認：YBH 批號只出現在 YUE DE 的對帳表)：取這欄第一個非空白值的英文字母開頭查
-    # _VT_BINH_TAN_CODES，查不到就不採用 (不是任何前綴都當客戶)
+    # 可以比對 (VN06 BINH_TAN YUE DE 的 "Pay No" 欄 "YBH20250106…"/"YBY20250728…"，
+    # 使用者 2026-11-20 確認：YBH/YBY 批號只出現在 YUE DE 的對帳表)：同一張表可能混用
+    # 好幾種前綴 (同一個客戶、不同批次人員)，逐列找第一個查得到 _VT_BINH_TAN_CODES 的
+    # 前綴；查不到就不採用 (不是任何前綴都當客戶)
     code_customer = None
     if cfg.get("code_col"):
         cc = find(cfg["code_col"])
         if cc is not None:
-            code_val = next((_vn_text(_vn_cell(r, cc)) for r in rows[h + 1:] if _vn_text(_vn_cell(r, cc))), "")
-            code_m = re.match(r"([A-Z]+)", _vt_norm(code_val))
-            code_customer = _VT_BINH_TAN_CODES.get(code_m.group(1)) if code_m else None
+            for r in rows[h + 1:]:
+                code_val = _vn_text(_vn_cell(r, cc))
+                if not code_val:
+                    continue
+                code_m = re.match(r"([A-Z]+)", _vt_norm(code_val))
+                code_customer = _VT_BINH_TAN_CODES.get(code_m.group(1)) if code_m else None
+                if code_customer:
+                    break
     common = {"supplier": supplier,
               "consignee": _vt_consignee(rows) or (f"POU {pou.group(1)}" if pou else None) or code_customer,
               "invoice_date": _vt_doc_date(rows), **cfg.get("const", {})}
@@ -3439,13 +3446,19 @@ _VT_PATH_CUSTOMERS = (
 
 def _vt_path_customer(book) -> Optional[str]:
     """檔案內與工作表名稱都沒有客戶時，看檔名、再看所在資料夾 (2026-10-28 抽樣：
-    VN06 "20260629-20260704(EXP-TOTAL).xls" 放在 "…\\POU HUNG\\2026\\08\\"、
+    VN06 "20260629-20250704(EXP-TOTAL).xls" 放在 "…\\POU HUNG\\2026\\08\\"、
     VN14 放在 "…\\YUEDE\\2026\\")。由檔名往上找，離檔案最近的為準。"""
     path = getattr(book, "path", "") or ""
     for part in reversed(re.split(r"[\\/]", path)):
         flat = re.sub(r"[^A-Z]", "", _vt_norm(part))
         for key, name in _VT_PATH_CUSTOMERS:
             if key in flat:
+                return name
+        # BINH_TAN 批號代碼 (PFQ/PFP/YBH/PYV) 常直接寫在檔名裡 (例如 "PFP CFS -AIR
+        # TRUCK FEE 08.2026.xlsx"、"PYV TRUCK FEE 09( HTX Binh Tan)-Import.xlsx")，
+        # 不只出現在表頭「PTT No./Supplier no:」或 "Pay No" 欄裡 (2026-11-20 使用者確認)
+        for code, name in _VT_BINH_TAN_CODES.items():
+            if code in flat:
                 return name
     return None
 
