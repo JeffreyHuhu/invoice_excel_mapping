@@ -93,12 +93,16 @@ ITEM_FIELD_CODES: List[str] = ["description", "amount", "vat"]
 # 完整欄位順序 (輸出 Excel 用，對應使用者最新範本的欄位順序：
 # INVOICE DATE, INVOICE NO, SUPPLIER, CONSIGNEE, Description, AMOUNT, VAT,
 # Order No., Arrive Date, on board date, B/L NO., MBL NO., Port of Loading,
-# Port of discharge, Volume, Vessel, Container no., Shipper)
+# Port of discharge, Volume, Vessel, Container no., Shipper, 檔名)
+# 注意：file_name (檔名) 不是從帳單擷取出來的值，是轉檔時的來源檔名
+# (由呼叫端在輸出前填進每一列，見 app.py/verify_app.py 的 __supplier_label
+# 同一處)，所以不放進 HEADER_FIELD_CODES/ITEM_FIELD_CODES，不影響
+# parse_xxx()、compare_rows()、quality_score() 等既有邏輯。
 FIELD_CODES: List[str] = [
     "invoice_date", "invoice_no", "supplier", "consignee", "description",
     "amount", "vat", "order_no", "arrive_date", "onboard_date", "bl_no",
     "mbl_no", "port_of_loading", "port_of_discharge", "volume", "vessel",
-    "container_no", "shipper",
+    "container_no", "shipper", "file_name",
 ]
 
 # 標準欄位裡「值的語意是日期」的欄位（不管哪個供應商，parse_xxx() 吐出來
@@ -131,6 +135,7 @@ DISPLAY_HEADERS: Dict[str, str] = {
     "vessel":             "Vessel\n船名",
     "container_no":      "Container no.\n貨櫃號碼",
     "shipper":           "Shipper\n出貨方",
+    "file_name":         "檔名",
 }
 
 
@@ -2036,15 +2041,16 @@ def _fill_missing_invoice_date(rows: List[Dict], pdf_path: str, text: Optional[s
     """rows 裡缺 invoice_date 的列，依序試這些來源頂替 (見上方最高指導原則
     第 7 點)：1) 檔名月份 2) 同列的開船日/到達日 3) 文字裡任何日期。
     每一列各自判斷；三種都找不到、或這一列本來就有日期時，原樣保留。
-    供應商規則標成 NA_CONFIRMED 的列 (已確認沒有日期，不是還沒抓到) 永遠不套用
-    這三種備援，直接還原成一般的 NA 顯示。"""
+    供應商規則標成 NA_CONFIRMED 的列 (這一列自己沒有日期，例如 VAT 彙總列、
+    壓車表) 一樣套用這三種備援，只有三種都找不到時才顯示 NA (使用者
+    2026-11-21 規定：所有供應商都適用，缺日期優先找得到就填，不要直接
+    留 N/A)。"""
     filename_fallback = _last_day_of_month_from_filename(pdf_path)
     text_fallback: Optional[str] = None
     text_fallback_tried = False
     for row in rows:
         if row.get("invoice_date") == NA_CONFIRMED:
             row["invoice_date"] = NA
-            continue
         if row.get("invoice_date") not in (None, "", NA):
             continue
         if filename_fallback:
