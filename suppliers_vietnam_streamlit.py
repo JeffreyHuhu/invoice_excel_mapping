@@ -2511,20 +2511,34 @@ def _vt_doc_date(rows: List[list]) -> Optional[str]:
     return None
 
 
+# BINH_TAN 對帳表內部的批號代碼 -> 客戶簡稱 (使用者 2026-11-20 確認：比對原始資料夾
+# 結構 "…\POU HUNG\…"、"…\POU LI\…"、"…\YUEDE\…"，PFQ 只出現在 POU HUNG 底下的檔案、
+# PFP 只出現在 POU LI 底下、YBH 只出現在 YUE DE 底下 (YBH 是 YUE DE 的 "Pay No" 批號
+# 前綴，沒有交叉)。"PTT No."/"Supplier no:" 表頭旁邊、或 "Pay No" 欄本身常常填這個
+# 代碼，不是公司全名，要先轉換成客戶簡稱才能繼續往下流程 (接 _vn_full_consignee()
+# 展開成全名)。這樣即使檔案被搬出原本的 "POU xxx"/"YUEDE" 資料夾
+# (_vt_path_customer() 找不到客戶)，也能直接從代碼辨識客戶。
+_VT_BINH_TAN_CODES = {"PFQ": "POU HUNG", "PFP": "POU LI", "YBH": "YUE DE"}
+
+
 def _vt_consignee(rows: List[list]) -> Optional[str]:
     """買方：「Khách hàng : …」「Tên khách hàng : …」「Họ tên người mua hàng (Customer): …」
     「To : …」「CONSIGNEE : …」「Customer : …」。"""
     pat = re.compile(r"^(?:TEN\s+)?KHACH\s+HANG|NGUOI\s+MUA\s+HANG|^TO\b|^CONSIGNEE|^CUSTOMER")
     # BINH_TAN 的 "PTT No." 表頭 (PTT No. 旁邊那格是客戶簡稱，例如 "Pou Li")：這一格
-    # 有時填的是對帳表自己的批號代碼 ("PFQ") 不是客戶，所以要先確認值看起來像客戶
-    # 名稱 (_VT_PATH_CUSTOMERS 認得) 才採用，不是任何值都當客戶
+    # 有時填的是對帳表自己的批號代碼 ("PFQ"/"PFP")，先查 _VT_BINH_TAN_CODES 轉換，
+    # 查不到才確認值看起來像客戶名稱 (_VT_PATH_CUSTOMERS 認得) 才採用
     ptt_pat = re.compile(r"^PTT\s*NO\b")
+    # "Supplier no:" 表頭 (BINH_TAN 的 "Miscellaneous Fee" 週報表)：值是 "PFQ-EXPORT"/
+    # "PFP-IMPORT" 這種代碼，只接受查得到 _VT_BINH_TAN_CODES 的情況，查不到就不是客戶
+    sup_no_pat = re.compile(r"^SUPPLIER\s*NO\b")
     for row in rows[:20]:
         # 只取儲存格第一行 (下一行常是地址)
         cells = [_vn_text(str(c).splitlines()[0]) for c in row if c not in (None, "") and str(c).strip()]
         for i, cell in enumerate(cells):
             is_ptt = ptt_pat.search(_vt_norm(cell))
-            if not (pat.search(_vt_norm(cell)) or is_ptt):
+            is_sup_no = sup_no_pat.search(_vt_norm(cell))
+            if not (pat.search(_vt_norm(cell)) or is_ptt or is_sup_no):
                 continue
             value = cell.split(":", 1)[1] if ":" in cell else ""
             if not value.strip(" :：") and i + 1 < len(cells):
@@ -2532,9 +2546,16 @@ def _vt_consignee(rows: List[list]) -> Optional[str]:
             # 同一格常接著地址/稅號 ("… VIỆT NAM Địa chỉ: …")
             value = re.split(r"\s+(?:Đ[ịi]a\s+ch[ỉi]|Add(?:ress)?\b|MST\b|Tel\b)", value, flags=re.I)[0]
             value = value.strip(" :：")
-            if is_ptt and not any(key in re.sub(r"[^A-Z]", "", _vt_norm(value))
-                                   for key, _ in _VT_PATH_CUSTOMERS):
-                continue        # 不是認得的客戶簡稱 (例如批號代碼 "PFQ")，略過這格
+            if is_ptt or is_sup_no:
+                code_m = re.match(r"([A-Z]+)", _vt_norm(value))
+                mapped = _VT_BINH_TAN_CODES.get(code_m.group(1)) if code_m else None
+                if mapped:
+                    value = mapped
+                elif is_sup_no:
+                    continue        # Supplier no 只認得批號代碼，查不到就不是客戶，略過這格
+                elif not any(key in re.sub(r"[^A-Z]", "", _vt_norm(value))
+                             for key, _ in _VT_PATH_CUSTOMERS):
+                    continue        # 不是認得的客戶簡稱 (例如批號代碼 "PFQ")，略過這格
             if value:
                 return value
     return None
@@ -2697,8 +2718,14 @@ def _vt_parse_sheet(name: str, rows: List[list], cfg: Dict, supplier: str,
         b = next((c for c in range((a or 0) + 1, len(labels))
                   if any(labels[c] == n[1:] if n.startswith("=") else labels[c].startswith(n)
                          for n in cfg["fees_between"][1])), None) if a is not None else None
+        # fees_between_skip_if：{欄名: 另一欄名} -> 另一欄存在時，這一欄不算獨立費用
+        # (VN06 BINH_TAN 2025-04 後的新版表頭多了 APP/TRAN/CUT 等欄，OTHER 變成重複/
+        # 備註值，不是獨立費用，加總會比 TOTAL 多算；使用者 2026-11-20 樣本確認。
+        # 舊版表頭沒有 APP 欄時，OTHER 仍是唯一的費用欄，照舊透過 remainder 機制算)
+        skip_if = cfg.get("fees_between_skip_if", {})
+        skip_labels = {lab for lab, trigger in skip_if.items() if trigger in labels}
         for c in range(a + 1, b) if a is not None and b is not None else ():
-            if labels[c] and c not in {x for x, _ in fees}:
+            if labels[c] and labels[c] not in skip_labels and c not in {x for x, _ in fees}:
                 fees.append((c, fee_name(c)))
     remainder = None
     if cfg.get("remainder"):
@@ -2741,7 +2768,19 @@ def _vt_parse_sheet(name: str, rows: List[list], cfg: Dict, supplier: str,
             boxes.update({size: base_c + off for size, off in ba.items() if size != "base"})
     # 表內沒有客戶名稱時，看工作表名稱的寶成廠別 ("FCL POU CHEN" -> POU CHEN)
     pou = re.search(r"(?<![A-Z])POU\s*-?\s*(YUEN|HUNG|CHEN|SUNG|LI|SHENG|YI)(?![A-Z])", _vt_norm(name))
-    common = {"supplier": supplier, "consignee": _vt_consignee(rows) or (f"POU {pou.group(1)}" if pou else None),
+    # code_col：客戶名稱藏在某欄的批號前綴，整張表沒有「Khách hàng／PTT No./Supplier no:」
+    # 可以比對 (VN06 BINH_TAN YUE DE 的 "Pay No" 欄 "YBH20250106…"，使用者 2026-11-20
+    # 確認：YBH 批號只出現在 YUE DE 的對帳表)：取這欄第一個非空白值的英文字母開頭查
+    # _VT_BINH_TAN_CODES，查不到就不採用 (不是任何前綴都當客戶)
+    code_customer = None
+    if cfg.get("code_col"):
+        cc = find(cfg["code_col"])
+        if cc is not None:
+            code_val = next((_vn_text(_vn_cell(r, cc)) for r in rows[h + 1:] if _vn_text(_vn_cell(r, cc))), "")
+            code_m = re.match(r"([A-Z]+)", _vt_norm(code_val))
+            code_customer = _VT_BINH_TAN_CODES.get(code_m.group(1)) if code_m else None
+    common = {"supplier": supplier,
+              "consignee": _vt_consignee(rows) or (f"POU {pou.group(1)}" if pou else None) or code_customer,
               "invoice_date": _vt_doc_date(rows), **cfg.get("const", {})}
     if cfg.get("date_sheet_mmdd") and not common["invoice_date"] and year_hint:
         # 工作表名稱是月日 ("0405")，年份取檔名 (VN06 TRUCK AIR+CFS IMPORT)
@@ -4312,6 +4351,23 @@ _VT_VHL_COMMON = {
 # 稽核只用含稅合計 (grand)：同一批號跨好幾張表 (運費、吊櫃、磅櫃、壓車)，各表只有含稅或
 # 只有整列合計，未稅合計混在一起會對不上 (2026-10-28 抽樣)
 _VT_VINH_HUNG_LONG = [
+    # 新客戶 POU YUEN 的「CHI HỘ POU YUEN」版面 (2026-11-20 抽查 "THÁNG 3- CHI HỘ
+    # POU YUEN L1+L2")：代墊吊櫃費每一列有自己的「SỐ HĐ」憑證號欄 (插在費用欄中間，
+    # 常見規則已規定不填)，PHÍ NÂNG/PHÍ HẠ 的表頭是合併儲存格，上面一列寫「PHÍ CHI
+    # HỘ」(跨兩欄)、下面子表頭才是「NÂNG」/「HẠ」，兩欄合起來的欄名變成「PHÍ CHI HỘ
+    # NÂNG」/「PHÍ CHI HỘ HẠ」(_vt_labels() 的合併規則)。外觀跟下面簡化版「CHI HO」
+    # (fees 只有裸的 PHI NANG/PHI HA/VSC) 很像，但欄位順序不同：一定要先用工作表
+    # 名稱帶 "POU YUEN" 比對到這份，不然會被簡化版搶走，把「SỐ HĐ」憑證號當成金額、
+    # 整欄金額跟稽核全部跑掉 (2026-11-20 使用者確認 "PHÍ CHI HỘ" 英文備註用 Disbursement
+    # Fee，見 extract_utils_streamlit.py 的 _EN_FULL)。
+    (r"POU YUEN", {**_VT_VHL_COMMON, "date": "NGAY LAY",
+               # "=SO LO" 要精確比對：這張表另有一欄「SỐ CONT \nSỐ LÔ」合併標題，字串結尾
+               # 也含 "SO LO"，片語比對 (沒有 "=") 會先抓到那一欄 (整欄變成貨櫃號+批號
+               # 的合併字串，不是乾淨的批號)。
+               "fields": {**_VT_VHL_COMMON["fields"], "bl_no": "=SO LO"},
+               "fees": [("=PHI CHI HO NANG", "PHÍ CHI HỘ NÂNG"), ("=PHI CHI HO HA", "PHÍ CHI HỘ HẠ"),
+                        ("=VSC", "VSC")],
+               "grand": "=TONG CONG PHI NANG HA"}),
     # BK (IMP-EXP) 對帳表 (2026-10-28 抽樣，工作表 XUAT/NHẬP/NEO)：運費、吊櫃費、磅櫃費同一列，
     # TỔNG CỘNG = 整列合計；有 "TỔNG CỘNG HĐ NÂNG HẠ" 欄才是這個版面
     (r"(?!)", {**_VT_VHL_COMMON, "date": "=NGAY", "require": "TONG CONG HD NANG HA",
@@ -4511,6 +4567,17 @@ _VT_VHL_ANSWER = [
                  "fees": [("CUOC VC", "CƯỚC VC")], "grand": "=CUOC VC"}),
 ]
 _VT_VINH_HUNG_LONG[0:0] = _VT_VHL_ANSWER
+# 「CƯỚC VẬN CHUYỂN」+ 比例附加費 (TỶ LỆ % PHỤ THU/SỐ TIỀN PHỤ THU) + BỒI DƯỠNG
+# NÂNG HẠ 版面 (上面 "CUOC VC|HANG LE" 那份)：工作表分頁名稱有時打字不統一，沒有
+# 標準的 "CUOC VC" 字樣 (2026-11-20 抽查 "MARCH  2026-YUEDE" 分頁叫 "CUOC VX
+# -NHẬP KHẨU"、"MAY 2026-YUEDE" 分頁叫 "6070- CƯỚC NK VC")，靠名稱比對一律落空，
+# 只能退回表頭比對；但這份設定原本沒有 "require" 鍵，表頭比對完全用不到，反而被
+# 下面純 "CUOC" 的簡化設定 (fees 只有 CUOC/PHI NANG/PHI HA) 搶先比對掉，漏抓
+# SỐ TIỀN PHỤ THU、BỒI DƯỠNG NÂNG HẠ、VAT (擷取加總比帳單合計少了這幾欄的加總)。
+# 補一份一樣的設定、加上 "require"，排在純 CUOC 設定前面，表頭比對才會優先選到。
+_vhl_cuoc_vc_rich = next(cfg for pat, cfg in _VT_VINH_HUNG_LONG if pat == r"CUOC VC|HANG LE")
+_VT_VINH_HUNG_LONG.insert(1, (r"(?!)", {
+    **_vhl_cuoc_vc_rich, "require": "SO TIEN PHU THU", "date": ("NGAY HOAN THANH", "NGAY LAY")}))
 _VT_VINH_HUNG_LONG.insert(0, (r"(?!)", {
     # 自己的版面特徵跟下面那份 (NHẬP 用，"require": "TONG CONG CUOC VC") 不一樣，這裡
     # 是 XUẤT 也會有的「TỔNG CỘNG HĐ NÂNG HẠ」+ CÂN CONT 版面："require" 要蓋掉繼承
@@ -4634,8 +4701,15 @@ _VT_BINH_TAN = [
     # TOTAL (小計) | 2% | TOTAL。MISCELL 常空白，主要費用只寫在小計；合計取最後一個 TOTAL
     (r"(?!)", {"header": "PAY NO", "two_rows": False, "key": ["LOT NO", "DEC NO"], "require": "SHIP MODE",
                "fees": [], "fees_between": ("SHIP MODE", ("UNIT PRICE", "=TOTAL", "TOTAL")),
+               # fees_between_skip_if：2025-04 後新版表頭多了 APP/TRAN/CUT 等費用欄時，
+               # OTHER 欄變成重複值 (不是獨立費用)，照樣加總會比 TOTAL 多算 (2026-11-20
+               # 使用者樣本 "04-2025 BINH TAN-MIS EXPORT" NB25-1031/1032 等確認)
+               "fees_between_skip_if": {"OTHER": "APP"},
                "remainder": (("=TOTAL", "TOTAL 2%"), "Miscellaneous Fee"),
                "total": "$TOTAL", "vat_row": True, "date": "DEC DATE",
+               # code_col：YUE DE 版 (檔名 "(IMP-TOTAL)/(EXP-TOTAL).xls") 沒有「Khách hàng／
+               # PTT No./Supplier no:」欄，客戶藏在 "Pay No" 欄本身的批號前綴 (YBH…)
+               "code_col": "PAY NO",
                "fields": {"order_no": "=INV"}, "cbm": "TOTAL CFS/AIR"}),
     # 出口運費 (EXPORT TRUCK，整本工作簿只看 "HTX-BC" 彙總表)：每列一批 (SỐ LÔ HÀNG)，
     # 運費 + 過路費 (VÉ ĐƯỜNG)，表尾 "TOTAL :" 勾稽整張、"THUẾ SUẤT GTGT" 單獨一筆 VAT。
