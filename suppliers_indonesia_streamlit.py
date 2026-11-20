@@ -7631,7 +7631,14 @@ def _pss_rekap_sheet(rows: List[list]) -> Optional[Tuple[Dict, Dict]]:
         elif not first and sum_col is not None and totals["total"] is None and nums:
             totals["total"] = _vn_num(_vn_cell(r, sum_col))   # 各欄合計列：JUMLAH = 全部費用
         elif nums:
-            text, value = first.upper(), nums[-1]
+            text = first.upper()
+            # 表尾標籤列的金額一律印在 H 欄 (跟每列 JUMLAH 同一欄)：直接用
+            # sum_col 取值，不要用「這一列最後一個數字」(nums[-1])——有的月份
+            # 這一列右側會多出跟費用無關的雜訊數字 (例如簽名日期旁殘留的單據
+            # 編號)，取最後一個數字會抓錯 (使用者 2025-11 ASICS 1867 樣本：
+            # DPP 列最後一個數字其實是 "80500617707" 這種不相關殘留值)。
+            col_value = _vn_num(_vn_cell(r, sum_col)) if sum_col is not None else None
+            value = col_value if col_value is not None else nums[-1]
             m = re.search(r"PPN\s*(\d[\d,]*)\s*%", text)
             if m:
                 items.append({"description": f"PPN {m.group(1)} %", "amount": None, "vat": round(value, 2)})
@@ -7643,14 +7650,22 @@ def _pss_rekap_sheet(rows: List[list]) -> Optional[Tuple[Dict, Dict]]:
                 totals["grand_total"] = value
             elif "TOTAL YANG DITAGIH" in text or "TOTAL YANG DIBAYAR" in text:
                 totals["final_total"] = value
-            # 表尾標籤列 "1. DPP (...)" / "3. Non DPP (G)"：這是 Excel 本身用 SUM
-            # 公式算出來的未稅小計，比各欄合計列的 JUMLAH (H) 更可靠——原帳單
-            # 偶爾在個別明細列漏加 TRUCKING (A) 到 JUMLAH，但 DPP/Non DPP 這兩個
-            # 標籤列是分別對 A~F、G 整欄 SUM，不受單列漏算影響 (使用者 2026-11-13
-            # ASICS 1079 樣本：JUMLAH 合計列比 DPP+NonDPP 少 3,420,000)。
+            # 表尾標籤列 "1. DPP (A,B,C,D,E,F)" 或 "1. HARGA JUAL (A,B,C,D,E,F)"
+            # / "3. Non DPP (G)"：這是 Excel 本身用 SUM 公式算出來的未稅小計，
+            # 比各欄合計列的 JUMLAH (H) 更可靠——原帳單偶爾在個別明細列漏加
+            # TRUCKING (A) 到 JUMLAH，但這個標籤列是對 A~F 整欄 SUM，不受單列
+            # 漏算影響 (使用者 2026-11-13 ASICS 1079 樣本：JUMLAH 合計列比
+            # DPP+NonDPP 少 3,420,000)。
+            # 有些月份 (PPN 12% 新制「Nilai Lain」版面) 把這一列改標成
+            # "HARGA JUAL (A,B,C,D,E,F)"，下面另外多一列 "DPP (No,1 x 10%)"
+            # 只是計稅用的中間值 (= HARGA JUAL 的 10%，不是真正未稅總額)。
+            # 用「標籤後面有沒有括號列出 A~F 這些欄位字母」判斷才是真正的未稅
+            # 小計，不要只認 "DPP" 這個字——"DPP (No,1 x 10%)" 這種計稅中間列
+            # 不可當成未稅總額 (使用者 2026-11-20 PUTRA_SEJAHTERA_SENTOSA
+            # 樣本：誤抓這列造成 ADIDAS/ASICS JAN 2025 帳單判定「低」)。
             if re.search(r"\bNON\s*DPP\b", text):
                 non_dpp_val = value
-            elif re.search(r"\bDPP\b", text):
+            elif re.search(r"\(\s*[A-Z](?:\s*,\s*[A-Z]){1,}\s*\)", text):
                 dpp_val = value
         sign = re.search(r"JAKARTA\s*,\s*(\d{1,2})\s+([A-Za-z]+)\s+(\d{4})",
                          " ".join(_vn_text(c) for c in r if c not in (None, "")), re.I)
