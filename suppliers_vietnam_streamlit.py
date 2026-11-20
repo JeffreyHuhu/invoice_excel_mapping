@@ -5703,7 +5703,7 @@ def _tcl_an_header(text: str) -> Dict[str, Optional[str]]:
 
 
 def parse_times_cargo_pdf(text: str) -> Dict:
-    h: Dict[str, Optional[str]] = {"supplier": "TIMES CARGO LOGISTIC CO., LTD"}
+    h: Dict[str, Optional[str]] = {"supplier": "Times Cargo Logistic Co., Ltd - TCL"}
     items: List[Dict] = []
     if "Arrival Notice" in text:
         h.update(_tcl_an_header(text))
@@ -5756,7 +5756,7 @@ register_supplier(
 # 註明費用不含 VAT ("CÁC CHI PHÍ TRÊN CHƯA BAO GỒM % VAT")，VAT 全部留 None，不傳
 # extract_grand_total (CLAUDE.md VAT 稽核分類第 3 種：完全沒有稅金)。
 def parse_times_cargo_usd_pdf(text: str) -> Dict:
-    h: Dict[str, Optional[str]] = {"supplier": "TIMES CARGO LOGISTIC CO., LTD"}
+    h: Dict[str, Optional[str]] = {"supplier": "Times Cargo Logistic Co., Ltd - TCL"}
     h.update(_tcl_an_header(text))
     items = [{"description": m.group("desc").strip(),
               "amount": float(m.group("amt").replace(",", "")), "vat": None}

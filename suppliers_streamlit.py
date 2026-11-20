@@ -4,7 +4,7 @@ suppliers_streamlit.py
 =======================
 供應商規則的統一入口。實際的 detect_xxx()/parse_xxx() 依國家拆在：
   - suppliers_indonesia_streamlit.py：印尼供應商 (ID01~)
-  - suppliers_vietnam_streamlit.py：越南供應商 (VN01~VN21)
+  - suppliers_vietnam_streamlit.py：越南供應商 (VN01~VN22)
   - suppliers_cambodia_streamlit.py：柬埔寨供應商 (KH01~)
   - suppliers_common_streamlit.py：跨國共用小工具
 
@@ -79,6 +79,9 @@ SUPPLIER_NUMBERS = {
     "ORIENTAL_USD": ("VN21", "100024393", "Công Ty TNHH Logistics Vận Tải Đa Phương Thức"),
     "SONG_TRIEU": ("VN16", "100010180", "CÔNG TY TNHH SONG TRIỀU"),
     "TIMES_CARGO": ("VN17", "100008880", "CÔNG TY TNHH DỊCH VỤ GIAO NHẬN HÀNG HÓA"),
+    # 到貨通知 (Arrival Notice) 版面的美金帳單，獨立供應商 (同一家公司，廠商代號相同)，
+    # 使用者 2026-11-21 指定正式編號為第 22 家越南供應商 VN22
+    "TIMES_CARGO_USD": ("VN22", "100008880", "CÔNG TY TNHH DỊCH VỤ GIAO NHẬN HÀNG HÓA"),
     "SAIGON_TRANSPORT": ("VN18", "100007723", "CÔNG TY TNHH DỊCH VỤ VẬN CHUYỂN SÀI GÒN"),
     "IMX": ("VN19", "100025119", "CÔNG TY TNHH DỊCH VỤ CHUYỂN PHÁT NHANH IMX"),
     # 越南廠商代號：越南進度管控\By Vietnam supplier (Top 20) 的資料夾名稱
@@ -113,6 +116,7 @@ VN_ENGLISH_NAMES = {
     "EXPEDITORS": "EXPEDITORS VIETNAM COMPANY LIMITED",
     "SONG_TRIEU": "SONG TRIEU COMPANY LIMITED",
     "TIMES_CARGO": "Times Cargo Logistic Co., Ltd - TCL",
+    "TIMES_CARGO_USD": "Times Cargo Logistic Co., Ltd - TCL",
     "SAIGON_TRANSPORT": "SAI GON AIR & OCEAN FREIGHT SCE.CO.LTD",
     "IMX": "IMX EXPRESS SERVICE COMPANY LIMITED",
     "YUSEN": "YUSEN LOGISTICS (VIETNAM) CO., LTD - HO CHI MINH BRANCH",

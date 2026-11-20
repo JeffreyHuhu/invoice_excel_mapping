@@ -176,5 +176,9 @@
   "KH01": {
     "config": {},
     "score": 1.0
+  },
+  "TIMES_CARGO_USD": {
+    "config": {},
+    "score": 1.0
   }
 }
