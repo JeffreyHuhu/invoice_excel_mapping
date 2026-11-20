@@ -30,6 +30,8 @@ test_samples/IMX/sample3.xls
 test_samples/IMX/sample3_ref.xlsx
 test_samples/IMX/sample4.xls
 test_samples/IMX/sample4_ref.xlsx
+test_samples/IMX/sample5.xls
+test_samples/IMX/sample5_ref.xlsx
 test_samples/CONG_THANH/sample4.xlsx
 test_samples/CONG_THANH/sample4_ref.xlsx
 test_samples/MAERSK/sample5.pdf
