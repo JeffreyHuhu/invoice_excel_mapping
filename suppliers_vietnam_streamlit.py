@@ -2758,6 +2758,12 @@ def _vt_parse_sheet(name: str, rows: List[list], cfg: Dict, supplier: str,
             if m_fee and not (cfg.get("fees_skip") and re.search(cfg["fees_skip"], label) and not paired) \
                     and c not in {x for x, _ in fees}:
                 fees.append((c, m_fee.group(1).strip()))
+    if cfg.get("usd_amount_suffix"):
+        # ORIENTAL_USD 不換算、不填 VND 金額 (使用者 2026-11-21 指定)：欄名含 "VND" 的
+        # 費用欄 (例如 "FUMIGATION (VND)") 整欄不列入輸出，不管 fees/fees_re 設定本來
+        # 有沒有抓到這欄。目前樣本這些欄都是空的；真的有金額時這裡沒有另外強制判
+        # 「辨識等級(低)」，只是不輸出該筆金額，是已知的小缺口 (尚無樣本驗證)。
+        fees = [(c, desc) for c, desc in fees if "VND" not in labels[c].upper()]
     # 外幣費用名稱加註幣別 (同 VN09 MOL 的使用者答案 "… (USD)")
     # fee_cur：表頭沒寫幣別、但整張費用都是外幣 (VN14 CN 表，合計欄是 TOTAL (USD))
     # (標題寫明 VND 的欄不加，例如 VN14 "FUMIGATION (VND)")
@@ -3074,6 +3080,12 @@ def _vt_parse_sheet(name: str, rows: List[list], cfg: Dict, supplier: str,
             extra_val = _vn_text(_vn_cell(row, extra_c)) if extra_c is not None else None
             if extra_val and head.get("volume"):
                 head["volume"] = f"{head['volume']} ({extra_val})"
+        if cfg.get("usd_amount_suffix") and head.get("volume"):
+            # ORIENTAL_USD 的材積寫法跟其他供應商不同 (使用者 2026-11-21 指定，照帳單
+            # 自己 "CY QTY 20'／40'" 的寫法)："1X20, 2X40" -> "1 x 20' / 2 x 40'"；
+            # 跟 CBM 中間也用 " / " 不是 ", " (例「1 x 40' / 36.55 CBM」)
+            vol = re.sub(r"(\d+)X(\d+)\b", lambda m: f"{m.group(1)} x {m.group(2)}'", head["volume"])
+            head["volume"] = vol.replace(", ", " / ")
         if cfg.get("merge_no_fee"):
             # 同一台車的續行列 (沒有費用、只有單號)：併入上一張 (有費用的那一列)，
             # 單號用 ", " 連接、材積用 " + " 連接 (樣本答案 VN06 NB，2026-11-04)
@@ -3175,6 +3187,17 @@ def _vt_parse_sheet(name: str, rows: List[list], cfg: Dict, supplier: str,
                 vat_amt = grand_val - sum(it["amount"] for it in row_items)
                 row_items.append({"description": f"VAT {0 if not round(vat_amt, 2) else 8}%",
                                    "amount": None, "vat": vat_amt, **head})
+        if cfg.get("usd_amount_suffix") and row_items:
+            # usd_amount_suffix：ORIENTAL_USD 專用 (2026-11-21 使用者指定)：帳單本身就是
+            # USD 計價，AMOUNT 照帳單原始 USD 填，不換算 VND、不拆稅 (VAT 留 N/A，不補
+            # VAT 列)。只在費用名稱後面加 "(USD 金額)"，跟 vnd_alloc/vnd_rate 版型共用
+            # 同一套費用欄位設定 (header/fees/boxes 不變，只是不轉換金額)。
+            for it in row_items:
+                base_desc = re.sub(r"\s*\((?:USD|VND)[^)]*\)$", "", it["description"])
+                # 金額 >= 1000 時帳單自己也用千分位逗號 (答案 "TRUCKING FEE (USD
+                # 1,468.8)")，小數位不足 3 位的尾端 0 去掉，不影響整數部分的逗號
+                amt_txt = f"{it['amount']:,.3f}".rstrip("0").rstrip(".")
+                it["description"] = f"{base_desc} (USD {amt_txt})"
         if cfg.get("gross_vat"):
             # gross_vat：帳單金額是含 8% VAT 的總額 -> 未稅 = 總額 ÷ 1.08 (四捨五入)，VAT = 總額 − 未稅
             # (VN02 YUEDE 新答案，2026-11-05)
@@ -3267,6 +3290,34 @@ def _vt_parse_sheet(name: str, rows: List[list], cfg: Dict, supplier: str,
         # 的擷取加總對得起來 (2026-11-19)
         fixed_rate_val = (_vn_num(_vn_cell(row, col["fixed_rate_fee"])) or 0) \
             if col.get("fixed_rate_fee") is not None else 0
+        if cfg.get("usd_audit"):
+            # usd_audit：ORIENTAL_USD 專用 (2026-11-21 使用者指定)。AMOUNT 照帳單原始
+            # USD 填，稽核基準優先用帳單自己的 TOTAL (USD) 欄；帳單這欄本身算錯時
+            # (原帳單問題，例如 BANGKE T5-2026 IMP 19452/20506 是費用的 2 倍、BANGKE
+            # T6-2026 EXP 4 張都算錯)，改用「USD 加總 × 匯率」對 SỐ TIỀN TRƯỚC THUẾ
+            # 或 TỔNG TIỀN (VND)(含稅，先 ×1.08) 交叉核對；相符就當作這一列已經確認
+            # 正確 (直接採用擷取加總，稽核自然通過)；兩邊都不符才讓自然的
+            # TOTAL_NET_MISMATCH 浮現 (降級「低」，BANGKE T5-2026 EXP C26TOD-21469)。
+            ua = cfg["usd_audit"]
+            total_c = find(ua["total"])
+            rate_c = find(ua["rate"]) if ua.get("rate") else None
+            pretax_c = find(ua["pretax"]) if ua.get("pretax") else None
+            grand_c = find(ua["grand"]) if ua.get("grand") else None
+            row_usd = round(sum(it.get("amount") or 0 for it in row_items), 2)
+            declared = _vn_num(_vn_cell(row, total_c)) if total_c is not None else None
+            rate_val = _vn_num(_vn_cell(row, rate_c)) if rate_c is not None else None
+            tol_total = ua.get("tol_total", 0.02)
+            tol_vnd = ua.get("tol_vnd", 120)
+            ok = declared is None or abs(declared - row_usd) <= tol_total
+            if not ok and rate_val:
+                pv = _vn_num(_vn_cell(row, pretax_c)) if pretax_c is not None else None
+                gv = _vn_num(_vn_cell(row, grand_c)) if grand_c is not None else None
+                ok = (pv is not None and abs(row_usd * rate_val - pv) <= tol_vnd) or (
+                    gv is not None and (abs(row_usd * rate_val - gv) <= tol_vnd
+                                         or abs(row_usd * rate_val * 1.08 - gv) <= tol_vnd))
+            usd_audit_value = row_usd if (ok or declared is None) else declared
+            if usd_audit_value is not None:
+                t[0] = (t[0] or 0) + usd_audit_value
         # total_add：另一個幣別的合計 (VN14 費用有 USD 也有 VND，使用者 2026-10-27 要求
         # 兩種都稽核)：USD 合計 + VND 合計 = 兩種費用的加總，任一幣別對不上都會不通過
         for i, name_ in ((0, "total"), (0, "total_add"), (1, "grand")):
@@ -3579,7 +3630,7 @@ def _vt_make(supplier: str, cfgs: List[Tuple[str, Dict]]):
             # sum_row 也會算出一個可勾稽的未稅合計 (表尾 TOTAL 列各費用欄加總)，不是只有
             # "total"/"sheet_total" 才算有總額可勾稽 (2026-11-12 發現：VN18 SAIGON_TRANSPORT
             # 等好幾家供應商只設定 sum_row，這裡漏了判斷，整份一直顯示「沒有可勾稽的總額」)
-            has_total |= "total" in cfg or "sheet_total" in cfg or "sum_row" in cfg
+            has_total |= "total" in cfg or "sheet_total" in cfg or "sum_row" in cfg or "usd_audit" in cfg
             has_grand |= "grand" in cfg or bool(cfg.get("sheet_total", (None, None))[1])
             for key, pair in _vt_parse_sheet(name, rows, cfg, supplier, _vt_year(book))[1].items():
                 if pair[1] is not None:
@@ -5116,23 +5167,38 @@ _VT_ORIENTAL = [
 ]
 
 
+def _olm_debit_note_currency(text: str) -> Optional[str]:
+    """DEBIT NOTE 的幣別：優先看表尾「AMOUNT: VND／USD」，查不到才看費用列本身的
+    CURR 欄 (使用者 2026-11-21 指定：VN14 只收 VND 的 DEBIT NOTE，ORIENTAL_USD
+    只收 USD 的；版面完全一樣，只能看幣別字樣)。"""
+    m = re.search(r"AMOUNT:\s*([A-Z]{3})\b", text)
+    if m:
+        return m.group(1)
+    m = _OLM_USD_ITEM_RE.search(text)
+    return m.group("cur") if m else None
+
+
 def detect_oriental_multimodal(text: str) -> bool:
+    """VN14：只收 VND 帳單——格式 F (PDF VAT INVOICE) 和格式 G (VND DEBIT NOTE)。
+    Excel「BẢNG KÊ CHI TIẾT CÔNG NỢ」對帳表 (原格式 A~D3) 已經搬到 ORIENTAL_USD
+    (使用者 2026-11-21 指定：OPL 的 Excel 帳單幣別一律美金)，"EXCHAGRE RATE" 這個
+    對帳表專用的拼字錯誤改放到 detect_oriental_usd()，這裡不再用它判斷。"""
     norm = _vt_norm(text)
     if "DEBIT NOTE" in norm:
-        return False    # 美金 DEBIT NOTE 是獨立供應商 VN21，見 detect_oriental_usd()
-    # 2026-10-28 抽樣：有的對帳表只寫越南文名稱 (… ĐA PHƯƠNG THỨC PHƯƠNG ĐÔNG) 或只有發票符號 C26TOD
-    # 2026-11-19 抽查 "BANGKE T2-2026 TRUCK EXP"：連公司名稱、越南文名稱、C26TOD 符號都沒有
-    # (只有 TRUCK 一張工作表，沒有頁首)，改用這家自己對帳表固定的拼字錯誤 "EXCHAGRE RATE"
-    # (正確應該是 EXCHANGE RATE) 當最後一道防線——這個打錯字版本在所有既有樣本 (A/B/B2/C/C2/
-    # D/D2/D3) 都出現，是這家公司自己 Excel 範本的固定錯字，不會跟其他供應商混到
-    # 2026-11-20：VAT 電子發票的「掃描版」(OCR 辨識出文字，不是數位 PDF) 常把 "ORIENTAL"
-    # 這個字 OCR 錯 (CRIENTAL/ORTENTAL)，上面幾個關鍵字因此都抓不到；"LOGISTICS MULTIMODAL
-    # TRANSPORT COMPANY LIMITED" 是純英文、沒有聲調符號，OCR 比較不會認錯，當最後一道防線。
-    # 同一份掃描檔不同頁的 OCR 錯法可能不一樣 (這幾個字本身也可能被認錯)，字軌 "C26TOD" 前面
-    # 原本要求有數字開頭 (發票號碼 "1-C26TOD-xxx")，這裡放寬成數字可有可無，再接住一些樣本
+        # 格式 G：版面跟 ORIENTAL_USD 的 DEBIT NOTE 一樣 (頁首、REF NO.、HAWB INFO…)，
+        # 費用列 CURR=VND、「AMOUNT: VND」才歸這裡；CURR=USD 仍排除給 ORIENTAL_USD
+        company = ("ORIENTAL LOGISTICS MULTIMODA" in norm or "DA PHUONG THUC PHUONG DONG" in norm
+                   or "VAN TAI DA PHUONG THUC" in norm or re.search(r"\d-?C\d{2}TOD\b", norm) is not None)
+        return company and _olm_debit_note_currency(text) == "VND"
+    # 格式 F (數位 PDF 或掃描版 OCR 的 VAT INVOICE)：2026-10-28 抽樣：有的只寫越南文
+    # 名稱 (… ĐA PHƯƠNG THỨC PHƯƠNG ĐÔNG) 或只有發票符號 C26TOD。2026-11-20：掃描版
+    # OCR 常把 "ORIENTAL" 認錯 (CRIENTAL/ORTENTAL)，上面幾個關鍵字因此都抓不到；
+    # "LOGISTICS MULTIMODAL TRANSPORT COMPANY LIMITED" 是純英文、沒有聲調符號，OCR
+    # 比較不會認錯，當最後一道防線。字軌 "C26TOD" 前面原本要求有數字開頭 (發票號碼
+    # "1-C26TOD-xxx")，這裡放寬成數字可有可無，再接住一些樣本
     return ("ORIENTAL LOGISTICS MULTIMODA" in norm or "DA PHUONG THUC PHUONG DONG" in norm
             or "VAN TAI DA PHUONG THUC" in norm or re.search(r"(?:\d-?)?C\d{2}TOD\b", norm) is not None
-            or "EXCHAGRE RATE" in norm or "LOGISTICS MULTIMODAL TRANSPORT COMPANY LIMITED" in norm)
+            or "LOGISTICS MULTIMODAL TRANSPORT COMPANY LIMITED" in norm)
 
 
 # PDF VAT INVOICE (HÓA ĐƠN GIÁ TRỊ GIA TĂNG, FAST e-invoice, Serial C26TOD，2026-11-10 答案)：
@@ -5172,6 +5238,12 @@ def _olm_einv_invoice_no(text: str) -> Optional[str]:
 
 
 def parse_oriental_pdf(text: str) -> Dict:
+    if "DEBIT NOTE" in _vt_norm(text):
+        # 格式 G (VND DEBIT NOTE)：版面、欄位對應跟 ORIENTAL_USD 的 DEBIT NOTE 完全
+        # 一樣 (parse_oriental_usd_pdf() 本來就不限定幣別，CURR 欄直接照抓)，只是
+        # detect_oriental_multimodal() 已經先篩過 CURR=VND 才會走到這裡 (使用者
+        # 2026-11-21 指定)，不用另外重寫一套 parse
+        return parse_oriental_usd_pdf(text)
     h: Dict[str, Optional[str]] = {"supplier": "ORIENTAL LOGISTICS MULTIMODAL TRANSPORT COMPANY LIMITED."}
     items: List[Dict] = []
     # 掃描版 (OCR 辨識出文字，不是數位 PDF) 的已知雜訊：表格直線被認成 "|"、千分位的
@@ -5208,6 +5280,8 @@ def parse_oriental_pdf(text: str) -> Dict:
 
 
 def _olm_pdf_total(text: str):
+    if "DEBIT NOTE" in _vt_norm(text):
+        return None     # 格式 G 沒有未稅/含稅分離的小計，只有 extract_grand_total (見下)
     v = _dsv_vn_dot_amount(_search(r"\(Sub total\):\s*([\d.]+)", text))
     if v is None:
         return None
@@ -5222,6 +5296,10 @@ def _olm_pdf_total(text: str):
 
 
 def _olm_pdf_grand(text: str):
+    if "DEBIT NOTE" in _vt_norm(text):
+        # 格式 G：發票號碼 (REF NO.) 是單一一段，原文會連續出現，不用包成 dict
+        # 讓外層逐頁文字比對 (跟格式 F 的三段拼接發票號碼不同，見 _olm_pdf_total())
+        return _olm_usd_pdf_grand(text)
     v = _dsv_vn_dot_amount(_search(r"\(Total payment\):\s*([\d.]+)", text))
     if v is None:
         return None
@@ -5248,10 +5326,21 @@ def _olm_pdf_grand(text: str):
 # CHARGE WEIGHT，沒有 VESSEL/VOYAGE、HBL INFO、MBL NO、CONTAINER)，海運欄位抓不到時
 # 才補空運欄位 (2026-11-18 VN21 答案，見 parse_oriental_usd_pdf() 下半段)。
 def detect_oriental_usd(text: str) -> bool:
+    """ORIENTAL_USD：PDF USD DEBIT NOTE (原 VN21) + Excel「BẢNG KÊ CHI TIẾT CÔNG NỢ」
+    對帳表 (原 VN14 格式 A~D3，使用者 2026-11-21 指定：OPL 的 Excel 帳單幣別一律
+    美金，歸這個供應商，見 _VT_ORIENTAL_USD())。"""
     norm = _vt_norm(text)
-    return "DEBIT NOTE" in norm and (
-        "ORIENTAL LOGISTICS MULTIMODA" in norm or "DA PHUONG THUC PHUONG DONG" in norm
-        or "VAN TAI DA PHUONG THUC" in norm or re.search(r"\d-?C\d{2}TOD\b", norm) is not None)
+    if "DEBIT NOTE" in norm:
+        company = ("ORIENTAL LOGISTICS MULTIMODA" in norm or "DA PHUONG THUC PHUONG DONG" in norm
+                   or "VAN TAI DA PHUONG THUC" in norm or re.search(r"\d-?C\d{2}TOD\b", norm) is not None)
+        # CURR=VND 的 DEBIT NOTE 歸 VN14 (格式 G)，不是這裡 (使用者 2026-11-21 指定)
+        return company and _olm_debit_note_currency(text) != "VND"
+    # Excel 對帳表固定拼字錯誤 "EXCHAGRE RATE" (正確應該是 EXCHANGE RATE)：所有既有
+    # 樣本 (格式 A/B/B2/C/C2/D/D2/D3) 都有這個字，是這家公司自己 Excel 範本的固定
+    # 錯字，不會跟其他供應商混到；PDF 格式 F (VAT INVOICE) 完全不會出現這個字，不會
+    # 跟 VN14 混到。少數版面 (格式 C2) 連公司名稱都沒有，只能靠這個字判斷
+    # (2026-11-19 抽查 "BANGKE T2-2026 TRUCK EXP")
+    return "EXCHAGRE RATE" in norm
 
 
 _OLM_USD_ITEM_RE = re.compile(
@@ -5279,6 +5368,9 @@ def _oriental_usd_scan_pages(pdf_path: str) -> List[str]:
 # "TAOYUAN, TAI" 之類的截斷國名 (DEPARTURE AIRP 欄位寬度不夠，印到這裡就斷掉)，
 # 遇到新的截斷寫法再補 (2026-11-18 VN21 答案："TAI" -> "TAIWAN")
 _OLM_USD_AIRPORT_COUNTRY_FIX = {"TAI": "TAIWAN"}
+# 整段地名被截斷、沒有逗號可以定位 (2026-11-21 VN14 格式 G 答案："HOCHIMINH CIT" ->
+# "HOCHIMINH CITY")，跟上面那個用逗號定位國名的截斷不是同一種情況，另外查表
+_OLM_USD_AIRPORT_FULL_FIX = {"HOCHIMINH CIT": "HOCHIMINH CITY"}
 
 
 def parse_oriental_usd_pdf(text: str) -> Dict:
@@ -5321,16 +5413,19 @@ def parse_oriental_usd_pdf(text: str) -> Dict:
     if not h["bl_no"]:
         h["bl_no"] = _search(r"HAWB INFO:\s*\W*(\S+)", text)
     if not h["mbl_no"]:
-        h["mbl_no"] = _search(r"MAWB NO\s*[:+]\s*(\S+)", text)
+        # 號碼本身帶空白 (2026-11-21 VN14 格式 G 答案："738-5842 1263"，照原文留空白)：
+        # 主號碼後面緊接著的續碼只在是純數字時才接住，避免吃到下一個欄位標籤
+        h["mbl_no"] = _search(r"MAWB NO\s*[:+]\s*(\S+(?:\s+\d+)?)", text)
     if not h.get("port_of_loading"):
         dep = _search(r"DEPARTURE AIRP\s*:\s*(.+?)\s+ARRIVAL AIRP", text)
         if dep:
             dep = dep.strip()
-            m2 = re.search(r",\s*(\S+)$", dep)
-            fix = _OLM_USD_AIRPORT_COUNTRY_FIX.get(m2.group(1)) if m2 else None
-            if fix:
-                dep = dep[:m2.start(1)] + fix
-            h["port_of_loading"] = dep
+            fix = _OLM_USD_AIRPORT_FULL_FIX.get(dep)
+            if not fix:
+                m2 = re.search(r",\s*(\S+)$", dep)
+                fix_suffix = _OLM_USD_AIRPORT_COUNTRY_FIX.get(m2.group(1)) if m2 else None
+                fix = (dep[:m2.start(1)] + fix_suffix) if fix_suffix else None
+            h["port_of_loading"] = fix or dep
     if not h.get("port_of_discharge"):
         h["port_of_discharge"] = _search(r"DESTINATION\s*:\s*(\S+(?:\s+\S+)*?)\s*$", text)
     items: List[Dict] = []
@@ -5359,25 +5454,54 @@ def _olm_usd_pdf_grand(text: str):
     return _olm_num(v) if v else None
 
 
-register_supplier(
-    "ORIENTAL_USD", "ORIENTAL LOGISTICS (DEBIT NOTE, USD)", detect_oriental_usd, parse_oriental_usd_pdf,
-    extract_grand_total=_olm_usd_pdf_grand,
-    # 一份 PDF 常是好幾張各自獨立的 DEBIT NOTE (各自的 REF NO/CONSIGNEE/總額)，
-    # 不是同一張發票跨頁。沒設 multi_page 時全部頁面文字會被接在一起餵給
-    # parse_oriental_usd_pdf()，把不同發票的費用行全部加在一起，金額勾稽
-    # 當然對不上 (2026-11-18 使用者回報 "PHUONG DONG" 月結單辨識等級(低))。
-    multi_page=True,
-    page_text=_oriental_usd_scan_pages,
-)
-
-
 # 工作表叫 "CN T 03" 但版面是 SEA 對帳表 (表頭 H-B/L，沒有 BILL NO)：放在 CN 設定前面，
 # 用必要欄位區分 (2026-10-28 抽樣 "POU HUNG 03-2026 PHƯƠNG ĐÔNG export")。"name_require"
 # 才是名稱已符合時還要檢查的必要欄位 ("require" 只給名稱沒對到時的表頭比對用)；否則一般
 # "CN T9.2026" 這種真的是 CN 版面的工作表，會被這個放在前面的設定誤先攔截 (2026-11-10)
 _VT_ORIENTAL.insert(next(i for i, (p, _c) in enumerate(_VT_ORIENTAL) if p == r"^CN"),
                     (r"^CN", {**next(c for p, c in _VT_ORIENTAL if p == r"SEA"), "name_require": "H-B/L"}))
-_olm_sheet_parse, _olm_sheet_totals = _vt_make("ORIENTAL LOGISTICS MULTIMODAL TRANSPORT COMPANY LIMITED.", _VT_ORIENTAL)
+
+
+def _vt_usd_view(cfgs: List[Tuple[str, Dict]]) -> List[Tuple[str, Dict]]:
+    """VND 對帳表設定 (_VT_ORIENTAL) -> ORIENTAL_USD 的 USD 輸出版 (使用者 2026-11-21
+    指定：OPL 的 Excel 帳單幣別一律美金，不換算、不拆稅)。header/key/fees/boxes/cbm/
+    fields 等「認版面、找欄位」的設定照抄，只改「怎麼輸出金額」：
+      - 拿掉 vnd_alloc/vnd_rate (USD→VND 換算) 跟所有 VAT 相關設定 (VAT 永遠 N/A，
+        不加 VAT 列，使用者指定：帳單沒有 VAT 欄時不自行推算)。
+      - 加 usd_amount_suffix (金額照帳單原始 USD 填，只在費用名稱後面加
+        "(USD 金額)")、usd_audit (稽核改用帳單自己的 TOTAL (USD) 欄；這欄本身算錯
+        時改用 USD×匯率對 VND 金額交叉核對，相符才算過，否則讓金額不一致自然
+        浮現、降級「低」，見 _vt_parse_sheet() 的 usd_audit 區塊)。
+    只處理原本就有 vnd_alloc/vnd_rate 的設定 (格式 A/B/B2/C/C2/D/D2/D3)；沒有這兩個
+    key 的設定 (ORIENTAL 月結發票清單等舊格式，本來就是 VND 直接輸出，不是 USD 計價)
+    原樣保留，不受影響。"""
+    out = []
+    for pattern, cfg in cfgs:
+        alloc = cfg.get("vnd_alloc")
+        vrate = cfg.get("vnd_rate")
+        if not (alloc or vrate):
+            out.append((pattern, cfg))
+            continue
+        cfg2 = dict(cfg)
+        for k in ("vnd_alloc", "vnd_rate", "vat", "vat_pct_desc", "vat_zero_ok", "vat_desc",
+                  "vat_row", "vat_last", "vat_amount_last", "vat_total", "vat_na_fields",
+                  "vat_no_date", "vat_of_amount", "vat_zero_desc", "vat_same_row",
+                  "vat_doc_only", "gross_vat", "total", "grand", "total_add"):
+            cfg2.pop(k, None)
+        cfg2["usd_amount_suffix"] = True
+        # 所有既有樣本 (格式 A/B/B2/C/C2/D/D2/D3) 的 TOTAL(USD) 欄合併表頭算出來的
+        # 欄名都是 "TOTAL (USD)" 或 "TOTAL USD"；SỐ TIỀN TRƯỚC THUẾ (格式 B/B2 沒有
+        # 這欄，find() 查不到會回 None，usd_audit 自動跳過) 跟 TỔNG TIỀN (VND)／
+        # EXCHAGRE RATE 每種格式都有，不用照格式各自指定 (2026-11-21 使用者答案逐格式核對)
+        cfg2["usd_audit"] = {"total": ("=TOTAL (USD)", "=TOTAL USD"), "rate": "EXCHAGRE RATE",
+                             "pretax": "SO TIEN TRUOC THUE", "grand": "TONG TIEN (VND)"}
+        out.append((pattern, cfg2))
+    return out
+
+
+_VT_ORIENTAL_USD = _vt_usd_view(_VT_ORIENTAL)
+_olm_usd_sheet_parse, _olm_usd_sheet_totals = _vt_make(
+    "ORIENTAL LOGISTICS MULTIMODAL TRANSPORT COMPANY LIMITED.", _VT_ORIENTAL_USD)
 register_supplier(
     "ORIENTAL_MULTIMODAL", "CÔNG TY TNHH LOGISTICS VẬN TẢI ĐA PHƯƠNG THỨC (ORIENTAL)",
     detect_oriental_multimodal, parse_oriental_pdf,
@@ -5387,7 +5511,20 @@ register_supplier(
     # 明細的 regex 會掃到全文、把兩張發票的品項全部混進同一張發票號碼，金額整個算錯。
     multi_page=True,
     extract_total=_olm_pdf_total, extract_grand_total=_olm_pdf_grand,
-    sheet_parse=_olm_sheet_parse, sheet_totals=_olm_sheet_totals,
+)
+register_supplier(
+    "ORIENTAL_USD", "ORIENTAL LOGISTICS (BẢNG KÊ／DEBIT NOTE, USD)", detect_oriental_usd, parse_oriental_usd_pdf,
+    extract_grand_total=_olm_usd_pdf_grand,
+    # 一份 PDF 常是好幾張各自獨立的 DEBIT NOTE (各自的 REF NO/CONSIGNEE/總額)，
+    # 不是同一張發票跨頁。沒設 multi_page 時全部頁面文字會被接在一起餵給
+    # parse_oriental_usd_pdf()，把不同發票的費用行全部加在一起，金額勾稽
+    # 當然對不上 (2026-11-18 使用者回報 "PHUONG DONG" 月結單辨識等級(低))。
+    multi_page=True,
+    page_text=_oriental_usd_scan_pages,
+    # Excel「BẢNG KÊ CHI TIẾT CÔNG NỢ」對帳表 (原 VN14 格式 A~D3，使用者 2026-11-21
+    # 指定搬過來)：沿用 VN14 認版面/找欄位的設定 (_VT_ORIENTAL)，只是金額輸出改成
+    # USD passthrough，見 _vt_usd_view()。
+    sheet_parse=_olm_usd_sheet_parse, sheet_totals=_olm_usd_sheet_totals,
 )
 
 
@@ -5497,17 +5634,35 @@ _VT_TIMES_CARGO = [
 ]
 
 
+_TCL_AN_TOTAL_RE = re.compile(r"Total Charges\s+[\d.,]+\s*\(([A-Z]{3})\)")
+
+
+def _tcl_an_currency(text: str) -> Optional[str]:
+    """到貨通知 (Arrival Notice) 版面「Total Charges」合計行的幣別。"""
+    m = _TCL_AN_TOTAL_RE.search(text)
+    return m.group(1) if m else None
+
+
 def detect_times_cargo(text: str) -> bool:
     norm = _vt_norm(text)
+    if "Arrival Notice" in text and _tcl_an_currency(text) == "USD":
+        return False  # 美金的到貨通知另立供應商 TIMES_CARGO_USD (使用者 2026-11-21 指定)
     # 電子發票只有越南文名稱 (… THỜI GIAN) 與稅號 0309536491
     return ("TIMES CARGO LOGISTIC" in norm or "0309536491" in norm or "GIAO NHAN HANG HOA THOI GIAN" in norm
             # 沒有公司名稱的 STATEMENT OF ACCOUNT：發票符號 1C25TAA
             or ("STATEMENT OF ACC" in norm and re.search(r"\dC\d{2}TAA\b", norm) is not None))
 
 
+def detect_times_cargo_usd(text: str) -> bool:
+    """VN22 TIMES_CARGO_USD：VN17 TIMES_CARGO 的到貨通知 (Arrival Notice) 版面，
+    費用金額是美金時另立供應商 (使用者 2026-11-21 指定，轉檔時分開放資料夾)。"""
+    return "Arrival Notice" in text and _tcl_an_currency(text) == "USD"
+
+
 # PDF (2026-10-28 抽樣)：
 #  (a) 到貨通知 (THÔNG BÁO HÀNG ĐẾN / Arrival Notice)：費用行 "☑ CFS 2.300 CBM 35.00 80.50 (USD)"
 #      (名稱、數量、單位、單價、金額、幣別)，"Total Charges 333.00 (USD)"，費用不含 VAT。
+#      幣別是美金時歸 TIMES_CARGO_USD，不是這裡 (見 detect_times_cargo_usd())。
 #  (b) 電子發票：費用行 "1 Cước vận chuyển quốc tế bằng đường biển Khối 1 2.366.100 2.366.100"
 #      (名稱、單位、數量、單價、金額)，表尾 Cộng tiền hàng / Tiền thuế GTGT / Tổng cộng tiền thanh toán。
 _TCL_AN_ITEM_RE = re.compile(
@@ -5517,30 +5672,41 @@ _TCL_EINV_ITEM_RE = re.compile(
     r"^\d+\s+(?P<desc>.+?)\s+(?P<unit>\S+)\s+(?P<qty>[\d.,]+)\s+(?P<price>[\d.]+)\s+(?P<amt>[\d.]+)$", re.MULTILINE)
 
 
+def _tcl_an_header(text: str) -> Dict[str, Optional[str]]:
+    """到貨通知 (Arrival Notice) 版面的表頭欄位。VN17 TIMES_CARGO (越南盾) 和
+    VN22 TIMES_CARGO_USD (美金) 共用同一個版面，表頭欄位完全一樣，差異只在
+    幣別 (見 detect_times_cargo_usd())。"""
+    h: Dict[str, Optional[str]] = {}
+    # 冒號有時印在上一行 (":" / "Số (No.) IM-LSEA507225")
+    h["invoice_no"] = _search(r"Số \(No\.\)\s*:?\s*(\S+)", text)
+    h["invoice_date"] = _vn_pdf_date(_search(r"\(Time\)\s*:?\s*\(?(\d{1,2}/\d{1,2}/\d{4})", text))
+    h["consignee"] = _vn_full_consignee(_search(r"\(TO\):\s*(.+)", text))
+    h["shipper"] = _search(r"\(Shipper\)\s*:\s*(.+)", text)
+    m = re.search(r"\(Vessel\)\s*:\s*(.+?)\s+Chuyến \(Voy\.\)\s*:\s*(\S+)", text)
+    h["vessel"] = f"{m.group(1)} / {m.group(2)}" if m else None
+    m = re.search(r"\(From\)\s*:\s*(.+?)\s+Đến cảng \(Terminal\)\s*:\s*(.+)", text)
+    if m:
+        h["port_of_loading"], h["port_of_discharge"] = m.group(1).strip(), m.group(2).strip()
+    m = re.search(r"\(Estimated Arrival\)\s*:\s*([A-Za-z]{3}) (\d{1,2}), (\d{4})", text)
+    h["arrive_date"] = _format_date_en_from_month_name(m.group(2), m.group(1), m.group(3)) if m else None
+    h["mbl_no"] = _search(r"\(M-B/L\)\s*:\s*(\S+)", text)
+    h["bl_no"] = _search(r"\(H-B/L\)\s*:\s*(\S+)", text)
+    h["container_no"] = _search(r"^([A-Z]{4}\d{7})/", text)
+    # CFS/CFS 是散貨 (CBM)；整櫃寫 "(01)X40'HC"。帳單印到小數第 3 位 ("1.330
+    # CBM")，答案只留 2 位 ("1.33 CBM")，去掉多餘的 0 (2026-11-21 答案)
+    cbm_raw = _search(r"([\d.]+)\s*CBM\s*$", text)
+    cbm = f"{float(cbm_raw):.2f}".rstrip("0").rstrip(".") if cbm_raw else None
+    box = re.search(r"\((\d+)\)\s*X\s*(\d{2}'?\w*)", text)
+    lcl = "CFS/CFS" in text or "A PART OF" in text
+    h["volume"] = _fmt_volume(containers=[] if lcl or not box else [(box.group(1), box.group(2))], cbm=cbm)
+    return h
+
+
 def parse_times_cargo_pdf(text: str) -> Dict:
     h: Dict[str, Optional[str]] = {"supplier": "TIMES CARGO LOGISTIC CO., LTD"}
     items: List[Dict] = []
     if "Arrival Notice" in text:
-        # 冒號有時印在上一行 (":" / "Số (No.) IM-LSEA507225")
-        h["invoice_no"] = _search(r"Số \(No\.\)\s*:?\s*(\S+)", text)
-        h["invoice_date"] = _vn_pdf_date(_search(r"\(Time\)\s*:?\s*\(?(\d{1,2}/\d{1,2}/\d{4})", text))
-        h["consignee"] = _search(r"\(TO\):\s*(.+)", text)
-        h["shipper"] = _search(r"\(Shipper\)\s*:\s*(.+)", text)
-        m = re.search(r"\(Vessel\)\s*:\s*(.+?)\s+Chuyến \(Voy\.\)\s*:\s*(\S+)", text)
-        h["vessel"] = f"{m.group(1)} / {m.group(2)}" if m else None
-        m = re.search(r"\(From\)\s*:\s*(.+?)\s+Đến cảng \(Terminal\)\s*:\s*(.+)", text)
-        if m:
-            h["port_of_loading"], h["port_of_discharge"] = m.group(1).strip(), m.group(2).strip()
-        m = re.search(r"\(Estimated Arrival\)\s*:\s*([A-Za-z]{3}) (\d{1,2}), (\d{4})", text)
-        h["arrive_date"] = _format_date_en_from_month_name(m.group(2), m.group(1), m.group(3)) if m else None
-        h["mbl_no"] = _search(r"\(M-B/L\)\s*:\s*(\S+)", text)
-        h["bl_no"] = _search(r"\(H-B/L\)\s*:\s*(\S+)", text)
-        h["container_no"] = _search(r"^([A-Z]{4}\d{7})/", text)
-        # CFS/CFS 是散貨 (CBM)；整櫃寫 "(01)X40'HC"
-        cbm = _search(r"([\d.]+)\s*CBM\s*$", text)
-        box = re.search(r"\((\d+)\)\s*X\s*(\d{2}'?\w*)", text)
-        lcl = "CFS/CFS" in text or "A PART OF" in text
-        h["volume"] = _fmt_volume(containers=[] if lcl or not box else [(box.group(1), box.group(2))], cbm=cbm)
+        h.update(_tcl_an_header(text))
         for m in _TCL_AN_ITEM_RE.finditer(text):
             cur = m.group("cur")
             items.append({"description": m.group("desc").strip() + ("" if cur == "VND" else f" ({cur})"),
@@ -5582,6 +5748,30 @@ register_supplier(
     "TIMES_CARGO", "CÔNG TY TNHH DỊCH VỤ GIAO NHẬN HÀNG HÓA (TIMES CARGO)", detect_times_cargo,
     parse_times_cargo_pdf, extract_total=_tcl_pdf_total, extract_grand_total=_tcl_pdf_grand,
     sheet_parse=_tcl_sheet_parse, sheet_totals=_tcl_sheet_totals,
+)
+
+
+# VN22 TIMES_CARGO_USD：VN17 TIMES CARGO LOGISTIC 的到貨通知 (Arrival Notice) 版面，
+# 費用是美金時另立供應商 (使用者 2026-11-21 指定，跟越南盾帳單分開放資料夾)。帳單
+# 註明費用不含 VAT ("CÁC CHI PHÍ TRÊN CHƯA BAO GỒM % VAT")，VAT 全部留 None，不傳
+# extract_grand_total (CLAUDE.md VAT 稽核分類第 3 種：完全沒有稅金)。
+def parse_times_cargo_usd_pdf(text: str) -> Dict:
+    h: Dict[str, Optional[str]] = {"supplier": "TIMES CARGO LOGISTIC CO., LTD"}
+    h.update(_tcl_an_header(text))
+    items = [{"description": m.group("desc").strip(),
+              "amount": float(m.group("amt").replace(",", "")), "vat": None}
+             for m in _TCL_AN_ITEM_RE.finditer(text)]
+    return {"header": h, "items": items or [{"description": None, "amount": None, "vat": None}]}
+
+
+def _tcl_usd_pdf_total(text: str):
+    v = _search(r"Total Charges\s+([\d.,]+)", text)
+    return float(v.replace(",", "")) if v else None
+
+
+register_supplier(
+    "TIMES_CARGO_USD", "CÔNG TY TNHH DỊCH VỤ GIAO NHẬN HÀNG HÓA (TIMES CARGO, 到貨通知美金帳單)",
+    detect_times_cargo_usd, parse_times_cargo_usd_pdf, extract_total=_tcl_usd_pdf_total,
 )
 
 
