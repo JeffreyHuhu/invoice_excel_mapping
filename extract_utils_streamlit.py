@@ -1736,7 +1736,14 @@ def _drop_duplicate_invoice_pages(page_rows: List[List[Dict]]) -> List[Dict]:
     2026-11-10 VN09 MOL 答案：Số/日期空白的草稿發票，INVOICE NO 統一只填 Ký hiệu，
     同一個月常有好幾張草稿恰好是同一筆標準費用、總金額一樣，但其實是不同訂艙號碼的
     不同發票，不能被誤判成重複刪掉)。Order No. 是 N/A 或缺資料時維持舊版只看
-    (invoice_no, total) 的判斷方式，不影響其他供應商既有行為。"""
+    (invoice_no, total) 的判斷方式，不影響其他供應商既有行為。
+
+    Order No. 也相同時 (同一筆訂單底下，MOL 常見好幾筆子訂單各開一張草稿，各自
+    用固定費率、總金額剛好相同)，只看 (invoice_no, total, order_no) 還是會把這些
+    不同的子訂單草稿誤判成重複刪掉 (2026-11-22 VN09 MOL 抽查 OCT.2026
+    SSEM11Z05709：4 筆子訂單總金額都是 9,832,320，只留下 1 筆，其他 3 筆費用明細
+    整個漏算)。改成連費用明細 (Description+AMOUNT) 都要完全一樣才算真的重複；
+    真的重印的草稿 (同一頁重複出現) 費用明細本來就會一字不差。"""
     seen: Dict[tuple, bool] = {}
     kept: List[Dict] = []
     for rows in page_rows:
@@ -1745,7 +1752,8 @@ def _drop_duplicate_invoice_pages(page_rows: List[List[Dict]]) -> List[Dict]:
         inv = rows[0].get("invoice_no")
         total = sum(r.get("amount") for r in rows if isinstance(r.get("amount"), (int, float)))
         order_no = rows[0].get("order_no")
-        key = (inv, total, order_no) if order_no not in (None, "N/A", "") else (inv, total)
+        items_sig = tuple((r.get("description"), r.get("amount")) for r in rows)
+        key = (inv, total, order_no, items_sig) if order_no not in (None, "N/A", "") else (inv, total)
         if inv not in (None, "N/A", ""):
             if key in seen:
                 continue
@@ -2892,19 +2900,31 @@ def audit_invoice_totals(
         final_totals_found: Dict[str, float] = {}
         # 每張發票用它的總額所在頁的容許誤差 (見 register_supplier() 的 audit_tolerance_fn)
         tolerance_found: Dict[str, float] = {}
-        def _merge(found: Dict[str, float], nk: str, v: float) -> None:
-            """同一張發票的總額在不同頁各出現一次：同號碼重印的續頁 (數值相同)
-            不重複計入；數值不同代表是另一份獨立文件 (例如 DHL_VN 同一個
-            SHIPMENT 開兩張 PRO FORMA INVOICE，一份裝卸費、一份只有 Freight，
-            各自的 SUBTOTAL 要加總才等於全部明細加總)，兩者相加——跟
-            _cw_totals() 「同一個 SHIPMENT 開兩張時，總額相加」同一套邏輯，
+        _merge_seen_pages: Dict[str, set] = {}
+
+        def _merge(found: Dict[str, float], nk: str, v: float, page_sig: str) -> None:
+            """同一張發票的總額在不同頁各出現一次：同號碼重印的續頁不重複計入；
+            是另一份獨立文件就要加總才等於全部明細加總 (例如 DHL_VN 同一個
+            SHIPMENT 開兩張 PRO FORMA INVOICE，一份裝卸費、一份只有 Freight)——
+            跟 _cw_totals() 「同一個 SHIPMENT 開兩張時，總額相加」同一套邏輯，
             只是那邊是同一次呼叫內的好幾個 doc，這裡是分開呼叫的好幾個頁面
             (2026-11-18 使用者回報 VN13 DHL_VN 多筆 TOTAL_NET_MISMATCH，查出
-            第二張 PRO FORMA INVOICE 的 SUBTOTAL 被這裡的 setdefault 直接丟掉)。"""
-            if nk in found and found[nk] != v:
-                found[nk] += v
-            else:
-                found.setdefault(nk, v)
+            第二張 PRO FORMA INVOICE 的 SUBTOTAL 被這裡的 setdefault 直接丟掉)。
+
+            『是不是重印』不能只看總額數字是否跟目前累計值不同：MOL 同一個
+            Ký hiệu 底下常有好幾張子訂單草稿用固定費率，總額數字剛好相同，但
+            整頁內容 (子訂單參考號碼) 不同，是各自獨立的文件，也要加總；原本
+            只比對「這個數字跟累計值是否不同」，累計值一直在變，重印頁反而因為
+            跟『當下的累計值』不同被誤判成新文件又加了一次 (2026-11-22 VN09
+            MOL 抽查 OCT.2026 SSEM11Z05707：兩組真的重印頁被各加了兩次，總額
+            變成帳單本身的 1.68 倍)。改成記錄『這一頁的整頁文字有沒有算過』，
+            同一張發票底下，整頁文字一字不差才算重印，不管總額數字是否剛好
+            跟別的子訂單相同。"""
+            seen = _merge_seen_pages.setdefault(nk, set())
+            if page_sig in seen:
+                return
+            seen.add(page_sig)
+            found[nk] = found.get(nk, 0) + v
 
         def _assign(found: Dict[str, float], value, page_upper: str) -> None:
             """這一頁抓到的總額歸給頁面上印的那張發票 (整個字比對，避免 "4521"
@@ -2930,7 +2950,7 @@ def audit_invoice_totals(
                                 target = alt
                                 break
                             n += 1
-                    _merge(found, target, v)
+                    _merge(found, target, v, page_upper)
                 return
             # 冒號亂跑的帳單 (例如 ECOMET) 可能把發票號碼本身切開
             # (例如 "No C:25-01-0009")，比對前先把冒號拿掉，不影響其他
@@ -2946,7 +2966,7 @@ def audit_invoice_totals(
                 if not inv_raw:
                     continue
                 if re.search(rf"(?<![A-Z0-9]){re.escape(str(inv_raw).upper())}(?![A-Z0-9])", page_clean):
-                    _merge(found, inv_key, value)
+                    _merge(found, inv_key, value, page_upper)
                     break
 
         for page_text in pages:
