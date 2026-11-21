@@ -2744,8 +2744,10 @@ def _vt_loose_date(text: str, year: Optional[str]) -> Optional[str]:
 
 
 def _vt_parse_sheet(name: str, rows: List[list], cfg: Dict, supplier: str,
-                    year_hint: Optional[str] = None) -> Tuple[List[Dict], Dict]:
-    """一張對帳表 -> (費用列, {發票號碼: [未稅合計, 含稅合計]})。"""
+                    book=None) -> Tuple[List[Dict], Dict]:
+    """一張對帳表 -> (費用列, {發票號碼: [未稅合計, 含稅合計]})。book：給 date_sheet_mmdd
+    找同資料夾的月結檔案補年份；呼叫端傳年份字串 (舊呼叫方式) 也相容。"""
+    year_hint = book if isinstance(book, str) or book is None else _vt_year(book)
     h = _vt_header_row(rows, cfg["header"])
     if h is None:
         return [], {}
@@ -2921,11 +2923,19 @@ def _vt_parse_sheet(name: str, rows: List[list], cfg: Dict, supplier: str,
     common = {"supplier": supplier,
               "consignee": _vt_consignee(rows) or (f"POU {pou.group(1)}" if pou else None) or code_customer,
               "invoice_date": _vt_doc_date(rows), **cfg.get("const", {})}
-    if cfg.get("date_sheet_mmdd") and not common["invoice_date"] and year_hint:
-        # 工作表名稱是月日 ("0405")，年份取檔名 (VN06 TRUCK AIR+CFS IMPORT)
+    if cfg.get("date_sheet_mmdd") and not common["invoice_date"]:
+        # 工作表名稱是月日 ("0405")，年份取檔名 (VN06 TRUCK AIR+CFS IMPORT)。工作表
+        # 名稱沒有月日時 (VN06 truckPFP 系列固定只有一張 "KIEM TRA")，改看檔名本身
+        # 的月日；這系列檔名完全沒有年份，年份找同資料夾裡對應月份的月結檔案
+        # "MM-YYYY BINH TAN-TRUCK…" 補 (使用者 2026-11-22 確認：檔名 "1004" 代表
+        # 10 月 4 日，年份跟同一批次月結檔案一致)
         m_md = re.search(r"(?<!\d)(\d{2})(\d{2})(?!\d)", name)
+        if not m_md:
+            m_md = re.search(r"(?<!\d)(\d{2})(\d{2})(?!\d)", os.path.basename(getattr(book, "path", "") or ""))
         if m_md:
-            common["invoice_date"] = _format_date_en(m_md.group(2), m_md.group(1), year_hint)
+            yr = year_hint or _vt_sibling_month_year(book, m_md.group(1))
+            if yr:
+                common["invoice_date"] = _format_date_en(m_md.group(2), m_md.group(1), yr)
     doc_key = None
     if cfg.get("doc_key"):
         if cfg.get("doc_key_col") is not None:
@@ -3493,8 +3503,16 @@ def _vt_parse_sheet(name: str, rows: List[list], cfg: Dict, supplier: str,
             it["order_no"] = joined("order_no")
             it["volume"] = joined("volume", " + ")
     # 整張表一個 VAT 的列沒有自己的日期，抬頭也沒寫日期時：用這張表最晚的日期
-    dated = [datetime.datetime.strptime(it["invoice_date"], "%d %b %Y") for it in items
-             if it.get("invoice_date") and re.fullmatch(r"\d{2} \w{3} \d{4}", it["invoice_date"])]
+    # 原帳單偶有寫錯的日期 (例如「32 Dec 2024」沒有 32 號)，格式對但日期本身無效，
+    # strptime 會丟 ValueError；跳過這種列，不中斷整份檔案的擷取 (2026-11-22)
+    dated = []
+    for it in items:
+        v = it.get("invoice_date")
+        if v and re.fullmatch(r"\d{2} \w{3} \d{4}", v):
+            try:
+                dated.append(datetime.datetime.strptime(v, "%d %b %Y"))
+            except ValueError:
+                pass
     for it in items:
         if not it.get("invoice_date") and it.get("amount") is None and dated:
             it["invoice_date"] = max(dated).strftime("%d %b %Y")
@@ -3626,6 +3644,23 @@ def _vt_year(book) -> Optional[str]:
     return years[-1] if years else None
 
 
+def _vt_sibling_month_year(book, month: str) -> Optional[str]:
+    """VN06 truckPFP 週結檔名只有月日 ("1004")，完全沒有年份：找同一個資料夾裡對應
+    月份的月結檔案 "MM-YYYY BINH TAN-TRUCK…" (同一批次一定有)，取它的年份。"""
+    folder = os.path.dirname(getattr(book, "path", "") or "")
+    if not folder:
+        return None
+    try:
+        names = os.listdir(folder)
+    except OSError:
+        return None
+    for fname in names:
+        m = re.match(rf"{month}-(\d{{4}}) BINH TAN-TRUCK", _vt_norm(fname))
+        if m:
+            return m.group(1)
+    return None
+
+
 _VT_PATH_CUSTOMERS = (
     # 路徑寫法 (去空白、去聲調大寫) -> 客戶簡稱，寫法同工作表名稱備援 "POU xxx"
     ("POUYUEN", "POU YUEN"), ("POUHUNG", "POU HUNG"), ("POUCHEN", "POU CHEN"),
@@ -3702,7 +3737,7 @@ def _vt_make(supplier: str, cfgs: List[Tuple[str, Dict]]):
     def sheet_parse(book) -> List[Dict]:
         items = []
         for name, rows, cfg in _vt_sheets(book, cfgs):
-            sheet_items = _vt_parse_sheet(name, rows, cfg, supplier, _vt_year(book))[0]
+            sheet_items = _vt_parse_sheet(name, rows, cfg, supplier, book)[0]
             # 客戶名稱寫在表格上方的自由文字 ("TO: <公司>")、不是欄位時，用這張工作表
             # 自己的 rows 補 (同一本活頁簿常好幾張工作表各開給不同客戶，不能整本只套
             # 一個客戶名稱，見 _vt_consignee()；2026-11-18 VN14 ORIENTAL 月結單答案)
@@ -3725,8 +3760,16 @@ def _vt_make(supplier: str, cfgs: List[Tuple[str, Dict]]):
         customer = next((it["consignee"] for it in items if it.get("consignee")), None) \
             or _vt_path_customer(book)
         # 沒有日期的列 (整張表的 VAT 列、額外費用列)：用同一本對帳表最晚的日期 (VN16 Hang Xe Tai)
-        dated = [datetime.datetime.strptime(it["invoice_date"], "%d %b %Y") for it in items
-                 if isinstance(it.get("invoice_date"), str) and re.fullmatch(r"\d{2} \w{3} \d{4}", it["invoice_date"])]
+        # 原帳單偶有寫錯的日期 (例如「32 Dec 2024」沒有 32 號)，格式對但日期本身無效，
+        # strptime 會丟 ValueError；跳過這種列，不中斷整份檔案的擷取 (2026-11-22)
+        dated = []
+        for it in items:
+            d_raw = it.get("invoice_date")
+            if isinstance(d_raw, str) and re.fullmatch(r"\d{2} \w{3} \d{4}", d_raw):
+                try:
+                    dated.append(datetime.datetime.strptime(d_raw, "%d %b %Y"))
+                except ValueError:
+                    pass
         latest = max(dated).strftime("%d %b %Y") if dated else _vt_name_month_end(book)
         ym = _vt_name_month(book)
         for it in items:
@@ -3757,7 +3800,7 @@ def _vt_make(supplier: str, cfgs: List[Tuple[str, Dict]]):
             # 等好幾家供應商只設定 sum_row，這裡漏了判斷，整份一直顯示「沒有可勾稽的總額」)
             has_total |= "total" in cfg or "sheet_total" in cfg or "sum_row" in cfg or "usd_audit" in cfg
             has_grand |= "grand" in cfg or bool(cfg.get("sheet_total", (None, None))[1])
-            for key, pair in _vt_parse_sheet(name, rows, cfg, supplier, _vt_year(book))[1].items():
+            for key, pair in _vt_parse_sheet(name, rows, cfg, supplier, book)[1].items():
                 if pair[1] is not None:
                     per_sheet.append({"invoice_no": key, "sheet": name,
                                        "total": pair[0] if has_total else None, "grand_total": pair[1]})
