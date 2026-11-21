@@ -6284,7 +6284,9 @@ register_supplier(
 #     印出的才是正確答案要的正式公司全名 "PT. POU CHEN INDONESIA\nNo
 #     :2601512-KWTGIB"，所以優先找「行首是 PT. 開頭、後面接 No : <發票號>
 #     的那一行」，有找到就用那個覆寫，沒有 (單頁帳單通常沒有這一行) 才退
-#     回用最上面 "TO ..." 那一行。
+#     回用最上面 "TO ..." 那一行。第二頁掃描品質差時，OCR 常在公司名稱後面
+#     多讀出一段雜訊符號 (例如 "PT. POU CHEN INDONESIA =) >"，2026-11-22
+#     樣本 0500152)，兩種來源都會先用 _galuh_clean_consignee() 截掉這段。
 #   - 這張帳單沒有訂單編號/到貨日/開船日/提單號/主提單號/啟運港/目的港/
 #     材積/船名/貨櫃號/出貨方資訊，留空給 expand_to_rows() 補 N/A。
 
@@ -6357,6 +6359,19 @@ def _galuh_strip_date_suffix(desc: Optional[str]) -> Optional[str]:
         "", desc, flags=re.IGNORECASE,
     )
     return desc.strip()
+
+
+def _galuh_clean_consignee(name: Optional[str]) -> Optional[str]:
+    """掃描檔 OCR 常在公司名稱後面黏一段雜訊符號 (例如 "PT. POU CHEN
+    INDONESIA =) >"，來自頁面上的印章/圖示被 OCR 誤判成文字)，只留公司名稱
+    合法會出現的字元 (英數字、空白、句點、括號、& / -)，從第一個不合法字元
+    處截斷 (2026-11-22 樣本 0500152)。
+    """
+    if not name:
+        return name
+    m = re.match(r"[A-Za-z0-9()./&\-\s]*", name)
+    cleaned = m.group(0).strip() if m else name
+    return cleaned or name
 
 
 def _galuh_rejoin_split_tax_lines(block: str) -> str:
@@ -6463,9 +6478,9 @@ def parse_galuh(text: str) -> Dict:
     # 一行 (比最上面的 "TO ..." 簡稱更正式/更準確)，找不到才退回 "TO ..."。
     _galuh_rekap_m = re.search(r"^(PT\..+?)\s+No\s*:\s*\S+\s*$", text, re.MULTILINE)
     if _galuh_rekap_m:
-        header["consignee"] = _galuh_rekap_m.group(1).strip()
+        header["consignee"] = _galuh_clean_consignee(_galuh_rekap_m.group(1).strip())
     else:
-        header["consignee"] = (
+        header["consignee"] = _galuh_clean_consignee(
             # 掃描檔 OCR 會讀成 "TO :" 自己一行、公司名稱在下一行 (2026-10-30 0500086)
             _search(r"\bTO\s*:?\s+(.+?)\s+No[.,]\s*Invoice", text)
             # 掃描檔 OCR 把 "No. Invoice" 排到 "TO …" 上一行，"TO …" 自己一行
