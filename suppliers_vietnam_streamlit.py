@@ -6433,7 +6433,12 @@ def _ct_pc_totals_all(book) -> List[Dict]:
 
 def detect_cong_thanh_any(text: str) -> bool:
     # 2025 年的 POU CHEN 對帳表抬頭沒有 CONG THANH 稅號：用壓車表標題辨識
-    return detect_cong_thanh(text) or "SAVED CHASSIS TRAILER LIST" in text.upper()
+    if detect_cong_thanh(text) or "SAVED CHASSIS TRAILER LIST" in text.upper():
+        return True
+    # POUSUNG 2025 上半年 (T01~T06) DOT 1/2 對帳表整份都沒有印稅籍編號，只有
+    # 簽名列寫公司名 (使用者 2026-11-21 回報這批整批「無法辨識」)：退而用基本
+    # 版 VC/DV 工作表名 (見 parse_cong_thanh_sheets 開頭註解) + 公司名文字一起判斷
+    return "CONG THANH" in text.upper() and bool(re.search(r"\[(VC|DV)\s*T\d", text, re.I))
 
 
 register_supplier(
@@ -6483,6 +6488,12 @@ def detect_rong_a_chau_any(text: str) -> bool:
     # 重複記錄已經從 PDF 發票抓到的金額，沒有費用明細可擷取，排除不處理 (使用者
     # 2026-11-20 確認)
     if "INVOICING PARTY ENGLISH NAME" in upper or "BPMS LIV" in upper:
+        return False
+    # 本程式自己轉檔產出的 "_轉檔結果.xlsx"/"_轉檔結果_2.xlsx" 檔案留在來源資料夾裡，
+    # 重轉檔時被當成帳單重新掃到：工作表叫「工作表」「查驗結果」(輸出檔固定用法)，
+    # SUPPLIER 欄位文字又剛好含供應商全名，會誤判成這家的帳單。這不是帳單，沒有
+    # 費用明細可擷取，排除不處理 (使用者 2026-11-21 確認)
+    if "[查驗結果]" in text:
         return False
     if detect_rong_a_chau(text) or "ASIA DRAGON FORWARDING" in upper:
         return True
