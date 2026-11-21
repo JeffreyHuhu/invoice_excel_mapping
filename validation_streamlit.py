@@ -161,6 +161,16 @@ KNOWN_SOURCE_ISSUES: Dict[str, Dict[Tuple[str, str], Tuple[str, Optional[Union[s
         # 原帳單本來就沒有 B/L NO. 值 (使用者 2026-11-01 確認，不計入)
         ("bl_no", "MISSING_REQUIRED"): ("INDOPROSTIME 原帳單本來就沒有 B/L NO. 值", None),
     },
+    # VC/DV 對帳表 (parse_cong_thanh_sheets -> _ct_statement) 的「VAT」彙總列、
+    # 或沒有 SO INV 的對帳單層級調整列 (_ct_statement 的 extra/調整分支)，兩種都
+    # 沿用 header["invoice_no"]；原帳單抬頭本身沒有任何「No:」字軌可抓時，這兩種
+    # 列就會是 None/N/A，不是擷取錯誤 (使用者 2026-11-21 確認，THANG/POUSUNG 對
+    # 帳表皆適用)。只限這兩種列真的抓不到值時才算，一般明細列仍逐列檢查。
+    "CONG_THANH": {
+        ("invoice_no", "MISSING_REQUIRED"): (
+            "CONG THANH 對帳單的 VAT 彙總列或對帳單層級調整列，原帳單抬頭本身沒有發票號碼",
+            {"None", "N/A", ""}),
+    },
 }
 # INDO PROSTIME EXPRESS (ID16) 與 TRANSPORT (ID07) 是兩個供應商 (使用者 2026-11-01 要求分開)。
 # EXPRESS 先沿用 TRANSPORT 的原帳單問題清單當起點，之後依 EXPRESS 樣本各自調整，不再共用同一份。
