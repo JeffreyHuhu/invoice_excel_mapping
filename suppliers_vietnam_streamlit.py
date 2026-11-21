@@ -3003,9 +3003,10 @@ def _vt_parse_sheet(name: str, rows: List[list], cfg: Dict, supplier: str,
                                   "vat": nums[-1], **common, "invoice_no": doc_key or f"{name.strip()} VAT"})
                     if cfg.get("vat_na_fields"):
                         # vat_na_fields：整張 VAT 列指定欄位填 N/A (VN APL 答案)。invoice_date
-                        # 用 NA_CONFIRMED，理由同上
+                        # 用 NA_CONFIRMED，理由同上。有 doc_key (字軌) 時 invoice_no 已經在
+                        # 上面填成字軌，不能被這裡蓋成 N/A (VN12 窄版也有字軌的答案，2026-11-21)
                         items[-1].update({k: (NA_CONFIRMED if k == "invoice_date" else "N/A")
-                                          for k in cfg["vat_na_fields"]})
+                                          for k in cfg["vat_na_fields"] if not (k == "invoice_no" and doc_key)})
                     elif cfg.get("vat_no_date"):
                         # 整張 VAT 列只有發票號碼與金額 (VN12 NGUYÊN HƯỞNG 答案)：其他欄填 N/A
                         items[-1].update({k: (NA_CONFIRMED if k == "invoice_date" else "N/A") for k in (
@@ -3531,15 +3532,22 @@ def _vt_parse_sheet(name: str, rows: List[list], cfg: Dict, supplier: str,
 
 
 def _vt_requires_ok(rows: List[list], cfg: Dict) -> bool:
-    """名稱符合的設定也要有 name_require 指定的欄 (同名工作表有新舊兩種版面時區分)。"""
+    """名稱符合的設定也要有 name_require 指定的欄 (同名工作表有新舊兩種版面時區分)。
+    header_col_index：(標籤, 欄號)，這個標籤一定要剛好在這一欄才算符合 (VN12
+    NGUYÊN HƯỞNG 答案，2026-11-21)——新舊版面的欄位標題文字完全一樣，新版只是
+    多插了一欄沒有標題的城市欄，單靠標籤比對 (name_require) 分不出差異，要看
+    標籤實際落在第幾欄。"""
     req = cfg.get("name_require")
-    if not req:
+    col_req = cfg.get("header_col_index")
+    if not req and not col_req:
         return True
     h = _vt_header_row(rows, cfg["header"])
     if h is None:
         return False
     labels = _vt_labels(rows, h, cfg.get("two_rows", True), cfg.get("above", False))
-    return _vt_col(labels, *(req if isinstance(req, (list, tuple)) else (req,))) is not None
+    if col_req and _vt_col(labels, col_req[0]) != col_req[1]:
+        return False
+    return (_vt_col(labels, *(req if isinstance(req, (list, tuple)) else (req,))) is not None) if req else True
 
 
 def _vt_sheets(book, cfgs: List[Tuple[str, Dict]]):
@@ -5198,9 +5206,19 @@ _vt_register("BINH_TAN", "HỢP TÁC XÃ VẬN TẢI DỊCH VỤ DU LỊCH BÌNH
 # --- VN12 NGUYÊN HƯỞNG (空運請款) ---------------------------------------------
 # 每項費用都有 RMB 與 VND 兩欄，只取 VND；Description 接上 RMB 原幣金額 (使用者
 # 2026-11-10 新答案："air freight (RMB 6,408)"、"Customs fees (RMB 150 / bill)")。
-# 舊版 (T01-2025) 比新版少 1 欄 (沒有城市欄)，用 "SAP" 欄位區分版型 (name_require)，
-# 一定要排在新版前面：舊版沒有「ĐÍNH KÈM HĐ SỐ」字軌，INVOICE NO 改用 Pickup Date
-# (yyyy/mm/dd)；Port of Loading 填 N/A (沒有城市欄，不可套新版寫死的欄號 2)。
+# 版面寬窄跟「有沒有發票字軌」是兩個互相獨立的變化，不能混為一談 (2026-11-21
+# 使用者回報 T2-2026 VAT 列 INVOICE NO 被迫填成 N/A、Port of Loading 全部變
+# N/A，整張信心等級被拖到「中」，原因就是把這兩個維度搞混)：
+#   - 窄版 (T01~T06、T11、T12-2025)：沒有城市欄，WAYBILL 標籤剛好在第 2 欄
+#     (header_col_index 區分)，Port of Loading 只能填 N/A (const)。
+#   - 寬版 (T1-2026 起)：多插一欄沒有標題的城市欄，WAYBILL 標籤往後推到第 3 欄，
+#     Port of Loading 用欄號 2 (城市欄沒有標題文字，只能寫死欄號)。
+#   - 不管窄版寬版，只要表頭有「ĐÍNH KÈM HĐ SỐ」字軌 (1C26TNH-/1C25TNH-)，發票
+#     號碼都要用這個字軌 (doc_key)，不能因為是窄版就退回每一列自己的 Pickup
+#     Date——T11、T12-2025 是窄版但一樣有字軌，之前誤用 Pickup Date 當發票號碼，
+#     把同一張帳單拆成好幾十張「發票」，VAT 列就比對不到任何一組的總額。
+# 兩種版面都用 "SAP" 這個 name_require 擋掉完全沒有這兩欄的更舊版面；真正分版面
+# 寬窄的是 header_col_index。
 _VT_NGUYEN_HUONG_FEES = [
     ("AIR FREIGHT VND", "air freight ({rmb})"), ("CUSTOMS FEES (BILL) VND", "Customs fees ({rmb} / bill)"),
     ("BILL OF LADING FEE (BILL) VND", "Bill of lading fee ({rmb} / bill)"),
@@ -5215,9 +5233,15 @@ _VT_NGUYEN_HUONG = [
     # Waybill number，跟「空运请款」(整張一個字軌) 比對不出內容相同而被誤判成
     # 兩份不同資料 (使用者 2026-11-10 答案：Sheet1 內容相同只能算 1 份)。
     (r"空运请款", {"header": "WAYBILL", "key": ["WAYBILL"], "name_require": "SAP",
+            "header_col_index": ("WAYBILL", 2),     # 窄版：WAYBILL 沒有被城市欄往後推
+            # 窄版也可能有「ĐÍNH KÈM HĐ SỐ」字軌 (T11、T12-2025)：有就用字軌當發票號碼
+            # (跟寬版一致)，沒有才退回每一列自己的 Pickup Date (date_key，T01-2025 答案)
+            "doc_key": r"(\d[A-Z]\d{2}[A-Z]{3})-",
             "date_key": True, "vat_zero_desc": ("AIR FREIGHT",),
             "vat_total": "VAT 8%", "vat_desc": "VAT 8%", "vat_last": True,
-            # 舊版 VAT 列連 INVOICE NO 也填 N/A (跟新版不同，新版用字軌)，2026-11-10 答案
+            # 完全沒有字軌的窄版，VAT 列連 INVOICE NO 也填 N/A (跟有字軌的版本不同，
+            # 2026-11-10 答案)；有字軌時 INVOICE NO 已經是字軌，不能被這裡蓋成 N/A
+            # (見 vat_na_fields 套用處的 doc_key 判斷，2026-11-21 T11/T12-2025 答案)
             "vat_na_fields": ("invoice_no", "invoice_date", "bl_no", "order_no", "volume",
                               "port_of_loading", "port_of_discharge", "vessel", "container_no",
                               "shipper", "onboard_date", "arrive_date"),
@@ -5225,6 +5249,7 @@ _VT_NGUYEN_HUONG = [
             "total": "TOTAL AMOUNT VND", "date": "PICKUP DATE", "kg": "WEIGHT",
             "fields": {"bl_no": "WAYBILL", "shipper": "=SHIPPER"}}),
     (r"空运请款", {"header": "WAYBILL", "key": ["WAYBILL"],
+            "header_col_index": ("WAYBILL", 3),     # 寬版：城市欄把 WAYBILL 往後推一欄
             # 發票號碼 = 表頭「ĐÍNH KÈM HĐ SỐ」的字軌 (1C26TNH-，只取字軌) (VN12 新答案，2026-11-06)
             "doc_key": r"(\d[A-Z]\d{2}[A-Z]{3})-",
             "vat_zero_desc": ("AIR FREIGHT",),
@@ -5233,7 +5258,7 @@ _VT_NGUYEN_HUONG = [
             "fees": _VT_NGUYEN_HUONG_FEES,
             "total": "TOTAL AMOUNT VND", "date": "PICKUP DATE", "kg": "WEIGHT",
             # port_of_loading 欄位 (城市) 沒有表頭文字 (合併儲存格留白)，只能寫死欄號；
-            # 新版固定排在 Waybill number 前一欄 (使用者 2026-11-06 答案)
+            # 寬版固定排在 Waybill number 前一欄 (使用者 2026-11-06 答案)
             "fields": {"bl_no": "WAYBILL", "shipper": "=SHIPPER", "port_of_loading": 2}}),
 ]
 
