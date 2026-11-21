@@ -349,11 +349,16 @@ _OCR_PSM_CACHE: Dict[Tuple[str, int, int], str] = {}
 _OCR_PSM_DPI = 400
 
 
-def _ocr_page_with_psm(pdf_path: str, page_index: int, psm: int, contrast: bool = False) -> str:
+def _ocr_page_with_psm(pdf_path: str, page_index: int, psm: int, contrast: bool = False,
+                        threshold: bool = False) -> str:
     """用指定的版面分析模式 (tesseract --psm) 高解析度重新 OCR 一頁。例如
     GALUH 的金額欄跟費用名稱分得很開，預設模式會漏掉整欄金額，psm 6 (整頁
-    當成一個文字區塊) 才讀得到。供應商用 register_supplier(ocr_psm=6) 指定。"""
-    cache_key = (pdf_path, page_index, psm, contrast)
+    當成一個文字區塊) 才讀得到。供應商用 register_supplier(ocr_psm=6) 指定。
+    threshold：手寫註記/打勾/畫線蓋在印刷字上面時 (顏色通常比印刷黑字淺)，
+    灰階+自動對比還是讀不乾淨，二值化 (黑白閾值 130，只留深色印刷字，淺色
+    手寫痕跡變白) 常常才讀得到 (2026-11-21 抽查 DHL_VN FEB.2026 有人工核章
+    劃記的帳單)。"""
+    cache_key = (pdf_path, page_index, psm, contrast, threshold)
     cached = _OCR_PSM_CACHE.get(cache_key)
     if cached is not None:
         return cached
@@ -362,7 +367,9 @@ def _ocr_page_with_psm(pdf_path: str, page_index: int, psm: int, contrast: bool 
         try:
             with pdfplumber.open(pdf_path) as pdf:
                 image = pdf.pages[page_index].to_image(resolution=_OCR_PSM_DPI).original
-            if contrast:
+            if threshold:
+                image = image.convert("L").point(lambda x: 0 if x < 130 else 255, "1")
+            elif contrast:
                 # 灰階 + 自動對比 (contrast=True)：見 invoice_text() 的自我檢查
                 from PIL import ImageOps
                 image = ImageOps.autocontrast(image.convert("L"))
@@ -2568,8 +2575,19 @@ def audit_tolerance(supplier_key: Optional[str]) -> float:
 def vnd_tolerance(page_text: str) -> float:
     """越南供應商一頁帳單的容許誤差。幣別依供應商國家 (越南 = VND)：
     文字沒有 USD 就視為 VND，給 VN_AUDIT_TOLERANCE (100)；有 USD (含混合幣別) 維持 ±1。
-    (Excel 帳單文字常沒有 VND 字樣，所以用國家預設，見 CLAUDE.md 幣別規則)"""
+    (Excel 帳單文字常沒有 VND 字樣，所以用國家預設，見 CLAUDE.md 幣別規則)
+
+    CargoWise PRO FORMA INVOICE (DHL_VN/DSV_VN/YUSEN) 的運費項目常印
+    "Freight USD 5.744,10 @ 26465,000000" 這種匯率說明文字，但該頁的
+    "CHARGES IN VND"/"TOTAL VND" 才是實際計價、稽核用的金額，不是真的
+    USD 計價帳單；"TOTAL VND" 這個明確標記優先於單純的 "USD" 字樣出現與否
+    (2026-11-21 抽查 DHL_VN JUL.2026：OCR 單一位數誤差被這個誤判成 ±1
+    容許誤差，變成 ERROR)。"TOTAL USD" 才是真的以美元計價的帳單。"""
     upper = (page_text or "").upper()
+    if re.search(r"TOTAL[ \t]+VND\b", upper):
+        return VN_AUDIT_TOLERANCE
+    if re.search(r"TOTAL[ \t]+USD\b", upper):
+        return 1
     if "USD" not in upper:
         return VN_AUDIT_TOLERANCE
     return 1

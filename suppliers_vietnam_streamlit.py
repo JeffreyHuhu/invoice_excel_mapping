@@ -1060,6 +1060,14 @@ def _cargowise_pages(pdf_path: str) -> List[str]:
                     alt = _ocr_page_with_psm(pdf_path, page_index, 6, contrast=True)
                     if _cw_page_balances(alt):
                         text = alt
+                    else:
+                        # 對比還是讀不乾淨：可能是人工核章/手寫劃記蓋在印刷字
+                        # 上面 (顏色比印刷黑字淺)，改用二值化只留深色印刷字
+                        # (2026-11-21 抽查 DHL_VN FEB.2026 有核章劃記的帳單，
+                        # 8 個費用項目原本只讀到 1 個)
+                        alt2 = _ocr_page_with_psm(pdf_path, page_index, 6, threshold=True)
+                        if _cw_page_balances(alt2):
+                            text = alt2
                 ship = _cw_ocr_shipment(pg)
                 if ship:
                     text = f"SHIPMENT {ship}\n{text}"
@@ -1123,8 +1131,31 @@ def _cargowise_pages(pdf_path: str) -> List[str]:
             if ("TOTAL CHARGES" in text and not _CW_CHARGE_RE.search(text)
                     and not re.search(r"SUBTOTAL\s*:?\s*\d", text)):
                 # 費用表的字型沒有文字編碼 (畫面看得到，文字層沒有)：整頁改用 OCR
-                # (2026-10-28 抽樣 DHL_MAY.2026 的 PRO FORMA，例 S2602151382)
-                text = _ocr_page_with_psm(pdf_path, page_index, 6)
+                # (2026-10-28 抽樣 DHL_MAY.2026 的 PRO FORMA，例 S2602151382)。
+                # 這一頁原本文字層的表頭其實是乾淨的 (SHIPMENT 號碼沒有問題，只有
+                # 費用表字型沒有編碼)，但整頁改用 OCR 後表頭反而可能被讀錯/漏掉
+                # (2026-11-21 抽查 DHL_VN MAY.2026 同一張 S2602151382：OCR 把表頭
+                # 的 "SHIPMENT S2602151382" 讀成 "SHIPMENT) 82602151382")。用裁切
+                # 表頭單獨重新 OCR 的結果補在最前面，取代整頁 OCR 讀錯的表頭，也讓
+                # 下面的自我檢查認得出這張發票的號碼
+                ship = _cw_ocr_shipment(pg)
+
+                def _with_ship(t: str) -> str:
+                    return f"SHIPMENT {ship}\n{t}" if ship else t
+
+                text = _with_ship(_ocr_page_with_psm(pdf_path, page_index, 6))
+                # 跟掃描頁那支路徑一樣自我檢查：OCR 偶爾在 SUBTOTAL 這組數字中間
+                # 多讀出一個數字 ("105.948.234" 讀成 "105.948.2734")，對不上這一頁
+                # 自己的費用加總時，依序試對比、二值化重新 OCR (2026-11-21 抽查
+                # DHL_VN MAY.2026 S2602151382 第 18 頁)
+                if _cw_page_balances(text) is False:
+                    alt = _with_ship(_ocr_page_with_psm(pdf_path, page_index, 6, contrast=True))
+                    if _cw_page_balances(alt):
+                        text = alt
+                    else:
+                        alt2 = _with_ship(_ocr_page_with_psm(pdf_path, page_index, 6, threshold=True))
+                        if _cw_page_balances(alt2):
+                            text = alt2
             pages.append(text + _CW_PAGE_MARK)
     return pages
 
@@ -1132,24 +1163,41 @@ def _cargowise_pages(pdf_path: str) -> List[str]:
 def _cw_ocr_shipment(pg) -> Optional[str]:
     """掃描頁右上角表頭的 SHIPMENT 號碼，單獨放大重新 OCR。整頁 OCR 常讀錯
     或漏掉這一格 (2026-10-29 YUSEN_SEP.2026：SSGN0315898 讀成 15596/15808、
-    SSGN0315454 整格漏掉)。讀不到回傳 None，照用整頁 OCR 的結果。"""
+    SSGN0315454 整格漏掉)。psm 6 在這塊裁切區域 (大半空白、只有一張小表格)
+    偶爾整格讀成空字串，讀不到東西時改用 psm 3 (自動版面分析) 重試一次
+    (2026-11-21 抽查 DHL_VN MAY.2026)。讀不到回傳 None，照用整頁 OCR 的結果。"""
     try:
         import pytesseract
         image = pg.to_image(resolution=300).original.convert("L")
         w, h = image.size
-        # 表頭表格在右上角 (x 55%~100%、y 12%~26%)；只截這一塊，psm 6
+        # 表頭表格在右上角 (x 55%~100%、y 12%~26%)；只截這一塊
         head = image.crop((int(w * 0.55), int(h * 0.12), w, int(h * 0.26)))
-        text = pytesseract.image_to_string(head, config="--psm 6")
     except Exception:
         return None
-    m = re.search(r"SHIPMENT\W*([A-Z]{3,5}?)(O*)([0-9O]{6,8})\b", text)
-    if not m:
-        return None
-    prefix, extra, num = m.groups()
-    num = num.replace("O", "0")
-    if len(num) == 6 and extra:          # "SSGNO315640"：O 就是開頭的 0
-        num = "0" + num
-    return prefix + num if re.fullmatch(r"\d{7}", num) else None
+    for psm in (6, 3):
+        try:
+            text = pytesseract.image_to_string(head, config=f"--psm {psm}")
+        except Exception:
+            continue
+        # YUSEN 格式：3~5 字母前綴 + 7 位數字 ("SSGN0315898")
+        m = re.search(r"SHIPMENT\W*([A-Z]{3,5}?)(O*)([0-9O]{6,8})\b", text)
+        if m:
+            prefix, extra, num = m.groups()
+            num = num.replace("O", "0")
+            if len(num) == 6 and extra:   # "SSGNO315640"：O 就是開頭的 0
+                num = "0" + num
+            if re.fullmatch(r"\d{7}", num):
+                return prefix + num
+        # DHL_VN/DSV_VN 等格式：固定 "S" 開頭 + 8~10 位數字。這類帳單的
+        # SHIPMENT 一定是 S 開頭，OCR 常把開頭的 S 讀成視覺相近的數字
+        # (8、3、5…甚至整格漏讀)，直接補回 "S" (2026-11-21 抽查 DHL_VN
+        # MAY.2026 "S2602151382"/"S2602231937" 兩張都遇到)
+        m2 = re.search(r"SHIPMENT\W*[A-Z0-9]?([0-9O]{8,10})\b", text)
+        if m2:
+            num = m2.group(1).replace("O", "0")
+            if re.fullmatch(r"\d{8,10}", num):
+                return "S" + num
+    return None
 
 
 def _cw_overflow_chars(pg, chars) -> set:
@@ -1178,7 +1226,11 @@ _CW_CHARGE_RE = re.compile(
     # DHL 免稅行 "Freight USD 500,00 @ 26386,000000 0% 1.13.193.000"：金額前的 "1." 是右下
     # "VAT RATE REASON" 表的原因編號 (1. VAT EXEMPT INTERNATIONAL TRANSPORT)，不是金額
     # (2026-10-28 抽樣 DHL_MAY.2026 S2601691598)
-    r"^(?P<desc>.+?)(?: - (?:Greater|Base|Min|\d)[^\n]*?)?\s+(?:(?P<rate>\d+)%=(?P<vat>[\d.]+(?:,\d+)?)|Zero Rated"
+    # OCR 偶爾在 VAT 欄的千分位句點後面多讀出一個空格 ("26. 400"，跟下面金額
+    # 欄同一種雜訊，2026-11-21 抽查 DHL_VN FEB.2026 S2600174559 Waybill/Bill
+    # of Lading 列)，VAT 欄比照金額欄容許這個空格 (_cw_vn_number() 轉換時會
+    # 把空格拿掉)
+    r"^(?P<desc>.+?)(?: - (?:Greater|Base|Min|\d)[^\n]*?)?\s+(?:(?P<rate>\d+)%=(?P<vat>(?:\d|\.\s?)+(?:,\d+)?)|Zero Rated"
     # OCR 頁的原因編號可能讀成 "*" 或 "1." 後面多一個空白 ("0% * 46.695.655")；
     # 原因編號也可能整個不印，"0%" 後面直接接金額 ("0% 74.815.872"，2026-11-10
     # 抽查 DHL_VN BY SHIPMENT 批次 S2501377271)
@@ -1192,8 +1244,13 @@ _CW_CHARGE_RE = re.compile(
     # OCR 把原因編號多讀出一個單引號，混進 "0%" 跟金額中間 ("0% ' 64.546.261"，
     # 2026-11-18 抽查 APR.2026 S2601526262 第 17 頁、JAN.2026 S2506326626
     # "Security Surcharge" 列)
-    r"|0%\s+(?:(?=\d{1,3}(?:\.\s?\d{3})*(?:,\d{1,2})?$)|\d\.\s?|\*\s|\|\s*|'\s*))\s*"
-    r"(?P<amount>\d{1,3}(?:\.\s?\d{3})*(?:,\d{1,2})?)$", re.MULTILINE)
+    # OCR 把原因編號的句點讀成空白+連字號 ("0% 1 - 366.884.770"，人工核章劃記
+    # 蓋住句點，2026-11-21 抽查 DHL_VN FEB.2026 S2600174559 Freight 列)
+    r"|0%\s+(?:(?=\d{1,3}(?:\.\s?\d{3})*(?:,\d{1,2})?$)|\d\.\s?|\d\s*-\s*|\*\s|\|\s*|'\s*))\s*"
+    # 人工核章/劃記常蓋在金額右邊，OCR 多讀出零星符號或單一字母 ("3.219.150 |"、
+    # "440.000 _—"、"2.136.345 i")，金額後面容許最多 6 個非數字雜訊字元再結尾
+    # (同一份 FEB.2026 帳單)
+    r"(?P<amount>\d{1,3}(?:\.\s?\d{3})*(?:,\d{1,2})?)[ \t]*[^\d\n]{0,6}$", re.MULTILINE)
 # 費用名稱裡夾著外幣單價跟匯率 ("Org. Terminal Handling-Forwarder USD 108,96 @"、
 # "Freight USD 2.911,35 @ 25698,000000"：匯率可能接在同一行的 "@" 後面，也可能印在
 # 下一行，兩種都被 _CW_CHARGE_RE 的 desc 群組整段吃進去)，答案要求外幣單價移到名稱
