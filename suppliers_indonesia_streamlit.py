@@ -1679,7 +1679,7 @@ def detect_tata_classic(text: str) -> bool:
 
 _TATA_LABEL_WORDS = [
     r"MAWB", r"HAWB", r"Telp", r"Attn", r"Flight", r"Date", r"QTY",
-    r"Shipper", r"Address", r"Consignee", r"ORIGIN",
+    r"Shipper", r"Address", r"Consignee", r"ORIGIN", r"No",
 ]
 _TATA_NEXT = "(?:" + "|".join(_TATA_LABEL_WORDS) + ")"
 _TATA_STOP = rf"(?=\s+{_TATA_NEXT}\b|\n|$)"
@@ -1754,6 +1754,39 @@ _TATA_ITEM_PATTERN = re.compile(
 # 金額。
 _TATA_PPN_PATTERN = re.compile(r"^(?P<desc>PPN\s*\d+%)\s+Rp\s+(?P<vat>[\d,.]+)\s*$", re.MULTILINE)
 
+# ⚠️ 2026-11-22 抽樣「YJE_TATA-辨識等級(低)」發現：TATA classic 格式還有一種
+# 掃描版 (發票號碼開頭是 "HE"，例如 HE25001516)，只有單一筆「NON
+# REIMBURSEMENT HANDLING FEE」費用，版面跟上面「1 GUDANG FEE Rp 159,840」
+# 這種表格列完全不同 (沒有 "Rp" 緊接在金額前面)，上面的 _TATA_ITEM_PATTERN
+# 配不到，原本整張發票 0 筆明細。這裡用「HANDLING FEE 後面第一個金額」當
+# 退路，只有在 _TATA_ITEM_PATTERN/_TATA_PPN_PATTERN 都抓不到東西時才用
+# (避免跟其他 classic 子版面衝突)。
+# VAT 用印尼「DPP Nilai Lain」公式算出來 (VAT = 未稅金額 × 11%，跟 TATA A/F
+# 格式同一套規則，見 _yje_tata_extract_grand_total() 的說明)，不直接相信
+# OCR 讀到的 PPN/TOTAL 文字——這兩個數字常常只印在金額欄位附近、沒有緊鄰
+# 的文字標籤，OCR 版面分析模式 (psm) 不同時, 讀到的位數/順序都會跑掉，用
+# 公式算比用 OCR 數字可靠。
+_TATA_HE_HANDLING_FEE_RE = re.compile(
+    r"HANDLING\s*FEE[^\n\d]{0,6}(\d[\d., ]{2,15}\d)", re.IGNORECASE
+)
+
+
+def _tata_he_clean_amount(text: Optional[str]) -> Optional[int]:
+    """跟 _tata_clean_amount 一樣，但先去掉數字欄位中間混進的多餘空白
+    (OCR 把直線表格框誤讀成空白，例如 '2.41 8.952')。"""
+    if not text:
+        return None
+    return _tata_clean_amount(text.replace(" ", ""))
+
+
+def _tata_he_subtotal(text: str) -> Optional[int]:
+    """抓 TATA classic 掃描版 (HE 開頭發票) 的未稅金額 (HANDLING FEE 後面
+    第一個金額)。"""
+    m = _TATA_HE_HANDLING_FEE_RE.search(text)
+    if not m:
+        return None
+    return _tata_he_clean_amount(m.group(1))
+
 
 def _tata_extract_items(text: str) -> List[Dict]:
     items = []
@@ -1770,6 +1803,19 @@ def _tata_extract_items(text: str) -> List[Dict]:
             "amount": None,
             "vat": _tata_clean_amount(ppn_m.group("vat")),
         })
+    if not items:
+        subtotal = _tata_he_subtotal(text)
+        if subtotal is not None:
+            items.append({
+                "description": "NON REIMBURSEMENT HANDLING FEE",
+                "amount": subtotal,
+                "vat": None,
+            })
+            items.append({
+                "description": "PPN 12%",
+                "amount": None,
+                "vat": round(subtotal * 0.11),
+            })
     return items
 
 
@@ -1785,10 +1831,35 @@ def parse_tata_classic(text: str) -> Dict:
     # 誤讀，一起放寬。
     header["invoice_no"] = _search(r"(?m)^NO\s*:\s*(\S+)", text) or _search(
         r"\bINVOICE\b\s*\n+\s*[:>»]\s*(\S+)", text)
+    if not header["invoice_no"]:
+        # ⚠️ 2026-11-22 抽樣 HE 開頭掃描發票發現：這個子版面是雙欄排版，
+        # "TO :" 跟 "No. :" 併成同一行 ("TO: PT NIKOMAS GEMILANG No. :
+        # HE25001516")，發票號碼不在行首，上面兩種寫法都配不到。這裡限定
+        # 一定要先看到 "TO" 才找 "No. :"，避免跟抬頭地址 "Blok B1 No. 27"
+        # 的 "No." 搞混 (地址在 "TO :" 這一行之前，不會符合)。
+        header["invoice_no"] = _search(r"\bTO\s*:.*?\bNo\.?\s*:\s*(\S+)", text)
     header["invoice_date"] = _tata_parse_date(
         _search(r"INV\s*Date\s*[:>»]\s*(\d{4}[-/]\d{1,2}[-/]\d{1,2})", text)
     )
-    header["supplier"] = _search(r"Nama\s*:\s*(PT\..+)$", text)
+    if not header["invoice_date"]:
+        # ⚠️ 2026-11-22 抽樣 HE 開頭掃描發票發現：這個子版面的 "INV Date" 是
+        # 英文月份縮寫 ("INV Date Aug 23, 2025")，沒有冒號，上面數字格式的
+        # regex 配不到。
+        m = re.search(r"INV\s*Date\s*[:>»]?\s*([A-Za-z]{3})\w*\.?\s+(\d{1,2}),?\s+(\d{4})", text)
+        if m:
+            header["invoice_date"] = _format_date_en_from_month_name(
+                m.group(2), m.group(1), m.group(3))
+    # ⚠️ 2026-11-22 抽樣 HE 開頭掃描發票發現："Nama" 後面的冒號常被 OCR 讀成
+    # "!"，"Nama" 本身偶爾也被讀錯 ("Numa")；這個 classic 格式固定只有 TATA
+    # 自己開立 (parse_tata_classic 只處理這一種版面)，抓不到就直接退回寫死
+    # 的供應商名稱，不用再放寬 regex 硬猜。
+    # ⚠️ 2026-11-22 補充：原本抓到行尾 ($) 偶爾連簽名人名字一起抓進來
+    # ("PT. TATA HARMONI SARANATAMA IRMA")，公司名稱其實固定只有這四個字，
+    # 抓到 "SARANATAMA" 就該停了 ("HARMON." 容忍 OCR 把 "I" 讀成 "!" 之類的
+    # 單字元誤讀，見 HE26000762 樣本)。
+    header["supplier"] = _search(
+        r"Nama\s*:\s*(PT\.\s*TATA\s+HARMON.\s+SARANATAMA)", text
+    ) or "PT TATA HARMONI SARANATAMA"
     header["consignee"] = _search(rf"\bTO\s*:\s*(.+?){_TATA_STOP}", text)
     header["mbl_no"] = _search(rf"\bMAWB\s*:\s*(.+?){_TATA_STOP}", text)
     header["bl_no"] = _search(rf"\bHAWB\s*:\s*(.+?){_TATA_STOP}", text)
@@ -1806,6 +1877,12 @@ def parse_tata_classic(text: str) -> Dict:
     ship_date = _tata_parse_date(
         _search(r"(?<!INV )Date\s*:\s*(\d{4}-\d{1,2}-\d{1,2})", text)
     )
+    if not ship_date:
+        # HE 開頭掃描發票的出貨日期是 "Date : 24-Jul-25" (日-英文月份縮寫-兩位數年)，
+        # 沿用既有的 _dsv_parse_date() 轉換，不重寫一份。
+        m = re.search(r"(?<!INV )Date\s*:\s*(\d{1,2}-[A-Za-z]{3}-\d{2})\b", text)
+        if m:
+            ship_date = _dsv_parse_date(m.group(1))
     header["arrive_date"] = ship_date
     header["onboard_date"] = ship_date
 
@@ -1871,10 +1948,12 @@ def _tata_receipt_parse_date(text: Optional[str]) -> Optional[str]:
 
 
 def _tata_receipt_clean_amount(text: Optional[str]) -> Optional[int]:
-    """印尼式千分位 '1.061.202' (句點千分位，無小數) -> 1061202。"""
+    """印尼式千分位 '1.061.202' (句點千分位，無小數) -> 1061202。少數行的
+    金額改用逗號千分位 (例如 '650,000'，2026-11-22 抽樣掃描版發現)，兩種
+    符號都當千分位去掉。"""
     if not text:
         return None
-    text = text.strip().replace(".", "")
+    text = text.strip().replace(".", "").replace(",", "")
     return int(text) if text.isdigit() else None
 
 
@@ -1885,12 +1964,23 @@ def _tata_receipt_clean_amount(text: Optional[str]) -> Optional[int]:
 # "X" 不是每筆都有，所以設成可有可無。
 # 名稱可能有單引號、分號等任何符號 (例如 "LIFT OFF 1x20'"、"INT'L"、
 # "MITRA; (LIFT OFF")，所以名稱不限字元；先判斷下面的「項次 (X) 金額」行
+# ⚠️ 2026-11-22 抽樣「YJE_TATA-辨識等級(低)」掃描版發現：這份表格有格線，
+# OCR 常把格線讀成緊接在項次後面的 "|" (例如 "4 | NON REIMBURSEMENT...")，
+# 項次數字本身也偶爾被整個讀錯成不相干的符號 (例如 "1" 讀成 "}")。項次後面
+# 放寬成「數字或任何一個非文字符號」+「任意句點/空白/直線雜訊」，不要求
+# 緊接著就是描述文字，否則整筆被跳過 (狀態機會把跳過的行併進下一筆描述，
+# 等於整筆費用憑空消失)。同一個理由，"X" 稅率標記大小寫都要收 (OCR 常讀成
+# 小寫 "x")。
+#   少數行的金額用逗號千分位 (例如 "650,000"，2026-11-22 抽樣掃描版發現：
+#   同一行描述裡 "Min=Rp 650,000" 也混進一個逗號數字，靠 "$" 錨定行尾、
+#   非貪婪比對自然會先吃掉前面的雜訊數字，只留最後一個當金額)。
 _TATA_RECEIPT_FULL_ITEM_LINE = re.compile(
-    r"^\d+\s+(?P<desc>[A-Za-z].*?)\s+(?:X\s+)?(?P<amount>[\d.]+)\s*$"
+    r"^(?:\d+|[^\w\s])[.\s|]*(?P<desc>[A-Za-z].*?)\s+(?:X\s+)?(?P<amount>[\d.,]+)\s*$",
+    re.IGNORECASE,
 )
 # 名稱換行時的金額行：「項次 金額」或「項次 X 金額」(例如 "4 X 600.000")
 _TATA_RECEIPT_NUM_AMOUNT_ONLY_LINE = re.compile(
-    r"^(?P<num>\d+)\s+(?:X\s+)?(?P<amount>[\d.]+)\s*$")
+    r"^(?:\d+|[^\w\s])[.\s|]*(?:X\s+)?(?P<amount>[\d.,]+)\s*$", re.IGNORECASE)
 
 
 def _tata_receipt_extract_items(text: str) -> List[Dict]:
@@ -1917,7 +2007,8 @@ def _tata_receipt_extract_items(text: str) -> List[Dict]:
         m_full = None if m_num_only else _TATA_RECEIPT_FULL_ITEM_LINE.match(line)
         if m_full:
             items.append({
-                "description": m_full.group("desc").strip(),
+                # 描述結尾可能黏到表格格線 OCR 殘字 ("|")，見上面 regex 放寬的說明。
+                "description": m_full.group("desc").strip().rstrip("|").strip(),
                 "amount": _tata_receipt_clean_amount(m_full.group("amount")),
             })
             pending = []
@@ -1971,8 +2062,11 @@ _TATA_RECEIPT_VOLUME_RE = re.compile(r"(?m)^(\d+[A-Za-z]+/\d+\s*[Kk][Gg][Ss]?)\s
 # 的金額是「最後」那個數字，不是中間那個 "11.0" (那只是利率小標籤被誤排
 # 進來，不是金額)。用一個可有可無的 "NN.N%" 群組吃掉這個小標籤，確保金額
 # 一定抓到行尾真正的數字。
+#   掃描版「FLT/DT:...09.04.2026 PPN 12% 11.0% 575.190」把左欄資訊跟 PPN
+#   併成同一行 (2026-11-22 抽樣發現)，"PPN" 不一定在行首，拿掉 "^" 錨點，
+#   只靠 "$" 錨定行尾確保抓到的是這一行真正結尾的稅額數字。
 _TATA_RECEIPT_PPN_RE = re.compile(
-    r"(?m)^PPN\s*(?P<pct>\d+)%\s+(?:\d+\.\d+%\s+)?(?P<vat>[\d.]+)\s*$"
+    r"(?m)\bPPN\s*(?P<pct>\d+)%\s+(?:\d+\.\d+%\s+)?(?P<vat>[\d.]+)\s*$"
 )
 
 
@@ -1984,16 +2078,30 @@ def parse_tata_receipt(text: str) -> Dict:
     # "NOMOR INVOICE # :"/"TANGGAL :" 的冒號漏掉 (例如 "NOMOR INVOICE #
     # TH20250032"、"TANGGAL 02-01-2025")，原本冒號是必填，整個抓不到值。
     # 改成冒號可有可無。
-    header["invoice_no"] = _search(r"NOMOR\s*INVOICE\s*#\s*:?\s*(\S+)", text)
+    # ⚠️ 2026-11-22 抽樣掃描版補充：冒號偶爾被 OCR 讀成「»」這種符號 (不是
+    # 遺漏，是讀成別的符號，原本的 ":?" 吃不到)，符號跟真正的值之間還有空白
+    # 隔開；另外值前面偶爾會多出一個不相干的雜訊數字 (例如 "» 7TH20261819"，
+    # 正確應該是 "TH20261819")，抓到之後再把這種「數字直接接兩個大寫字母」
+    # 的雜訊前綴去掉。
+    header["invoice_no"] = _search(
+        r"NOMOR\s*INVOICE\s*#\s*(?:[^\w\s]+\s+)?(\S+)", text
+    )
+    if header["invoice_no"]:
+        header["invoice_no"] = re.sub(r"^\d+(?=[A-Z]{2})", "", header["invoice_no"])
     header["invoice_date"] = _tata_receipt_parse_date(
         _search(r"TANGGAL\s*:?\s*(\d{1,2}-\d{1,2}-\d{4})", text)
     )
     header["supplier"] = "PT TATA HARMONI SARANATAMA"
-    header["consignee"] = _search(r"PELANGGAN\s*\n(.+?)\s+DETAIL\s*PEMBAYARAN", text)
+    # 掃描版 "PELANGGAN" 跟值之間偶爾多一行空白、值前面偶爾多一個表格格線
+    # 殘字 "|" (2026-11-22 抽樣發現)，放寬可有可無。
+    header["consignee"] = _search(
+        r"PELANGGAN\s*\n\s*\|?\s*(.+?)\s+DETAIL\s*PEMBAYARAN", text)
     # ⚠️ 2026-10 修正：MAWB:/HAWB: 後面的值可能帶空格 (例如 "738-5567 8873")，
     # 原本用 \S+ 只抓到第一個空白前的片段，改成抓到整行結尾才不會截斷。
-    header["bl_no"] = _search(r"\bHAWB\s*:\s*(.+?)\n", text)
-    header["mbl_no"] = _search(r"\bMAWB\s*:\s*(.+?)\n", text)
+    # ⚠️ 2026-11-22 掃描版補充：MAWB 的值跟右欄 "Subtotal ..." 併成同一行
+    # OCR 輸出，遇到這個右欄標籤就要先停，不能抓到換行才停。
+    header["bl_no"] = _search(r"\bHAWB\s*:\s*(.+?)(?:\s+Subtotal\b|\n)", text)
+    header["mbl_no"] = _search(r"\bMAWB\s*:\s*(.+?)(?:\s+Subtotal\b|\n)", text)
     header["vessel"] = _search(r"FLT\s*/\s*DT\s*:\s*([^/\n]+)/", text)
     # ⚠️ 2026-10 新增：這次使用者提供的新樣本帳單上其實有印 Shipper (SHIP :)
     # 跟材積 (獨立一行的 qty/weight)，舊版完全沒有擷取、一律留空；這兩個
@@ -2713,6 +2821,16 @@ def _tata_pouyuen_pages(pdf_path: str) -> List[str]:
                     alt = _ocr_page_with_psm(pdf_path, i, 3)
                     if alt.strip() and _tata_pouyuen_score(alt) > _tata_pouyuen_score(redo):
                         redo = alt
+                # ⚠️ 2026-11-22 抽樣發現：TATA classic 掃描版「NON REIMBURSEMENT
+                # HANDLING FEE」單筆收據 (HE 開頭發票)，表頭欄位常常已經是滿分
+                # (不會進到上面 < 4 的重做)，但金額欄位用預設/psm 3 OCR 常漏讀
+                # 位數 (例如 '1.799.490' 掉成 '1.799.49')，psm 6 (整頁當一個
+                # 文字區塊) 讀出來的金額才完整——這裡看到這個版面特徵字樣就一定
+                # 多試一次 psm 6，只有真的讀到金額才採用，避免白白換成更差的結果。
+                if redo.strip() and "REIMBURSEMENT" in redo.upper() and "HANDLING" in redo.upper():
+                    alt6 = _ocr_page_with_psm(pdf_path, i, 6)
+                    if alt6.strip() and _tata_he_subtotal(alt6) is not None:
+                        redo = alt6
                 if redo.strip():
                     pages[i] = redo
     merged: List[str] = []
@@ -3661,7 +3779,10 @@ def _yje_tata_extract_total(text: str) -> Optional[int]:
     m = _search(r"Subtotal\s*:?\s*([\d.,]+)", text)
     if m:
         return _tata_receipt_clean_amount(m)
-    return None
+    # TATA classic 掃描版「NON REIMBURSEMENT HANDLING FEE」單筆收據 (HE 開頭
+    # 發票)：上面幾種 SUB-TOTAL/Subtotal 字樣都配不到 (這個版面的金額跟文字
+    # 標籤常脫節，見 _tata_he_subtotal() 的說明)，直接用同一個退路函式。
+    return _tata_he_subtotal(text)
 
 
 def _yje_tata_extract_grand_total(text: str) -> Optional[int]:
@@ -3691,7 +3812,18 @@ def _yje_tata_extract_grand_total(text: str) -> Optional[int]:
     m = _search(r"^Total\s*:?\s*([\d.]+)\s*$", text)
     if m:
         return _tata_receipt_clean_amount(m)
-    return None
+    # ⚠️ 2026-11-22 抽樣掃描版發現：NOMOR INVOICE 收據的 "Total" 整個標籤有時
+    # 被 OCR 漏讀 (跟左欄資訊併成同一行後消失)，改找 "Sisa Tagihan" (未付
+    # 餘額)：這些帳單抽樣時都還沒收到款，餘額等於含稅總額。
+    m = _search(r"Sisa\s*Tagihan\s*\|?\s*:?\s*([\d.]+)\s*$", text)
+    if m:
+        return _tata_receipt_clean_amount(m)
+    # TATA classic 掃描版「NON REIMBURSEMENT HANDLING FEE」單筆收據 (HE 開頭
+    # 發票)：帳單印的 TOTAL 數字常常讀錯位數 (OCR 版面問題，見
+    # _tata_he_subtotal() 的說明)，含稅總額改用印尼「DPP Nilai Lain」公式算
+    # (未稅金額 × 1.11 = 未稅 + VAT 11%)，比相信 OCR 讀到的 TOTAL 文字可靠。
+    subtotal = _tata_he_subtotal(text)
+    return round(subtotal * 1.11) if subtotal is not None else None
 
 
 def _trans_extract_total(text: str) -> Optional[int]:
