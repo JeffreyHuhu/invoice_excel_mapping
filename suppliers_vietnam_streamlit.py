@@ -1216,8 +1216,12 @@ def _cw_vn_number(text: Optional[str]):
         return float(text.replace(".", "").replace(",", "."))
     return _dsv_vn_dot_amount(text)
 # 數量可能用逗號當小數點 ("18,8 - dỡ"：名稱被數量切開，"-" 後面不是單位而是名稱的後半)
+# desc 設成選填：名稱疊字代碼 (例如 "WTHC") 有時跟疊字清除邏輯 (_cargowise_pages()
+# 的字型大小過濾) 判定成雜訊整個清掉，真正的越南文名稱 "Phí xếp dỡ" 改印在數字那
+# 一行的下一行獨立一行 (2026-11-21 VN09 MOL 抽查，JUL.2026 "WTHC" 這筆原本整行比對
+# 失敗、費用漏算，金額勾稽對不起來)：這種情況下這一行會直接從數量開始，沒有 desc。
 _CW_MOL_CHARGE_RE = re.compile(
-    r"^(?P<desc>.+?)\s+(?P<qty>\d+(?:[.,]\d+)?)\s*-\s+(?P<unit>\S+)\s+(?P<rate>[\d,]+(?:\.\d+)?)\s+"
+    r"^(?:(?P<desc>.+?)\s+)?(?P<qty>\d+(?:[.,]\d+)?)\s*-\s+(?P<unit>\S+)\s+(?P<rate>[\d,]+(?:\.\d+)?)\s+"
     r"(?P<pct>\d+)\s*%\s+(?P<cur>[A-Z]{3})\s+(?P<gross>[\d,]+(?:\.\d+)?)$", re.MULTILINE)
 _CW_MOL_NOQTY_RE = re.compile(
     r"^(?P<desc>\D.+?)\s+(?P<rate>[\d,]+(?:\.\d+)?)\s+(?P<pct>\d+)\s*%\s+(?P<cur>[A-Z]{3})\s+"
@@ -1358,10 +1362,13 @@ def _cw_docs(text: str, page_nums: Optional[List[int]] = None):
                 docs[i][0] = f"SHIPMENT {borrowed}\n{docs[i][0]}"
                 doc_inv[i] = borrowed
     # 同一張單據掃描兩次 (號碼與 TOTAL 都相同) 只留一張 (使用者 2026-10-28：DHL 合輯第 19、20 頁
-    # S2601526262)。同號碼但總額不同的是另一張發票 (YUSEN SSGN0316461)，照常保留
+    # S2601526262)。同號碼但總額不同的是另一張發票 (YUSEN SSGN0316461)，照常保留。
+    # MOL 用 "GRAND TOTAL for VND …" (不是單獨一個 "TOTAL" 開頭)，原本的 TOTAL\b 比對不到這個
+    # 格式，同一份帳單整張 (含 Debit Note 號碼跟全部明細) 重複印兩次時抓不到重複、金額勾稽
+    # 整張變兩倍 (2026-11-21 VN09 MOL 抽查 OCT.2026 SSEM11Z06063)。
     out, out_pages, seen = [], [], set()
     for d, nums_d in zip(("\n".join(d) for d in docs), doc_pages):
-        total = re.findall(r"(?m)^[\s|\"'`]*TOTAL\b[^\n]*?(\d[\d.,]*\d)\s*$", d)
+        total = re.findall(r"(?m)^[\s|\"'`]*(?:GRAND )?TOTAL\b[^\n]*?(\d[\d.,]*\d)\s*$", d)
         key = (_cw_invoice_no(d), total[-1] if total else None)
         if key[0] and key[1] and key in seen:
             continue
@@ -1617,15 +1624,15 @@ def _cw_parse_doc(doc: str, supplier: Optional[str]) -> List[Dict]:
     for i, line in enumerate(doc_lines):
         im = _CW_MOL_CHARGE_RE.match(line)
         if im:
-            mol_matches.append((im, im.group("qty").replace(",", ".")))
+            mol_matches.append((im, im.group("qty").replace(",", "."), i))
             continue
         # 數量印在上一行 ("14,48 - M3" / "Phí khai thác hàng lẻ (CFS) 282,000 8 % VND 4,410,029"，
         # 2026-10-28 抽樣；數量的逗號是小數點)
         im = _CW_MOL_NOQTY_RE.match(line)
         prev = re.match(r"^\s*(\d+(?:,\d+)?)\s+-\s+\S+\s*$", doc_lines[i - 1]) if i else None
         if im and prev:
-            mol_matches.append((im, prev.group(1).replace(",", ".")))
-    for im, qty in mol_matches:
+            mol_matches.append((im, prev.group(1).replace(",", "."), i))
+    for im, qty, line_idx in mol_matches:
         # RATE 有時是單價 (數量 × 單價)，有時已經是金額 ("3 - Shipment 3,000,000 8 % 3,240,000")：
         # 選「× (1+稅率) 等於含稅金額」的那一個，都不對就用含稅金額回推
         gross, pct = _cw_comma_number(im.group("gross")), int(im.group("pct"))
@@ -1633,7 +1640,14 @@ def _cw_parse_doc(doc: str, supplier: Optional[str]) -> List[Dict]:
         net = next((c for c in (round(float(qty) * rate, 2), rate)
                     if abs(c * (1 + pct / 100) - gross) <= 2), round(gross / (1 + pct / 100)))
         vat = round(gross - net, 2)
-        desc = im.group("desc").strip()
+        desc = im.group("desc")
+        if desc is None:
+            # 名稱改印在數字那一行的下一行 (見上面 _CW_MOL_CHARGE_RE 的說明)，下一行不是
+            # 另一筆費用列時才借用，避免借到下一筆費用的文字
+            nxt = doc_lines[line_idx + 1].strip() if line_idx + 1 < len(doc_lines) else ""
+            desc = nxt if nxt and not _CW_MOL_CHARGE_RE.match(nxt) and not _CW_MOL_NOQTY_RE.match(nxt) else "N/A"
+        else:
+            desc = desc.strip()
         unit = im.groupdict().get("unit") or ""
         if unit and (not unit.isascii() or "(" in unit or unit.islower()):
             desc = f"{desc} {unit}"          # "Phí xếp" + "dỡ"、"Phí khai thác hàng lẻ" + "(CFS)"
@@ -1707,16 +1721,23 @@ def _cw_extract_total(text: str):
 def _cw_extract_grand_total(text: str):
     # YUSEN 的金額有時印在 "TOTAL VND" 上一行 (字的高度略高，被拆成兩行)
     # 外幣發票是 "TOTAL USD" (金額 "31,86" 逗號是小數點)
-    return (_cw_totals(text, [r"^TOTAL[ \t]+(?:VND|USD)[ \t]+(\d[\d.]*(?:,\d+)?(?:[ \t]\d{1,3})?)",
-                              r"^(\d[\d.]*(?:,\d+)?(?:[ \t]\d{1,3})?)[ \t]*\nTOTAL[ \t]+(?:VND|USD)\s*$",
-                              # 掃描頁 OCR 漏掉 "TOTAL VND" 標籤時，用頁尾 "Invoiced VND 7.171.200"
-                              r"Invoiced[ \t]+(?:VND|USD)[ \t]+(\d{1,3}(?:\.\d{3})+(?:,\d+)?)\b",
-                              # "Charge Sheet" 版面沒有 "TOTAL VND"，用 "Job Total" 這一列最後
-                              # 一個數字 (含稅總額，2026-11-16 抽查 DHL_VN OCT.2026)
-                              r"^Job Total[ \t]+\d{1,3}(?:\.\d{3})*(?:,\d+)?[ \t]+"
-                              r"\d{1,3}(?:\.\d{3})*(?:,\d+)?[ \t]+(\d{1,3}(?:\.\d{3})*(?:,\d+)?)\s*$"])
-            or _cw_totals(text, [r"GRAND TOTAL for [A-Z]{3}[ \t]+(\d[\d,]*(?:\.\d+)?)"],
-                          conv=_cw_comma_number))
+    out = dict(_cw_totals(text, [r"^TOTAL[ \t]+(?:VND|USD)[ \t]+(\d[\d.]*(?:,\d+)?(?:[ \t]\d{1,3})?)",
+                                 r"^(\d[\d.]*(?:,\d+)?(?:[ \t]\d{1,3})?)[ \t]*\nTOTAL[ \t]+(?:VND|USD)\s*$",
+                                 # 掃描頁 OCR 漏掉 "TOTAL VND" 標籤時，用頁尾 "Invoiced VND 7.171.200"
+                                 r"Invoiced[ \t]+(?:VND|USD)[ \t]+(\d{1,3}(?:\.\d{3})+(?:,\d+)?)\b",
+                                 # "Charge Sheet" 版面沒有 "TOTAL VND"，用 "Job Total" 這一列最後
+                                 # 一個數字 (含稅總額，2026-11-16 抽查 DHL_VN OCT.2026)
+                                 r"^Job Total[ \t]+\d{1,3}(?:\.\d{3})*(?:,\d+)?[ \t]+"
+                                 r"\d{1,3}(?:\.\d{3})*(?:,\d+)?[ \t]+(\d{1,3}(?:\.\d{3})*(?:,\d+)?)\s*$"]))
+    # 一份 PDF 同時混「TOTAL VND」版型 (上面那組 pattern) 跟「GRAND TOTAL for VND」版型
+    # (MOL 新分公司代碼，例如 "SWHM…") 時，以前用 "or" 只要上面那組抓到任何一張發票就整批
+    # 不再試這組 pattern，另一種版型的發票完全沒有總額可以勾稽 (2026-11-21 VN09 MOL
+    # 抽查 JAN.2026：SWHM 開頭的發票因此漏算)。改成逐張發票補，沒被上面那組抓到的才用
+    # 這組，同一張發票兩組都抓到時維持舊行為 (上面那組優先)。
+    for k, v in _cw_totals(text, [r"GRAND TOTAL for [A-Z]{3}[ \t]+(\d[\d,]*(?:\.\d+)?)"],
+                           conv=_cw_comma_number).items():
+        out.setdefault(k, v)
+    return out
 
 
 def _cw_page_balances(text: str) -> Optional[bool]:
@@ -2007,11 +2028,24 @@ register_supplier(
 
 
 # VN09 MOL：Debit Note，公司名稱只在 logo 圖片裡 (文字層沒有)，固定填
-# "MOL Logistics Vietnam Inc" (使用者 2026-10 正確答案)；House B/L 是 "MLG…"
+# "MOL Logistics Vietnam Inc" (使用者 2026-10 正確答案)；House B/L 以前固定是
+# "MLG…"，但 2026-11 抽查發現新分公司代碼開頭不同 (例如 "MLWVN0001670")，空運
+# Debit Note 甚至完全沒有 House B/L，兩種都抓不到時原本整頁判定失敗、真正的費用
+# 明細整頁漏掉 (辨識等級(低)，2026-11-21 VN09 MOL 抽查)。"Debit Note - " 這個
+# 抬頭在越南供應商裡是 MOL 專屬的 (DSV_VN/DHL_VN/YUSEN 這三家共用 CargoWise
+# 版面但抬頭都是 "PRO FORMA…"，不會跟 MOL 混淆)，不需要再疊加 MLG/公司名稱
+# 當第二個判斷條件。
+# 2 頁的 Debit Note，第 2 頁常常只是「這不是發票」的匯款資訊頁 (沒有任何費用列)，
+# 這一頁單獨呼叫 parse_mol() 只會吐出一筆全 N/A 的假列，讓驗證誤判成「抓不到
+# INVOICE NO/CONSIGNEE/Description」(2026-11-21 VN09 MOL 抽查)：原本想用「沒有
+# 英文免責聲明字句」排除這種頁，但只有 1 頁 ("Page 1 of 1") 的發票免責聲明跟
+# 費用表印在同一頁，會把真正有費用的頁也排除掉——改成直接看這一頁有沒有費用表
+# 標題 "CHARGE DESCRIPTION"，有費用表才算這家的帳單頁 (molcs VAT 發票沒有這個
+# 標題，另外判斷)。
 def detect_mol(text: str) -> bool:
-    return bool(re.match(r"\s*Debit Note - ", text)
-                and (re.search(r"\bMLG[A-Z]{2}\d{6,8}\b", text) or "MOL LOGISTICS" in text.upper())) \
-        or _is_molcs(text)
+    if re.match(r"\s*Debit Note - ", text):
+        return "CHARGE DESCRIPTION" in text
+    return _is_molcs(text)
 
 
 # --- MOL CONSOLIDATION SERVICE 越南增值稅發票 (2026-10-28 抽樣 "MOL LOGICTICS_SEP.2025" 等，63 頁) --
@@ -2086,6 +2120,12 @@ def _molcs_num(value: Optional[str]):
 
 
 def _molcs_parse_page(page: str) -> List[Dict]:
+    # 文字層把千分位數字的第一位拆開印出 ("5 ,351.00" = "5,351.00")：跟
+    # suppliers_vietnam_streamlit.py 裡 DSV_VN 的「第一位拆開」問題同一種
+    # pdfplumber 擷取瑕疵，只是這裡拆在逗號前面而不是整個數字前面 (2026-11-21
+    # VN09 MOL 抽查，FEB.2025 "PHÍ XẾP DỠ (THC fee) kg 5 ,351.00" 這筆漏算，
+    # 金額勾稽對不起來)。先接回去，不影響其他沒有這個瑕疵的樣本。
+    page = re.sub(r"(?<=\d) ,(\d{3})", r",\1", page)
     lines = [ln.strip() for ln in page.splitlines()]
     start = next((i for i, ln in enumerate(lines) if ln.startswith("A B C")), 0)
     stop = next((i for i, ln in enumerate(lines) if ln.startswith("Cộng tiền hàng")), len(lines))
