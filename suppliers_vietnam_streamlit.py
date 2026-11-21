@@ -5010,6 +5010,10 @@ _VT_BINH_TAN = [
     # 舊版 (有 PRICE 欄)；沒有 PRICE 欄的 IMP/EXP 表改用上面的新版設定
     # 2026-11-04 樣本答案 (IMP/EXP 兩張表)：發票號碼 = PAY NO (PFQ-…)，提單 = LOT NO / DEC NO，
     # 費用名稱照表頭 (Price、2%)，VAT 列也用同一個 PAY NO
+    # vat_no_date 沒設 doc_key 時把孤兒 VAT 列的發票號碼蓋成 N/A，是已確認答案
+    # (sample2/sample7/8 PFQ MIS EXPORT)：這張表好幾個不同 PAY NO 批次合在一起算的
+    # VAT，没有單一 PAY NO 可以代表，維持 N/A，不要改成其他值 (2026-11-22 試過用
+    # "Date:" 日期區間當發票號碼，會跟已確認答案的 N/A 衝突，已改回)
     (r"^(IMP|EXP)$", {"header": "PAY NO", "two_rows": False, "key": ["PAY NO"], "name_require": "=PRICE",
                       "fees": [("MISCELL", None), ("=OT.", None), ("=OTHER", None),
                                ("=PRICE", None), ("=2%", "2%")], "rest_fee": "2%",
