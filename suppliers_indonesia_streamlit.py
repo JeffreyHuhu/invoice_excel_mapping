@@ -4027,7 +4027,7 @@ register_supplier(
     ocr_attachments=False,
 )
 register_supplier(
-    "INDOPROSTIME", "PT. INDO PROSTIME EXPRESS", detect_indoprostime, parse_indoprostime,
+    "INDOPROSTIME_EXPRESS", "PT. INDO PROSTIME EXPRESS", detect_indoprostime, parse_indoprostime,
     multi_page=True, extract_grand_total=_indo_extract_grand_total,
 )
 register_supplier(

@@ -97,8 +97,9 @@ SUPPLIER_REQUIRED_FIELDS = {
     },
     "DHL": {"onboard_date": _W, "bl_no": _W, "port_of_loading": _W, "port_of_discharge": _W,
             "volume": _W},
+    # 船名、材積改為非必要值 (使用者 2026-11-22 規定：只有 ID07 適用，缺值不扣分、不列異常)
     "INDOPROSTIME_TRANSPORT": {"order_no": _W, "bl_no": _W, "mbl_no": _W, "port_of_loading": _W,
-                               "volume": _W, "vessel": _W, "shipper": _W},
+                               "shipper": _W},
     "OPL": {"arrive_date": _W, "onboard_date": _W, "bl_no": _W, "mbl_no": _W,
             "port_of_loading": _W, "port_of_discharge": _W, "volume": _W, "vessel": _W,
             "container_no": _W, "shipper": _W},
@@ -174,9 +175,9 @@ KNOWN_SOURCE_ISSUES: Dict[str, Dict[Tuple[str, str], Tuple[str, Optional[Union[s
 }
 # INDO PROSTIME EXPRESS (ID16) 與 TRANSPORT (ID07) 是兩個供應商 (使用者 2026-11-01 要求分開)。
 # EXPRESS 先沿用 TRANSPORT 的原帳單問題清單當起點，之後依 EXPRESS 樣本各自調整，不再共用同一份。
-KNOWN_SOURCE_ISSUES["INDOPROSTIME"] = dict(KNOWN_SOURCE_ISSUES["INDOPROSTIME_TRANSPORT"])
+KNOWN_SOURCE_ISSUES["INDOPROSTIME_EXPRESS"] = dict(KNOWN_SOURCE_ISSUES["INDOPROSTIME_TRANSPORT"])
 # 上面 B/L NO. 缺值的原帳單規則只限 TRANSPORT，EXPRESS 不沿用 (使用者 2026-11-01)
-KNOWN_SOURCE_ISSUES["INDOPROSTIME"].pop(("bl_no", "MISSING_REQUIRED"), None)
+KNOWN_SOURCE_ISSUES["INDOPROSTIME_EXPRESS"].pop(("bl_no", "MISSING_REQUIRED"), None)
 
 # 供應商例外：這些 (欄位, 規則) 對該供應商不是問題，連附註都不列 (使用者規定)
 SUPPLIER_EXEMPTIONS: Dict[str, set] = {
