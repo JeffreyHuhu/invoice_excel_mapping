@@ -129,6 +129,14 @@ def _ct_header(rows: List[list]) -> Dict[str, Optional[str]]:
     date_m = signed or period
     if date_m:
         header["invoice_date"] = _format_date_en(*date_m.groups())
+    # 2025 上半年 POUSUNG 對帳表沒有「Tên Đơn vị bán/mua hàng」標籤，抬頭只寫
+    # "CTY POU SUNG VIETNAM (Form : ...)"：賣方固定是 CONG THANH 本身 (這個函式
+    # 只給 CONG_THANH 用)，買方比對到 "POU SUNG" 關鍵字才補 (使用者 2026-11-21
+    # 回報這批整批缺賣方/買方造成 MISSING_REQUIRED)
+    if not header["supplier"]:
+        header["supplier"] = "CÔNG TY TNHH DỊCH VỤ GIAO NHẬN VẬN TẢI VÀ THƯƠNG MẠI CÔNG THÀNH"
+    if not header["consignee"] and "POU SUNG" in text.upper():
+        header["consignee"] = "CÔNG TY TRÁCH NHIỆM HỮU HẠN POU SUNG VIỆT NAM"
     return header
 
 
@@ -2042,9 +2050,16 @@ register_supplier(
 # 費用表印在同一頁，會把真正有費用的頁也排除掉——改成直接看這一頁有沒有費用表
 # 標題 "CHARGE DESCRIPTION"，有費用表才算這家的帳單頁 (molcs VAT 發票沒有這個
 # 標題，另外判斷)。
+# "Debit Note - " 草稿之後，同一張 SHIPMENT 也會補開「PRO FORMA TAX INVOICE」正式版
+# (抬頭跟 DSV_VN/DHL_VN/YUSEN 共用的 CargoWise 版面一樣，之前以為只有草稿版才是
+# MOL 專屬，這個格式漏掉整頁沒擷取，2026-11-21 VN09 MOL 二次抽查發現)：公司名稱一樣
+# 只在匯款資訊那段文字裡 ("MOL LOGISTICS (VIETNAM) INC")，跟費用表印在同一頁
+# ("Page 1 of 1")，直接用這個關鍵字判斷就夠，不用額外排除空頁。
 def detect_mol(text: str) -> bool:
     if re.match(r"\s*Debit Note - ", text):
         return "CHARGE DESCRIPTION" in text
+    if re.match(r"\s*PRO FORMA TAX INVOICE\b", text):
+        return "MOL LOGISTICS" in text.upper()
     return _is_molcs(text)
 
 
@@ -2126,6 +2141,11 @@ def _molcs_parse_page(page: str) -> List[Dict]:
     # VN09 MOL 抽查，FEB.2025 "PHÍ XẾP DỠ (THC fee) kg 5 ,351.00" 這筆漏算，
     # 金額勾稽對不起來)。先接回去，不影響其他沒有這個瑕疵的樣本。
     page = re.sub(r"(?<=\d) ,(\d{3})", r",\1", page)
+    # 同一種瑕疵也會拆在小數點前面 ("1 .00" = "1.00")：Qty 欄是整數的品項
+    # (Bill/SHPT 計價單位) 常見這個版本，整列比對失敗、這筆費用整個漏算
+    # (2026-11-21 VN09 MOL 抽查，FEB.2025 "PHÍ CHỨNG TỪ…Bill 1 .00 383,700"
+    # 這幾筆漏算)。
+    page = re.sub(r"(?<=\d) \.(?=\d)", r".", page)
     lines = [ln.strip() for ln in page.splitlines()]
     start = next((i for i, ln in enumerate(lines) if ln.startswith("A B C")), 0)
     stop = next((i for i, ln in enumerate(lines) if ln.startswith("Cộng tiền hàng")), len(lines))
