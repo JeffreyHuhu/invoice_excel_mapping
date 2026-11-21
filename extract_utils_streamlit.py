@@ -380,6 +380,40 @@ def _ocr_page_with_psm(pdf_path: str, page_index: int, psm: int, contrast: bool 
     return text
 
 
+def invalidate_ocr_cache(pdf_path: str) -> None:
+    """清掉這份 PDF 的 OCR 快取 (記憶體 + 硬碟)，強制下次重新辨識。
+
+    硬碟快取的設計本來就不存「OCR 完全失敗」(空字串) 的結果，避免暫時性
+    錯誤被永久記住；但沒有涵蓋「OCR 只辨識出一部分」(非空字串，但漏了
+    其中幾段) 的狀況，一旦發生就會被永久快取、每次重新轉檔都讀到同一份
+    不完整的結果 (2026-11-22 VN04 DHL_EXPRESS_VN：合併多筆 AWB 的掃描帳單，
+    批次處理 (同時處理 4 份) 下 OCR 偶爾漏讀其中幾段，結果被快取住，稽核
+    一直不過，重新轉檔也沒用)。用途：金額稽核沒過時，呼叫這支清掉快取，
+    讓 assess_pdf() 可以重新 OCR 一次再稽核。"""
+    for cache in (_OCR_TEXT_CACHE, _OCR_FAST_CACHE, _OCR_ENHANCED_TEXT_CACHE):
+        for k in [k for k in cache if k[0] == pdf_path]:
+            cache.pop(k, None)
+    for k in [k for k in _OCR_PSM_CACHE if k[0] == pdf_path]:
+        _OCR_PSM_CACHE.pop(k, None)
+    abspath = os.path.abspath(pdf_path)
+    for cache in (_PAGES_CACHE, _CUSTOM_PAGES_CACHE, _FORCE_OCR_PAGES_CACHE):
+        for k in [k for k in cache if k[0] == abspath]:
+            cache.pop(k, None)
+    try:
+        with pdfplumber.open(pdf_path) as pdf:
+            page_count = len(pdf.pages)
+    except Exception:
+        page_count = 0
+    for i in range(page_count):
+        for mode in ("hi300", "fast150", "enh300"):
+            disk_path = _disk_ocr_path(pdf_path, mode, i)
+            if disk_path and os.path.exists(disk_path):
+                try:
+                    os.remove(disk_path)
+                except OSError:
+                    pass
+
+
 def limited_pages(pdf):
     """抽樣/診斷用：環境變數 INVOICE_MAX_PAGES (例如 50) 有設定時只讀前 N 頁
     (使用者 2026-10-28：超過 50 頁的 PDF 抽樣時只跑約 50 頁)。正式轉檔不設定，讀整份。"""

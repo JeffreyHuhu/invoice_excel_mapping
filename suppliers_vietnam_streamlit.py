@@ -7266,7 +7266,9 @@ _DHL_VN_SUR_RE = re.compile(
 
 
 def detect_dhl_express_vn(text: str) -> bool:
-    return _is_dhl_vnpt(text)
+    # 貨態明細匯出格式 (見下方 _is_dhl_shipment_export()) 沒有 "DHL VNPT" 字樣，
+    # 要額外比對表頭關鍵字才抓得到 (2026-11-22 抽樣 "FEBRUARY 2026-EXP.pdf")
+    return _is_dhl_vnpt(text) or _is_dhl_shipment_export(text)
 
 
 def _dhl_vn_invoice_no(text: str) -> Optional[str]:
@@ -7482,8 +7484,64 @@ def _parse_dhl_ib_tariff(text: str) -> Dict:
     return {"header": h, "items": items or [{"description": None, "amount": None, "vat": None}]}
 
 
+# --- 貨態明細匯出格式 (非月結帳單，單筆一行寬表格；2026-11-22 抽樣 "FEBRUARY
+# 2026-EXP.pdf"：手機掃描品質很差，CamScanner 浮水印，整份只有 1 筆資料，沒有
+# "DHL VNPT" 字樣，只能靠表頭欄位名判斷。表頭本身是寬表格，掃描會拆成兩行、
+# 欄位名彼此不一定緊鄰，用個別關鍵字判斷，不整串比對) ------------------------
+# 表頭 (兩行合併後)：Invoice Number / Invoice Date / Billing Account / Shipment
+# Number / Shipment Date / Product / Product Name / Pieces / Origin / Country
+# Name / Country Code / Senders Name / Senders Address1 / Senders Contact /
+# Destination，換行後接 Dest Country Name / Dest Country Code / Receivers Name /
+# Receivers Address1 / Receivers Contact / Weight(kg) / Total Amount(incl.VAT) /
+# Total Tax / 各種附加費 (XC1~XC3)。
+# 目前只有這 1 份樣本，而且掃描太糟，第二行 (收件人/金額) 常被 OCR 拆散、順序
+# 錯亂，只抓最靠得住的幾項：發票號碼、日期、起運/目的地、提單號、重量、含稅
+# 總額、稅額 (用「小數重量後面接兩個整數」的位置關係抓，不管前後文字順序)。
+# 日後樣本變多，若格式不同 (例如含稅總額/稅額位置不一樣) 要再調整。
+_DHL_SHIPMENT_EXPORT_MAIN_RE = re.compile(
+    r"\b([A-Z]{2,6}\d{6,})\s+(\d{8})\s+\d+\s+\d+\s+(\d{8})\s+\S+\s+\S+\s+\d+\s+([A-Z]{3})\b.*?\b([A-Z]{3})\s*$",
+    re.MULTILINE)
+_DHL_SHIPMENT_EXPORT_AMOUNT_RE = re.compile(r"(\d+\.\d+)\s+(\d+)\s+(\d+)")
+
+
+def _is_dhl_shipment_export(text: str) -> bool:
+    up = text.upper()
+    return all(w in up for w in ("BILLING", "ACCOUNT", "RECEIVERS", "SENDERS", "SHIPMENT", "DESTINATION"))
+
+
+def _parse_dhl_shipment_export(text: str) -> Dict:
+    h: Dict[str, Optional[str]] = {"supplier": "DHL - VNPT EXPRESS LTD.", "invoice_no": None,
+                                    "invoice_date": None, "consignee": None}
+    item: Dict[str, Optional[str]] = {"description": "EXPRESS WORLDWIDE"}
+    m = _DHL_SHIPMENT_EXPORT_MAIN_RE.search(text)
+    if m:
+        raw_no, inv_date, ship_date, origin, dest = m.groups()
+        h["invoice_no"] = re.sub(r"(?<=[\dR])O(?=[\dO])|(?<=\d)O", "0", raw_no)
+        h["invoice_date"] = _format_date_en(inv_date[6:8], inv_date[4:6], inv_date[0:4])
+        item["onboard_date"] = _format_date_en(ship_date[6:8], ship_date[4:6], ship_date[0:4])
+        item["port_of_loading"] = origin
+        item["port_of_discharge"] = dest
+    cm = re.search(r"\bVN\s+(\S+)", text)
+    if cm:
+        h["consignee"] = cm.group(1).strip(",.")
+    am = _DHL_SHIPMENT_EXPORT_AMOUNT_RE.search(text)
+    if am:
+        weight, incl_vat, tax = am.groups()
+        item["volume"] = _fmt_volume(kg=weight)
+        item["vat"] = int(tax)
+        item["amount"] = int(incl_vat) - int(tax)
+    else:
+        item["amount"] = None
+        item["vat"] = None
+    return {"header": h, "items": [item]}
+
+
 def _dhl_express_vn_parse(text: str) -> Dict:
-    return _parse_dhl_ib_tariff(text) if _is_dhl_ib_tariff(text) else parse_dhl_express_vn(text)
+    if _is_dhl_ib_tariff(text):
+        return _parse_dhl_ib_tariff(text)
+    if _is_dhl_shipment_export(text):
+        return _parse_dhl_shipment_export(text)
+    return parse_dhl_express_vn(text)
 
 
 def _dhl_express_vn_total2(text: str):
