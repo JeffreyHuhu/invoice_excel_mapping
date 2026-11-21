@@ -4891,7 +4891,10 @@ _VT_BINH_TAN = [
     (r"(?!)", {"header": "CLEARING", "key": ["INVOICE NO", "LOT_NO", "LOT NO"], "require": "CLEARING EXPENSE",
                "fees": [(("TRUCK", "DELIVERY"), "Truck Fee"), ("PORT", "Port Fee"),
                         ("D/O,THC", "D/O,THC Fee"), (("STORAGE", "TAX"), "Storage Fee")],
-               "vat": "=VAT", "vat_desc": "VAT 8%", "total": "CLEARING EXPENSE", "grand": "=TOTAL",
+               # vat 用片段比對 (不用 "="完全比對)：有些樣本的 VAT 欄下面子標題直接寫稅率
+               # "0.08" (2026-11-21 樣本 "1004 truckPFP")，合併後標籤變成 "VAT 0.08"，
+               # 完全比對找不到欄，VAT 整欄抓不到，含稅總額全部對不上
+               "vat": "VAT", "vat_desc": "VAT 8%", "total": "CLEARING EXPENSE", "grand": "=TOTAL",
                "date_sheet_mmdd": True,
                "const": {"port_of_loading": "VIETNAM", "port_of_discharge": "VIETNAM"}}),
     # 舊版 (有 PRICE 欄)；沒有 PRICE 欄的 IMP/EXP 表改用上面的新版設定
@@ -4906,17 +4909,107 @@ _VT_BINH_TAN = [
                       "volume_raw": ("TOTAL CON", "TOTAL CFS/AIR")}),
     # NB / PHV (2026-11-05 樣本答案，兩張表格式相同)：費用名稱帶英文說明 (寫入前在解析時加上)，FUEL SURCHARGE 的百分比
     # 取 "TỶ LỆ TĂNG GIÁ…" 欄 (0.16 -> 16%)；VAT 列名稱 "Thuế VAT (8%) (VAT 8%)"
-    (r"^(NB|PHV)$", {"header": "SO LO", "key": ["=SO LO"],
+    # name_require/require：這個版面才有的欄 (SỐ TIỀN PHỤ THU)，跟下面的簡化版 (只有
+    # CƯỚC VC CHƯA VAT，沒有附加費/VAT/總額欄) 區分，不然簡化版也會套到這組算式，
+    # 附加費/VAT/總額整欄抓不到 (2026-11-21 使用者樣本 "XX-2025 BINH TAN-TRUCK EXPORT"
+    # 等月份改成簡化版面)
+    (r"^(NB|PHV)$", {"header": "SO LO", "key": ["=SO LO"], "name_require": "SO TIEN PHU THU",
+               "require": "SO TIEN PHU THU",
                "fees": [("CUOC VC CHUA VAT", "CƯỚC VC CHƯA VAT (TRUCKING FREIGHT)"),
                         ("SO TIEN PHU THU", "SỐ TIỀN PHỤ THU (FUEL SURCHARGE {pct}%)")],
                "pct_col": "TY LE TANG GIA",
                "vat_label": "Thuế VAT (8%) (VAT 8%)", "vat_last": True,
                "total": "TONG TIEN THANH TOAN", "vat_row": True, "date": "=NGAY",
                "cbm": "SO LUONG CBM",
+               # sheet_total：有些月份表尾合計列不是欄位 "TỔNG TIỀN THANH TOÁN"，是列標籤
+               # "CỘNG" (未稅，只加總 CƯỚC VC CHƯA VAT 一欄，不含附加費) / "TỔNG CỘNG"
+               # (含稅，= CỘNG + VAT) (2026-11-21 樣本 "POU HUNG 04-2026 …-export")
+               "sheet_total": ("CONG", "TONG CONG"),
                # 2026-11-04 樣本答案：發票號碼 = 抬頭 "Đính kèm hóa đơn số" (整張一個)，SỐ LÔ 放 B/L NO.，
-               # 船名與貨櫃號碼留空
-               "doc_key": r"(\d[A-Z]\d{2}[A-Z]{3} \d{3,5})", "merge_no_fee": True, "vat_no_date": True,
+               # 船名與貨櫃號碼留空；"Đính kèm hóa đơn số" 跟數字間有時是空白、有時是連字號
+               # (2026-11-21 樣本 "1C26TYY-2010")，兩種都要認，不然抓不到發票號碼整張變
+               # 好幾十張各自缺號的發票 (MISSING_REQUIRED)
+               "doc_key": r"(\d[A-Z]\d{2}[A-Z]{3}[ -]\d{3,5})", "merge_no_fee": True, "vat_no_date": True,
                "fields": {"order_no": "SO INV", "bl_no": "=SO LO"}}),
+    # 有附加費比例但沒有附加費金額欄的版本 (2026-11-21 使用者樣本 "XE TAI DU DUC EXP
+    # 0526/0626/0726/0826/0926"：多一欄「TỶ LỆ TĂNG GIÁ CƯỚC...(%)」跟「TỔNG TIỀN」
+    # (含附加費的總額)，但沒有獨立的附加費金額欄——附加費金額用 remainder
+    # (TỔNG TIỀN - CƯỚC VC) 反推；這個版面也沒有 VAT，TỔNG TIỀN 本身就是含附加費的
+    # 總額。要放在下面的簡化版之前：簡化版沒有 require 排除這個欄，會先搶走這張表，
+    # CONG 列勾稽讀到的是運費欄而不是含附加費的總額欄，整張變成「未稅合計不符」
+    (r"(?!)", {"header": "SO LO", "key": ["=SO LO"], "require": "TY LE TANG GIA",
+               "fees": [("CUOC VC CHUA VAT", "CƯỚC VC CHƯA VAT (TRUCKING FREIGHT)")],
+               "pct_col": "TY LE TANG GIA",
+               "remainder": ("=TONG TIEN", "Phụ phí xăng dầu (FUEL SURCHARGE {pct}%)"),
+               # "TỔNG TIỀN" (= CƯỚC VC + 附加費) 只是未稅小計，VAT 另外在表尾 "TỔNG CỘNG"
+               # 一次列整張對帳單合計 (8%)，不是逐列欄位，沒有單獨一列可以當 VAT 品項；
+               # 只用 sheet_total 配表尾 "CỘNG" 列勾稽未稅小計加總 (doc_key 已經把整張表
+               # 合併成一張發票)，含稅總額這裡不做稽核 (沒有規則可以還原 VAT 金額，
+               # 比照「還沒支援」處理，不要逐列設 grand 硬套，否則一定對不上)
+               "sheet_total": ("CONG", None),
+               "date": "=NGAY",
+               "doc_key": r"(\d[A-Z]\d{2}[A-Z]{3}[ -]\d{3,5})", "merge_no_fee": True,
+               "fields": {"order_no": "SO INV", "bl_no": "=SO LO"}}),
+    # 簡化版 (2026-11-21 使用者樣本：舊檔名 "XX-2025 BINH TAN-TRUCK EXPORT"、新檔名
+    # "POU HUNG XX-2026-export"、"XE TAI DU DUC-EXP-Txx" 的 DCL/YDC/OX/SAU/OXY 等子表)：
+    # 只有 CƯỚC VC CHƯA VAT 一欄運費，沒有附加費/VAT/總額欄；靠表尾 "CỘNG" 列勾稽
+    # (有列到才稽核，沒有就跟其他 BINH_TAN 運費表一樣維持「沒有總額可勾稽」)
+    (r"(?!)", {"header": "SO LO", "key": ["=SO LO"], "require": "CUOC VC CHUA VAT",
+               "fees": [("CUOC VC CHUA VAT", "CƯỚC VC CHƯA VAT (TRUCKING FREIGHT)")],
+               "sum_row": r"^CONG", "date": "=NGAY",
+               "doc_key": r"(\d[A-Z]\d{2}[A-Z]{3}[ -]\d{3,5})", "merge_no_fee": True,
+               "fields": {"order_no": "SO INV", "bl_no": "=SO LO"}}),
+    # POU HUNG 空運/CFS 派車表 (2026-11-21 使用者樣本 "POU HUNG 04/05/06-2026 …-IMPORT
+    # truck fee air/cfs")：第二欄 (分攤到這批的金額) 清楚標 "Số tiền CT ( chưa VAT)"
+    # (不是靠「同名出現兩次」判斷)，附加費是獨立的 "SỐ TIỀN TĂNG" 欄 (金額，不是比例)。
+    # 要放在下面「IMPORT TRUCK FEE」等只看 "SO TIEN (CHUA VAT)" 開頭字樣的設定之前：
+    # 那些設定的 require 只要有這個字樣就會比對到，會比這裡更早搶走這張表
+    # (2026-11-21 發現：附加費金額被錯認成比例 0.24，含稅總額全部對不上)
+    (r"(?!)", {"header": "SO TIEN CT ( CHUA VAT)", "two_rows": False, "key": ["=SO LO"],
+               "require": "SO TIEN CT ( CHUA VAT)",
+               # 沒有另外設 total：這個版面沒有獨立的「未稅小計」欄 (只有分攤運費+附加費兩筆，
+               # 沒有第三欄加總)，不要把 total 指回運費欄自己，否則變成跟附加費金額一樣大的
+               # 假「未稅合計不符」
+               "fees": [("SO TIEN CT ( CHUA", "Cước vận chuyển"), ("=SO TIEN TANG", "Phụ phí xăng dầu")],
+               "vat": "THUE 8%", "vat_desc": "VAT 8%", "grand": "=TONG TIEN",
+               "date": "NGAY NHAN HANG", "ffill_date": True, "kg": "=SO KG",
+               "const": {"port_of_loading": "VIETNAM", "port_of_discharge": "VIETNAM"},
+               "fields": {"vessel": "=SO XE", "container_no": "=SO XE"}}),
+    # POU HUNG 空運派車表 CFS 版 (2026-11-21 使用者樣本 "POU HUNG 04-2026 …-IMPORT truck fee
+    # cfs")：跟上面的差異是多了一欄「未稅小計」("SỐ TIỀN (CHƯA VAT)" 再出現一次，CT 分攤
+    # 運費 + 附加費金額)，附加費金額藏在標題寫成 "% tăng giá dầu" 的那一欄 (不是比例，
+    # 比例在它前面獨立的 "%" 欄)。用 $ 取最後一個 "SO TIEN (CHUA VAT)" 欄當小計
+    (r"(?!)", {"header": "SO TIEN CT (CHUA VAT)", "two_rows": False, "key": ["=SO LO"],
+               "require": "SO TIEN CT (CHUA VAT)",
+               "fees": [("SO TIEN CT (CHUA", "Cước vận chuyển"), ("TANG GIA DAU", "Phụ phí xăng dầu")],
+               "vat": "THUE 8%", "vat_desc": "VAT 8%",
+               "total": "$SO TIEN (CHUA VAT)", "grand": "=TONG TIEN",
+               "date": "NGAY NHAN HANG", "ffill_date": True, "kg": "=SO KG", "cbm": "=SO CBM",
+               "const": {"port_of_loading": "VIETNAM", "port_of_discharge": "VIETNAM"},
+               "fields": {"vessel": "=SO XE", "container_no": "=SO XE"}}),
+    # POU HUNG 空運派車表 (2026-11-21 使用者樣本 "POU HUNG 05/06-2026 …-IMPORT truck fee
+    # air")：跟上面兩個版本都不同，附加費金額欄清楚標 "Phụ phí số tiền tăng" (獨立一欄，
+    # 不跟比例或運費欄撞名)；分攤運費欄有時跟第一欄 (整趟運費) 同名都叫 "Số tiền (chưa
+    # VAT)"，用 $ 取最後一個
+    (r"(?!)", {"header": "PHU PHI SO TIEN TANG", "two_rows": False, "key": ["=SO LO"],
+               "require": "PHU PHI SO TIEN TANG",
+               "fees": [("$SO TIEN (CHUA", "Cước vận chuyển"), ("PHU PHI SO TIEN TANG", "Phụ phí xăng dầu")],
+               "vat": "THUE 8%", "vat_desc": "VAT 8%",
+               "total": "TONG TIEN ( CHUA", "grand": "=TONG TIEN",
+               "date": "NGAY NHAN HANG", "ffill_date": True, "kg": "=SO KG",
+               "const": {"port_of_loading": "VIETNAM", "port_of_discharge": "VIETNAM"},
+               "fields": {"vessel": "=SO XE", "container_no": "=SO XE"}}),
+    # POU HUNG CFS 派車表 (2026-11-21 使用者樣本 "POU HUNG 03-2026 …-IMPORT truck fee cfs")：
+    # 沒有分攤欄，運費/附加費已經合併成一欄 "TỔNG TIỀN\nCHƯA VAT" (這份樣本附加費欄
+    # 都空白，不確定有值時放哪一欄，先只認合併後的小計，不拆開避免重複算)；跟上面幾個
+    # "SO TIEN (CHUA VAT)"/"SO TIEN CT"系列不同，沒有括號，標籤是 "TONG TIEN CHUA VAT"
+    (r"(?!)", {"header": "TONG TIEN CHUA VAT", "two_rows": False, "key": ["=SO LO"],
+               "require": "TONG TIEN CHUA VAT",
+               "fees": [("TONG TIEN CHUA VAT", "Cước vận chuyển")],
+               "vat": "THUE 8%", "vat_desc": "VAT 8%", "grand": "=TONG TIEN",
+               "date": "NGAY NHAN HANG", "ffill_date": True, "kg": "=SO KG", "cbm": "=SO CBM",
+               "const": {"port_of_loading": "VIETNAM", "port_of_discharge": "VIETNAM"},
+               "fields": {"vessel": "=SO XE", "container_no": "=SO XE"}}),
     # --- 2026-10-28 抽樣補的運費表 (工作表名稱也有 CFS/AIR，用必要欄位區分) ---
     # IMPORT TRUCK FEE：SỐ TIỀN (CHƯA VAT) | THUẾ 8% | TỔNG TIỀN，每列一批 (lot no.)。
     # 2026-11-16 使用者樣本 "PFP CFS -AIT TRUCK FEE 04.2026" 多了加油價附加費兩欄
@@ -4954,8 +5047,12 @@ _VT_BINH_TAN = [
                "const": {"port_of_loading": "VIETNAM", "port_of_discharge": "VIETNAM"},
                "fields": {"vessel": "=SO XE", "container_no": "=SO XE"}}),
     # BẢNG KÊ VẬN CHUYỂN (PYV-CFS BK)：Số tiền bao gồm phụ phí | THUẾ 8% | Tổng tiền，一趟車好幾批
-    (r"(?!)", {"header": "SO TIEN BAO GOM", "two_rows": False, "key": ["=SO LO"], "require": "SO TIEN BAO GOM",
-               "fees": [("SO TIEN BAO GOM", "Cước vận chuyển (gồm phụ phí)")],
+    # header/fees 多認 "Số tiền gồm phụ phí xăng dầu" (少了「bao」、多了「xăng dầu」)：
+    # 2026-11-21 使用者樣本 "PYV TRUCK FEE 09(HTX Binh Tan)-Import"、"PYV-CFS TRUCK(
+    # 20260817~0912/20260914~1010)" 用這個詞組，原本只認 "SO TIEN BAO GOM" 完全比對不到
+    (r"(?!)", {"header": ("SO TIEN BAO GOM", "SO TIEN GOM PHU PHI"), "two_rows": False, "key": ["=SO LO"],
+               "require": ("SO TIEN BAO GOM", "SO TIEN GOM PHU PHI"),
+               "fees": [(("SO TIEN BAO GOM", "SO TIEN GOM PHU PHI"), "Cước vận chuyển (gồm phụ phí)")],
                "vat": "THUE 8%", "vat_desc": "VAT 8%", "grand": "TONG TIEN",
                "date": "NGAY LAY", "ffill_date": True, "kg": "=KG",
                "const": {"port_of_loading": "VIETNAM", "port_of_discharge": "VIETNAM"},
