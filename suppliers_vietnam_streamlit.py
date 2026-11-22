@@ -2942,7 +2942,9 @@ def _vt_parse_sheet(name: str, rows: List[list], cfg: Dict, supplier: str,
         if not m_md:
             m_md = re.search(r"(?<!\d)(\d{2})(\d{2})(?!\d)", os.path.basename(getattr(book, "path", "") or ""))
         if m_md:
-            yr = year_hint or _vt_sibling_month_year(book, m_md.group(1))
+            # 同資料夾找不到月結檔時 (例如使用者只搬這一批週結檔重轉)，先固定用
+            # 2025 年當預設值；使用者 2026-11-22 確認：之後有別的年份會另外通知
+            yr = year_hint or _vt_sibling_month_year(book, m_md.group(1)) or "2025"
             if yr:
                 common["invoice_date"] = _format_date_en(m_md.group(2), m_md.group(1), yr)
     doc_key = None
@@ -4960,8 +4962,22 @@ register_supplier(
 _VT_BINH_TAN = [
     # 雜費表 (SERVICE FEE / IMP-TOTAL，2026-10-28 抽樣，工作表名稱不固定)：MISCELL | OT. | OTHER |
     # TOTAL (小計) | 2% | TOTAL。MISCELL 常空白，主要費用只寫在小計；合計取最後一個 TOTAL
-    (r"(?!)", {"header": "PAY NO", "two_rows": False, "key": ["LOT NO", "DEC NO"], "require": "SHIP MODE",
-               "fees": [], "fees_between": ("SHIP MODE", ("UNIT PRICE", "=TOTAL", "TOTAL")),
+    # 名稱改成 "^\d{8}$" (原本是永不符合的 "(?!)")：只有逐日工作表 (名稱是 8 位數日期，
+    # 例如 "20250113") 才靠名稱比對；目的是讓 matched 變 True，底下的 skip_sheet 才會生效
+    # (見 _vt_sheets_raw：skip_sheet 只在「已經有名稱符合的工作表」時才排除)，排掉下面
+    # 的彙總表。沒有逐日工作表的檔案 (例如 "IMP-TOTAL"/"EXP-TOTAL" 單張表) 不受影響，
+    # 一樣靠表頭判斷比對到 (2026-11-22 使用者樣本「06-100012345...要修」確認)
+    (r"^\d{8}$", {"header": "PAY NO", "two_rows": False, "key": ["LOT NO", "DEC NO"], "require": "SHIP MODE",
+               # skip_sheet：有些工作簿在逐日工作表之外，另外多一張彙總表把同一週全部
+               # 批號又列一次 (工作表名稱固定是 "TOTAL" 或 "Sheet1"/"Sheet2"，不是 8 位數
+               # 日期)，內容跟逐日工作表重複，每張發票會被算兩次 (2026-11-22 使用者樣本
+               # "20250113-20250118 (IMP-TOTAL).xls" 等多份：差額剛好等於其中一批的費用
+               # 加總，確認是重複列入)
+               "skip_sheet": r"^(?:TOTAL|SHEET\d*)$",
+               # fees_between 的「結束欄」原本只認 "TOTAL"：有些工作表這欄改標成 "AMOUNT"
+               # 或 "FEE" (同一份樣本內，逐日工作表裡偶爾出現)，認不到時這欄會被誤判成
+               # 一筆費用，整列金額多算一次 (2026-11-22 使用者樣本確認)
+               "fees": [], "fees_between": ("SHIP MODE", ("UNIT PRICE", "=TOTAL", "=AMOUNT", "=FEE", "TOTAL")),
                # fees_between_skip_if：2025-04 後新版表頭多了 APP/TRAN/CUT 等費用欄時，
                # OTHER 欄變成重複值 (不是獨立費用)，照樣加總會比 TOTAL 多算 (2026-11-20
                # 使用者樣本 "04-2025 BINH TAN-MIS EXPORT" NB25-1031/1032 等確認)
