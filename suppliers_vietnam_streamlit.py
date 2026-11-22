@@ -2882,9 +2882,16 @@ def _vt_parse_sheet(name: str, rows: List[list], cfg: Dict, supplier: str,
     if cfg.get("usd_amount_suffix"):
         # ORIENTAL_USD 不換算、不填 VND 金額 (使用者 2026-11-21 指定)：欄名含 "VND" 的
         # 費用欄 (例如 "FUMIGATION (VND)") 整欄不列入輸出，不管 fees/fees_re 設定本來
-        # 有沒有抓到這欄。目前樣本這些欄都是空的；真的有金額時這裡沒有另外強制判
-        # 「辨識等級(低)」，只是不輸出該筆金額，是已知的小缺口 (尚無樣本驗證)。
-        fees = [(c, desc) for c, desc in fees if "VND" not in labels[c].upper()]
+        # 有沒有抓到這欄。VND 金額一定是整數 (越南盾沒有小數)：這欄若出現非整數值，
+        # 代表帳單這個月把子欄順序印反了 (FUMIGATION 本來固定先 VND 後 USD，這個月
+        # 反過來)，真正的 USD 金額被印在寫著 "VND" 的那一欄，不能整欄丟掉 (2026-11-22
+        # "POUYUEN T08-2025 EXP-DC" FUMIGATION：32.4，跟帳單自己的 TOTAL (USD) 對得上)。
+        _data_start = h + (2 if two_rows else 1)
+        def _vnd_col_has_usd_value(c):
+            return any(v is not None and abs(v - round(v)) > 1e-6
+                       for v in (_vn_num(_vn_cell(r, c)) for r in rows[_data_start:]))
+        fees = [(c, desc) for c, desc in fees
+                if "VND" not in labels[c].upper() or _vnd_col_has_usd_value(c)]
     # 外幣費用名稱加註幣別 (同 VN09 MOL 的使用者答案 "… (USD)")
     # fee_cur：表頭沒寫幣別、但整張費用都是外幣 (VN14 CN 表，合計欄是 TOTAL (USD))
     # (標題寫明 VND 的欄不加，例如 VN14 "FUMIGATION (VND)")
