@@ -5388,7 +5388,13 @@ _VT_OLM_SEA_FEES = [(x, None) for x in (
     # 2026-10-28 抽樣 "BANGKE T6-2026 EXP"：LOLO、DECLARATION，與第二個 LOCAL CHARGE 欄
     "=LOLO", "=DECLARATION", "$LOCAL CHARGE",
     # 沒寫幣別的 EFS 欄 (2026-10-28 抽樣 "POU HUNG 03-2026 PHƯƠNG ĐÔNG export" CN T 03 表)
-    "=EFS")]
+    "=EFS")] + [
+    # BANGKE T07-2026 EXP (SEA (2) 表，2026-11-22 答案)：表頭文字打錯，THC 的合併格
+    # 寫成 "FACT NO"、子欄只有 check/USD (沒有 VND 子欄)，值在 "USD" 子欄；SEAL 的子欄
+    # 寫成 "check" 不是 "USD" (值直接在這欄)。使用者確認：826.2 算 THC、38.88 算 SEAL。
+    ("=FACT NO USD", "THC"),
+    ("=SEAL CHECK", "SEAL"),
+]
 _VT_ORIENTAL = [
     # 2024 PAYMENT FOR LOCAL CHARGE：Invoice No | B/L | 各項費用 (USD) | Total | VAT | Sum Total (USD/VND)
     (r"(?!)", {"header": "SUM TOTAL", "two_rows": False, "require": "SUM TOTAL", "key": ["INVOICE NO", "=B/L"],
