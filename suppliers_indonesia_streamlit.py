@@ -6411,8 +6411,9 @@ def _galuh_extract_items(text: str) -> List[Dict]:
         if not line:
             continue
         if item_pattern is _GALUH_SCAN_ITEM_LINE_PATTERN:
-            # 掃描版 OCR 會帶出表格線與序號 ("1 |TRUCKING ..."、"| PPh 2% ...")
-            line = re.sub(r"^(?:\d+\s*)?\|+\s*", "", line)
+            # 掃描版 OCR 會帶出表格線與序號 ("1 |TRUCKING ..."、"| PPh 2% ..."、
+            # "1. |TRUCKING ..."：序號後面偶爾多一個句點，2026-11-23 樣本 0500150)
+            line = re.sub(r"^(?:\d+[.\s]*)?\|+\s*", "", line)
             # 序號後面沒有表格線 ("1 TRUCKING PER TGL …"，2026-10-28 抽樣 0500085)
             line = re.sub(r"^\d{1,2}\s+(?=[A-Za-z])", "", line)
             # 行尾表格線 OCR 也會讀成 "}" / "]" ("… 14.130.000 }"，2026-10-30 0500003)
@@ -6435,6 +6436,38 @@ def _galuh_extract_items(text: str) -> List[Dict]:
                 "amount": _galuh_clean_amount(item_m.group("amount")),
                 "vat": None,
             })
+    if not items and item_pattern is _GALUH_SCAN_ITEM_LINE_PATTERN:
+        items = _galuh_extract_items_positional(block)
+    return items
+
+
+def _galuh_extract_items_positional(block: str) -> List[Dict]:
+    """OCR 掃描品質差時，偶爾把整欄金額先讀在一起、後面才接著讀出所有名稱
+    (跟一般「名稱/金額同一行」的版面完全脫鉤，2026-11-23 樣本 0500150 的
+    contrast 重新 OCR 結果)。這裡退回成「依出現順序」逐一配對：第 1 個金額
+    配第 1 個名稱，以此類推 (只取第一個金額所在行之後的名稱，排除前面的
+    地址等雜訊；金額、名稱數量對不上就放棄，不亂猜)。
+    """
+    lines = [l.strip() for l in block.splitlines()]
+    amount_idxs = [i for i, l in enumerate(lines)
+                   if re.fullmatch(r"-?\d{1,3}(?:[.,]\d{3})+", l)]
+    if not amount_idxs:
+        return []
+    start = amount_idxs[0]
+    amounts = [lines[i] for i in amount_idxs if i >= start]
+    labels = [l for i, l in enumerate(lines)
+              if i >= start and l and i not in amount_idxs
+              and not re.fullmatch(r"total", l, re.IGNORECASE)]
+    if not amounts or len(amounts) != len(labels):
+        return []
+    items: List[Dict] = []
+    for label, amount in zip(labels, amounts):
+        tax_m = re.match(r"^(PP[NnHh]\s+\d+%)", label)
+        amt = _galuh_clean_amount(amount)
+        if tax_m:
+            items.append({"description": tax_m.group(1).strip(), "amount": None, "vat": amt})
+        else:
+            items.append({"description": _galuh_strip_date_suffix(label), "amount": amt, "vat": None})
     return items
 
 
@@ -7988,15 +8021,28 @@ _OPL_SCAN_ITEM_RE = re.compile(
     # "7X40'HQ" 讀成 "TX40'HQ"/"7K40'HQ" ("XM25100326")
     # 數字和引號之間多一個空白 ("1X20 'GP"，"HKGJKT24120372A")：引號前容許一個空白，
     # 跟下面 "2440 'HQ" 那個 alt 一樣容許，否則幣別 (HKD) 判斷會被漏掉的 "'GP" 卡住
-    r"(?P<qty>\d+\s*[Xx]\s*\d{2}\s?'?\S*|\d+\s*4\s*\d{2}\s?'\S*|[\dTIl]?[XxK]\d{2}'\S*|[\d.,]+\s*KGS(?=USD)"
-    r"|S?\d[\d.,]*[a-z]?\s*[A-Z]{2,5}|[|iIlt][lLI]?\s+[A-Z]{2,5}"
+    # 整櫃數量開頭的 "1" 讀成方括號、引號前多一個空白、單引號讀成雙引號 ("[X40 \"HQ"，"VN25E1784")
+    r"(?P<qty>\d+\s*[Xx]\s*\d{2}\s?'?\S*|\d+\s*4\s*\d{2}\s?'\S*|[\dTIl\[{(]?[XxK]\d{2}\s?['\"]?\S*|[\d.,]+\s*KGS(?=USD)"
+    # 單位後面偶爾直接接句點才接空白 ("180 CIN." 是 "180 CTN" 的 OCR 誤讀，"HKGJKT24120372A"
+    # 的 "TRUCK CHARGE (PAXAR) 180 CIN. USD …")：但不可讓 "PT." (PAYER 欄公司名稱開頭) 被
+    # 誤判成單位，所以排除 "PT."；單位偶爾讀成小寫 ("1 ser"，"HKGJKT25090471A" 的
+    # "CUSTOM. CLEARANCE 1 ser USD…")，大小寫都接受
+    r"|S?\d[\d.,]*[a-z]?\s*(?!PT\.)[A-Za-z]{2,5}\.?"
+    # "1 SET" 的 "1" 讀成大寫 "L" ("L SET"/"L SRT"，"HKGJKT25010148A"、"HKGJKT25090471A"、
+    # "JKTHCSE2509041A")：原本只接受小寫 l，補大寫 L
+    r"|[|iIlLt][lLI]?\s+[A-Z]{2,5}"
     # "1CNTR" 讀成 "ICNTR" ("VN25E1609"、"VN25E1682")；"1 SET" 讀成一串雜字 "=—S—s1sSSET"
     # ("JKTHCSE2509073J")：有數字、結尾是單位就算數量
     # "8 CBM" 讀成 "& CBM" ("SHKJKT25110571A")；品名本身也有 "&"，所以後面一定要接單位
-    # bracket alt 後面加 negative lookahead：避免吃到品名續接的括號說明，例如
-    # "PARKING FEE (FM 1 SET HKD..." 的 "(FM" 被誤判成數量 ("HKGJKT24120372A" 系列)。
-    # 真正的數量括號 (例如 OCR 把 "8 CBM" 讀成 "[CBM]") 後面接的是幣別，不會是 "數字+空白"
-    r"|\d?[{(\[\])]\s*[A-Z]{2,5}(?!\s+\d)|&\s*(?:CBM|SETS?|SHPTS?|CNTRS?)(?=\s)|[LI1]?[SOA0](?:BLS?|SETS?|SHPTS?|CBM)|MIN[ITl1]{1,2}[\]|]?\d*"
+    # 真正的數量括號 (例如 OCR 把 "8 CBM" 讀成 "[CBM]") 後面接的是幣別，不會是任意英文字；
+    # 限定成已知單位字樣，否則會把品名續接的括號說明 (例如 "PARKING FEE (FM 1 SET HKD..."
+    # 的 "(FM"、"PARKING FEE (FM PRIDE'S 2. SET HKD..." 的 "(FM" 後面接人名而非數量)
+    # 誤判成數量 ("HKGJKT24120372A" 系列)
+    r"|\d?[{(\[\])]\s*(?:CBM|KGS|SETS?|SHPTS?|CNTRS?)\b"
+    # 羅馬數字 I/II 跟數量黏在一起 ("GATE CHARGE (ASIATAN) [1 SET..."、"PARKING FEE (ASTATAN)
+    # {1 SRT..."，"HKGJKT24120372A")：括號雜訊直接接數字+單位，不像上面那組是先接單位字
+    r"|[{(\[]\d\s*[A-Z]{2,5}"
+    r"|&\s*(?:CBM|SETS?|SHPTS?|CNTRS?)(?=\s)|[LI1]?[SOA0](?:BLS?|SETS?|SHPTS?|CBM)|MIN[ITl1]{1,2}[\]|]?\d*"
     r"|[|iIl]CNTRS?|\S*\d\S*(?:SETS?|SHPTS?|CNTRS?)"
     # 數量沒有單位 ("CUSTOM CLEARANCE-WAN 1 US$ 130.00"、"PORT SECURITY-C 4.63 US$ 1.30"，
     # 文字版 "JKTHCSE2508031A"、"JKTHCSE2508057A-G")
