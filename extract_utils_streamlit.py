@@ -1881,6 +1881,25 @@ def _page_balances(entry: Dict, text: str) -> Optional[bool]:
     return None
 
 
+def _choose_page_variant(entry: Dict, original: str, psm_text: str, alt_text: str) -> str:
+    """psm 版跟對比版都兜不起來時，三個版本裡選一個 (呼叫時已知 psm_text
+    不平；原圖可能平、可能不平、也可能沒有稽核規則可比對)：
+      1. 優先選「金額稽核有過」的 (原圖本身才正確時維持原本選原圖的行為，
+         2026-11-18 低等級 D000604364：psm 6 誤讀數字，原圖才對)。
+      2. 都不過，選「有擷取到費用明細」的 (原圖常常整個金額欄都讀不到，
+         退回原圖只會把這頁清空，比留著 OCR 結果更差；2026-11-23 GALUH
+         Adidas 0500151/Pouchen 05000152：原圖沒有金額，退回後整張都是空的)。
+      3. 都抓不到任何明細，退回原圖 (跟舊行為一致)。
+    """
+    for text in (psm_text, alt_text, original):
+        if _page_balances(entry, text):
+            return text
+    for text in (psm_text, alt_text):
+        if entry["parse"](text).get("items"):
+            return text
+    return original
+
+
 def invoice_text(pdf_path: str, key: Optional[str],
                  **pdfplumber_kwargs) -> Tuple[str, List[int]]:
     """帳單常夾帶雜訊頁 (提單、條款、其他公司的發票…)。供應商有登記
@@ -1931,10 +1950,7 @@ def invoice_text(pdf_path: str, key: Optional[str],
                 # 讀成 177,600 反而更差)
                 if _page_balances(entry, pages[i]) is False:
                     alt = _ocr_page_with_psm(pdf_path, i, psm, contrast=True)
-                    if _page_balances(entry, alt):
-                        pages[i] = alt
-                    else:
-                        pages[i] = original
+                    pages[i] = _choose_page_variant(entry, original, pages[i], alt)
                 break
     check = entry.get("invoice_page") if entry else None
     keep = [i for i, p in enumerate(pages) if check(p)] if check else []
