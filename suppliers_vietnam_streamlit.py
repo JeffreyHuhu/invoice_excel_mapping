@@ -1336,6 +1336,15 @@ def _cw_invoice_no(text: str) -> Optional[str]:
         fixed = re.sub(r"^([A-Z]+?)O+(?=\d{7,}$)", r"\1", inv)
         inv = fixed if fixed != inv and re.fullmatch(r"[A-Z]{3,5}\d{7,}", fixed) else inv
         return inv
+    # MOL 的 Debit Note 跨 2 頁時，第 2 頁 (GRAND TOTAL 在這一頁) 完全沒有
+    # "SHIPMENT" 這個字，只有抬頭 "Debit Note - SSEM11Z06063"；audit_invoice_totals()
+    # 逐頁呼叫這個函式找總額要掛回哪張發票時，少這個備援就把總額頁判成找不到
+    # 號碼，連帳帶金額稽核整張漏算 (辨識等級(低)，2026-11-22 VN09 MOL 抽查
+    # OCT.2026 SSEM11Z06063/SSEM11Z05893/SSEM11Z06217：新出現的 "Page 1 of 2"
+    # 續頁版面)。
+    debit_note = _search(r"Debit Note - ([A-Z][A-Z0-9]{5,})", text)
+    if debit_note:
+        return debit_note
     # 畫質太差的掃描頁，整行 "SHIPMENT SEDC1846196" 常被 OCR 讀成亂碼，連
     # SHIPMENT 這個字都認不出來：FLIGHT / DATE & REFERENCE 那一行的 HAWB 通常
     # 就是 SHIPMENT 號碼去掉開頭的 "S" (使用者 2026-11-11 回報 DSV_VN JUN.2026/
