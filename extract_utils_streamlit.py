@@ -2093,14 +2093,18 @@ def _fill_missing_invoice_date(rows: List[Dict], pdf_path: str, text: Optional[s
     供應商規則標成 NA_CONFIRMED 的列 (這一列自己沒有日期，例如 VAT 彙總列、
     壓車表) 一樣套用這三種備援，只有三種都找不到時才顯示 NA (使用者
     2026-11-21 規定：所有供應商都適用，缺日期優先找得到就填，不要直接
-    留 N/A)。"""
+    留 N/A)。
+    帳單本身寫了發票日期、但日期值無效 (例如「32 Dec 2024」12 月沒有 32 號)，
+    一樣視為缺日期套用這三種備援；三種都補不到時保留原始的無效值 (使用者
+    2026-11-22 規定：所有供應商都適用，跟「完全沒寫日期」一視同仁)。"""
     filename_fallback = _last_day_of_month_from_filename(pdf_path)
     text_fallback: Optional[str] = None
     text_fallback_tried = False
     for row in rows:
         if row.get("invoice_date") == NA_CONFIRMED:
             row["invoice_date"] = NA
-        if row.get("invoice_date") not in (None, "", NA):
+        raw = row.get("invoice_date")
+        if raw not in (None, "", NA) and _coerce_to_date(raw) is not None:
             continue
         if filename_fallback:
             row["invoice_date"] = filename_fallback
