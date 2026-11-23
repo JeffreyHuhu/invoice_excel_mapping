@@ -2271,10 +2271,23 @@ def detect_tata_af(text: str) -> bool:
     return "KURS 1 USD" in text.upper()
 
 
+# ⚠️ 2026-11-23 抽樣「NIKOMAS AGUSTUS/JANUARI 2026」(A/F 格式掃描版) 發現：
+# 掃描品質太差時，表格框線的 OCR 雜字常直接黏在項次編號前面 (例如
+# "pa 17/Apr/26"、"poe 17/Apr/26")，原本要求行首就是項次數字或日期本身
+# (用 re.match + "^")，這幾筆整行配不到、整筆消失。項次編號本來就沒有輸出
+# 到任何欄位 (純粹比對用)，所以拿掉 "no" 群組跟 "^" 錨點，改用 re.search()
+# 找「日期開始到行尾」這一段，行首雜字不管多亂都不影響——反正真正辨別一筆
+# 品項的是後面「kgs...金額...VAT」這段很獨特的結構，不會誤配到其他無關的行。
+#
+# 同一批樣本也發現 Kurs (匯率) 那一欄常常整個被 OCR 漏讀 (例如 "6,00 kgs|
+# 975.384 107.292,2"，"kgs" 後面直接接金額，沒有 "Rp <匯率>" 這一段)，
+# Kurs 本身不輸出到任何欄位 (只用來判斷雜訊列跟 PYI 的 GUDANG/DECLARE
+# 公式)，所以整段改成可有可無；"kgs" 後面也可能黏著表格框線殘字 "|"，一併
+# 放寬容忍。
 _TATA_AF_ITEM_LINE_RE = re.compile(
-    r"^(?:(?P<no>\d+)\s+)?(?P<date>\d{1,2}/(?:[A-Za-z]{3}|\d{1,2})/\d{2,4})\s*(?P<mid>.*?)\s*"
+    r"(?P<date>\d{1,2}/(?:[A-Za-z]{3}|\d{1,2})/\d{2,4})\s*(?P<mid>.*?)\s*"
     r"(?P<attn>[A-Z]+\s+RONG|[A-Z0-9-]+(?:\s*\([A-Z0-9]+\))?)\s+(?P<hawb>\S+)\s+(?P<qty>\d+)\s*(?:PKGS\s+)?"
-    r"(?P<weight>[\d,]+)\s*kgs\s+Rp\s+(?P<kurs>[\d.]+)\s+"
+    r"(?P<weight>[\d,]+)\s*kgs[|\s]*(?:Rp\s+(?P<kurs>[\d.]+)[|\s]+)?"
     r"(?:Rp\s+(?P<fee1>[\d.]+)\s+)?(?:Rp\s+(?P<fee2>[\d.]+)\s+)?"
     r"(?P<amount>[\d.]+)\s+"
     r"(?P<vat>[\d.,]+)(?:\s+(?P<declare>[\d.,]+|-))?\s*$"
@@ -2516,15 +2529,16 @@ def _tata_af_extract_items(text: str) -> List[Dict]:
     lines = text.split("\n")
     item_line_idx = [
         i for i, line in enumerate(lines)
-        if _TATA_AF_ITEM_LINE_RE.match(line.strip())
+        if _TATA_AF_ITEM_LINE_RE.search(line.strip())
     ]
     item_line_idx_set = set(item_line_idx)
     consumed = set()
     items: List[Dict] = []
 
     for i in item_line_idx:
-        m = _TATA_AF_ITEM_LINE_RE.match(lines[i].strip())
-        mid = m.group("mid")
+        m = _TATA_AF_ITEM_LINE_RE.search(lines[i].strip())
+        # 日期後面偶爾黏著表格框線 OCR 殘字 ("_|"、"|")，不屬於 Shipper 名稱。
+        mid = m.group("mid").lstrip("_|").strip()
         shipper_leftover, country = _tata_af_strip_country_suffix(mid)
         shipper = shipper_leftover
 
@@ -3981,6 +3995,12 @@ def _dsv_extract_total(text: str) -> Optional[int]:
     raw = _search(r"SUBTOTAL?[^\d\n]{0,3}(\d[\d .]{0,20}\d|\d)", text)
     nospace = re.sub(r"\s", "", raw) if raw else ""
     total = _dsv_clean_amount(nospace) if re.fullmatch(r"\d+(?:\.\d+)*", nospace) else None
+    # 副本 (COPY) 的附屬頁跟正本的附屬頁內容相同，也會印出一樣的 SUBTOTAL；
+    # 品項擷取已經用 detect_dsv() 排除副本頁，這裡的小計擷取也要排除，否則
+    # 同一張發票的未稅總額被正本+副本各算一次，變成明細加總的 2 倍
+    # (2026-11-23 使用者回報 DSV-辨識等級(低) 大量 TOTAL_NET_MISMATCH)
+    if total is not None and _dsv_is_copy_only(text):
+        return None
     # CREDIT NOTE 頁也要能歸屬自己的小計 (2026-11-14 HARDASES_16OKTOBER)
     inv = _dsv_invoice_no(
         _search(r"^(?:INVOICE|CREDIT\s+NOTE)\s+([I1]D\d+)\b", text)) if total is not None else None
@@ -5652,6 +5672,14 @@ register_supplier(
 # 就能只抓到每一項的第一行，不用特別處理續行合併。正確答案的 Amount 對應
 # 的是 "CHARGES IN IDR" 這一欄 (行尾最後一個數字)，不是前面的
 # "PPN IN IDR" 那一欄。
+def _dsv_is_copy_only(text: str) -> bool:
+    """這一頁 (或這張發票的附屬頁) 是不是只有「副本 (COPY)」頭銜、沒有
+    「正本 (ORIGINAL)」頭銜。detect_dsv() 跟 _dsv_extract_total() 都要用，
+    避免副本頁重複計入 (發票本身或未稅總額)。"""
+    return bool(re.search(r"^(?:INVOICE|CREDIT\s+NOTE)\s+\S+\s+COPY\b", text, re.MULTILINE)
+                and not re.search(r"^(?:INVOICE|CREDIT\s+NOTE)\s+\S+\s+ORIGINAL\b", text, re.MULTILINE))
+
+
 def detect_dsv(text: str) -> bool:
     """每張發票除了正本 ("INVOICE ID610286388 ORIGINAL") 還附一頁內容相同的
     副本 ("… COPY")。只有副本的頁不算 (逐頁擷取時會略過)，不然發票號碼抓
@@ -5661,9 +5689,7 @@ def detect_dsv(text: str) -> bool:
     (2026-11-14 HARDASES_16OKTOBER)。"""
     if "CHARGES IN IDR" not in text.upper():
         return False
-    copy_only = (re.search(r"^(?:INVOICE|CREDIT\s+NOTE)\s+\S+\s+COPY\b", text, re.MULTILINE)
-                 and not re.search(r"^(?:INVOICE|CREDIT\s+NOTE)\s+\S+\s+ORIGINAL\b", text, re.MULTILINE))
-    return not copy_only
+    return not _dsv_is_copy_only(text)
 
 
 _DSV_ITEM_PATTERN = re.compile(
