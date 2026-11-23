@@ -2859,6 +2859,14 @@ def _vt_parse_sheet(name: str, rows: List[list], cfg: Dict, supplier: str,
                     book=None) -> Tuple[List[Dict], Dict]:
     """一張對帳表 -> (費用列, {發票號碼: [未稅合計, 含稅合計]})。book：給 date_sheet_mmdd
     找同資料夾的月結檔案補年份；呼叫端傳年份字串 (舊呼叫方式) 也相容。"""
+    if cfg.get("rollup_marker"):
+        # 年度彙總重複報表 (VN06 BINH_TAN「List tổng truck fee-2025.xls」：
+        # PTT No. 是純批號 "6010-2025"，不是客戶代碼，資料跟已經轉檔過的每週
+        # truckPFP 檔案重複，最後一欄直接寫著週別)。不走正常擷取，只回一筆
+        # 標記列，交給 validation_streamlit.py 的 DUPLICATE_ROLLUP_DESC 判
+        # INFO，不打成「低」(2026-11-23 使用者確認)。標記值要跟它一致。
+        return [{"description": "DUPLICATE_ROLLUP", "amount": None, "vat": None,
+                 "invoice_no": "DUPLICATE_ROLLUP"}], {}
     year_hint = book if isinstance(book, str) or book is None else _vt_year(book)
     h = _vt_header_row(rows, cfg["header"])
     if h is None:
@@ -5090,6 +5098,18 @@ register_supplier(
 # 出口運費 (NB/PHV)、進口派車表 (08-CFS/08-AIR，每列一批，逐列 VAT)。
 # 發票號碼 = 批號 (SỐ LÔ / Lot No / Dec No)；車牌照 VN05 慣例填貨櫃號碼與船名。
 _VT_BINH_TAN = [
+    # 年度彙總重複報表 ("List tổng truck fee-2025.xls"，工作表名稱固定 "tổng")：
+    # PTT No. 是純批號 "6010-2025"，不是客戶代碼也不是公司名稱，資料 (批號、
+    # 金額) 跟已經轉檔過的每週 truckPFP 檔案重複，最後一欄直接寫著週別
+    # (例如 "0111")。整張表只回一筆 DUPLICATE_ROLLUP 標記 (見 _vt_parse_sheet
+    # 的 rollup_marker)，不正常擷取，避免跟每週檔案重複計入金額
+    # (2026-11-23 使用者確認：這是重複報表，整份跳過不擷取)
+    # header/require 給一個不存在的標記：這個 cfg 只靠「工作表名稱」比對 (上面
+    # 的 _vt_sheets_raw 第一輪)，不能沒有 "header" 鍵——沒有名稱符合的其他
+    # BINH_TAN 檔案會在第二輪 (靠表頭判斷) 走到這個 cfg，缺 "header" 會
+    # KeyError，用一定找不到的標記讓 _vt_header_row() 安全傳回 None 跳過
+    (r"^TONG$", {"rollup_marker": True, "header": "\x00NEVER_MATCH\x00",
+                "require": "\x00NEVER_MATCH\x00"}),
     # 雜費表 (SERVICE FEE / IMP-TOTAL，2026-10-28 抽樣，工作表名稱不固定)：MISCELL | OT. | OTHER |
     # TOTAL (小計) | 2% | TOTAL。MISCELL 常空白，主要費用只寫在小計；合計取最後一個 TOTAL
     # 名稱改成 "^\d{8}$" (原本是永不符合的 "(?!)")：只有逐日工作表 (名稱是 8 位數日期，

@@ -123,6 +123,14 @@ UNREADABLE_DESC = "UNREADABLE"
 # (信心等級最多「中」)，不是 ERROR (2026-11-23 樣本 NIKO-JAN 2025)。
 _HANDAL_UNRECOGNIZED_DESC = "UNRECOGNIZED (OCR)"
 
+# VN06 BINH_TAN 專用：整份帳單是「年度彙總重複報表」(例如 "List tổng truck
+# fee-2025.xls"：PTT No. 是純批號、不是客戶代碼，資料跟已經轉檔過的每週檔案
+# 重複，見 suppliers_vietnam_streamlit.py 的 rollup_marker)。這張表本身不是
+# 一張發票，不該因為抓不到發票號碼/日期/客戶名稱被判 ERROR 打成「低」，改成
+# 單純 INFO 說明，不扣分 (2026-11-23 使用者確認)。值要跟 suppliers_vietnam_
+# streamlit.py 一致。
+DUPLICATE_ROLLUP_DESC = "DUPLICATE_ROLLUP"
+
 # 已知的「原帳單本身的問題」：使用者核對過原帳單，確認不是擷取錯誤。使用者
 # 規定原帳單的問題不標示為 WARN、不反紅：改成 INFO (只當附註、不扣信心分數、
 # 不影響信心等級)，說明後面註記屬原帳單問題。
@@ -399,6 +407,13 @@ def _check_items(group_rows: List[Dict]) -> List[Dict]:
             # 不再逐欄檢查 (使用者 2026-10-31 確認：BDOIR00051508)
             issues.append(_issue(ERROR, "description", "UNREADABLE", "無法判讀", row))
             continue
+        if desc == DUPLICATE_ROLLUP_DESC:
+            # 年度彙總重複報表 (VN06 BINH_TAN「List tổng…」，見上方常數說明)：
+            # 單純 INFO 說明，不扣分，不再逐欄檢查 (2026-11-23 使用者確認)
+            issues.append(dict(_issue(INFO, "description", "DUPLICATE_ROLLUP",
+                                      "這是週結檔案的年度彙總重複報表，資料已在每週檔案擷取過，本檔不重複計入"),
+                               no_penalty=True))
+            continue
         if desc == _HANDAL_UNRECOGNIZED_DESC:
             # HANDAL 掃描檔費用名稱整段 OCR 不出來、但金額讀得到 (見
             # suppliers_indonesia_streamlit._handal_extract_items_core())：
@@ -591,18 +606,38 @@ def validate_extraction(
 
     results = []
     for inv_key, group_rows in groups.items():
+        # 同一份對帳表好幾張工作表 (例如 VN06 BINH_TAN 的 IMP/EXP) 各自有一列
+        # 孤兒稅額彙總列時，都用同一個 invoice_no="N/A" 分組，這裡會合成一組
+        # 兩列以上——不能只看 len(group_rows)==1，要整組都是彙總列才算
+        # (2026-11-23 使用者樣本 "POU HUNG 09-26…" IMP+EXP 各一列孤兒 VAT)
+        is_vat_summary = (inv_key not in audit_by_invoice
+                          and all(_is_batch_vat_summary_row(r) for r in group_rows))
+        # 年度彙總重複報表 (見 DUPLICATE_ROLLUP_DESC 說明)：整組都是這個標記列，
+        # 也不是一張發票，一樣要跳過表頭必填欄位檢查
+        is_rollup = all(r.get("description") == DUPLICATE_ROLLUP_DESC for r in group_rows)
         issues = list(base_issues)
-        issues.extend(_check_header(group_rows[0], supplier_key))
+        if not (is_vat_summary or is_rollup):
+            # 整張對帳表的稅額彙總列本身不是一張發票 (見下)，不該因為
+            # INVOICE NO/INVOICE DATE 這類必填欄位本來就是 N/A (已確認答案，
+            # 見 suppliers_vietnam_streamlit.py 的 vat_no_date) 被判 ERROR 打成
+            # 「低」(2026-11-23 使用者樣本 "PFP 20260223-20260228"/"POU HUNG
+            # 09-26…" Miscellaneous Fee：孤兒 VAT 列把整份帳單拖累成低信心)
+            issues.extend(_check_header(group_rows[0], supplier_key))
         issues.extend(_check_items(group_rows))
         audit_issues = _check_audit(audit_by_invoice.get(inv_key), supplier_key)
-        if (inv_key not in audit_by_invoice and len(group_rows) == 1
-                and _is_batch_vat_summary_row(group_rows[0])):
+        if is_vat_summary:
             # 整張對帳表 (整週/整批) 的稅額彙總列 (越南 Excel 帳單常見，見
             # suppliers_vietnam_streamlit.py 的 vat_row/vat_total)：本身不是一張
             # 發票，帳單上沒有另一個「這一筆的總額」可以勾稽，不算 NO_TOTAL_AUDIT，
             # 不該拖累整份帳單的信心等級 (2026-11-16 使用者規定)
             audit_issues = [dict(_issue(INFO, "total", "BATCH_VAT_SUMMARY",
                                         "這是對帳表整批 (整週) 的稅額彙總列，不是單張發票，沒有對應總額可勾稽"),
+                                 no_penalty=True)]
+        elif is_rollup:
+            # 年度彙總重複報表：原帳單上沒有自己的總額可以勾稽 (資料本身就是
+            # 重複的)，不算 NO_TOTAL_AUDIT，不該拖累整份帳單的信心等級
+            audit_issues = [dict(_issue(INFO, "total", "DUPLICATE_ROLLUP",
+                                        "這是週結檔案的年度彙總重複報表，沒有自己的總額可以勾稽"),
                                  no_penalty=True)]
         if supplier_key in EXTRA_CHARGE_ID_SUPPLIERS:
             issues.extend(_check_extra_charges(group_rows, audit_passed=(
