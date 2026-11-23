@@ -1801,16 +1801,23 @@ def _parse_multi_page_pdf(pdf_path: str, key: str, **pdfplumber_kwargs) -> List[
         # 不能等攤平成 rows 之後才補，否則會混進別張發票 (別頁) 的日期
         _fill_missing_invoice_date(rows_for_page, pdf_path, page_text)
         page_rows.append(rows_for_page)
-    rows = _drop_duplicate_invoice_pages(page_rows)
+    rows = _drop_duplicate_invoice_pages(page_rows, detect_reopened=bool(entry.get("force_ocr")))
     if not rows:
         rows = expand_to_rows({"header": {}, "items": [{}]})
         _fill_missing_invoice_date(rows, pdf_path, None)
     return rows
 
 
-def _drop_duplicate_invoice_pages(page_rows: List[List[Dict]]) -> List[Dict]:
+def _drop_duplicate_invoice_pages(page_rows: List[List[Dict]], detect_reopened: bool = False) -> List[Dict]:
     """稽核原則 (使用者 2026-11)：發票號碼相同、總金額相同視為重複的發票，只保留第一張。
     發票號碼是 N/A 的頁面不比對。
+
+    detect_reopened (預設 False，只有 force_ocr 供應商開啟，見呼叫端
+    _parse_multi_page_pdf())：偵測「同一個發票號碼、內容卻不同」的重開/
+    更正情況並拆開 (見下方說明)。MOL/YJE_TATA/EXPEDITORS 等其他 multi_page
+    供應商本來就有大量『同一個發票號碼合法出現在好幾頁』的正常情況 (各自有
+    自己專屬的分組邏輯，例如 MOL 的 Order No. 草稿發票)，不能套用這個通用
+    判斷，所以預設關閉，只有目前唯一的 force_ocr 供應商 HANDAL 會用到。
 
     發票號碼相同、總金額也相同時，再看 Order No. 是否也相同才當作真的重複 (使用者
     2026-11-10 VN09 MOL 答案：Số/日期空白的草稿發票，INVOICE NO 統一只填 Ký hiệu，
@@ -1825,7 +1832,7 @@ def _drop_duplicate_invoice_pages(page_rows: List[List[Dict]]) -> List[Dict]:
     整個漏算)。改成連費用明細 (Description+AMOUNT) 都要完全一樣才算真的重複；
     真的重印的草稿 (同一頁重複出現) 費用明細本來就會一字不差。"""
     seen: Dict[tuple, bool] = {}
-    kept: List[Dict] = []
+    kept_pages: List[List[Dict]] = []
     for rows in page_rows:
         if not rows:
             continue
@@ -1834,6 +1841,35 @@ def _drop_duplicate_invoice_pages(page_rows: List[List[Dict]]) -> List[Dict]:
             if sig in seen:
                 continue
             seen[sig] = True
+        kept_pages.append(rows)
+
+    # 同一個發票號碼出現在好幾組「不重複」的頁面裡 (不是重印頁，已經被上面
+    # _page_duplicate_signature 篩掉，代表內容真的不同)：疑似供應商重開/
+    # 更正過，不能把內容併成一張發票 (使用者 2026-11-23 樣本 NIKO-JAN 2025
+    # HG00140125：兩頁發票日期、總額都不同)。每一組都改成帶 "-2"/"-3"...
+    # 字尾的獨立發票號碼 (第一組維持原樣，跟既有 VN09 MOL 重開號慣例一致)，
+    # 下游分組/勾稽才不會把兩份內容加在一起；並標記原因，驗證層看到
+    # _reopened_reason 會強制列為「低」等人工核對 (使用者 2026-11-23 規定)。
+    # 只有 detect_reopened=True (目前只有 HANDAL) 才做這個判斷，見上方說明。
+    invoice_page_idx: Dict[str, List[int]] = {}
+    if detect_reopened:
+        for idx, rows in enumerate(kept_pages):
+            inv = rows[0].get("invoice_no")
+            if inv not in (None, "N/A", ""):
+                invoice_page_idx.setdefault(inv, []).append(idx)
+    for inv, idxs in invoice_page_idx.items():
+        if len(idxs) <= 1:
+            continue
+        reason = (f"發票號碼 {inv} 在同一份帳單裡出現 {len(idxs)} 次 (內容不同，"
+                  f"非重印頁)，疑似供應商重開/更正過，請人工核對哪一份正確")
+        for n, idx in enumerate(idxs, start=1):
+            suffix = f"-{n}" if n > 1 else ""
+            for r in kept_pages[idx]:
+                r["invoice_no"] = f"{inv}{suffix}"
+                r["_reopened_reason"] = reason
+
+    kept: List[Dict] = []
+    for rows in kept_pages:
         kept.extend(rows)
     return kept
 

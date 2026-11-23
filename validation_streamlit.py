@@ -117,6 +117,12 @@ _PLACEHOLDERS = {"-", "--", "/"}
 # 解析器判定「原帳單無法判讀」時，把 description 設成這個標記，驗證層判 ERROR (原因：無法判讀)
 UNREADABLE_DESC = "UNREADABLE"
 
+# HANDAL 專用：費用名稱整段被 OCR 讀成無法辨識的亂碼、但金額還讀得到時的標記
+# (見 suppliers_indonesia_streamlit._HANDAL_UNRECOGNIZED_DESC，值要一致)。
+# 跟 UNREADABLE_DESC 不同：這裡金額是對的，只是名稱不確定，只標 WARN
+# (信心等級最多「中」)，不是 ERROR (2026-11-23 樣本 NIKO-JAN 2025)。
+_HANDAL_UNRECOGNIZED_DESC = "UNRECOGNIZED (OCR)"
+
 # 已知的「原帳單本身的問題」：使用者核對過原帳單，確認不是擷取錯誤。使用者
 # 規定原帳單的問題不標示為 WARN、不反紅：改成 INFO (只當附註、不扣信心分數、
 # 不影響信心等級)，說明後面註記屬原帳單問題。
@@ -246,6 +252,13 @@ def _to_number(value) -> Optional[float]:
 
 def _check_header(row: Dict, supplier_key: Optional[str] = None) -> List[Dict]:
     issues = []
+    if row.get("_reopened_reason"):
+        # 同一個發票號碼在帳單裡出現好幾次、內容卻不同 (見
+        # extract_utils_streamlit._drop_duplicate_invoice_pages())：疑似供應商
+        # 重開/更正過，強制列為 ERROR (信心等級「低」) 等人工核對，不管其他
+        # 欄位是否正確 (使用者 2026-11-23 規定)。
+        issues.append(_issue(ERROR, "invoice_no", "DUPLICATE_INVOICE_NO_REOPENED",
+                             row["_reopened_reason"]))
     for code in REQUIRED_HEADER_FIELDS:
         if _is_blank(row.get(code)):
             # 缺發票日期不算重大錯誤，只標 WARN (信心等級最多「中」)，不直接判定「低」。
@@ -385,6 +398,14 @@ def _check_items(group_rows: List[Dict]) -> List[Dict]:
             # 原帳單無法判讀 (解析器放入標記，例如海關文件誤當帳單)：直接判 ERROR，
             # 不再逐欄檢查 (使用者 2026-10-31 確認：BDOIR00051508)
             issues.append(_issue(ERROR, "description", "UNREADABLE", "無法判讀", row))
+            continue
+        if desc == _HANDAL_UNRECOGNIZED_DESC:
+            # HANDAL 掃描檔費用名稱整段 OCR 不出來、但金額讀得到 (見
+            # suppliers_indonesia_streamlit._handal_extract_items_core())：
+            # 金額已經計入加總，只是名稱不確定，標 WARN 提醒人工核對，
+            # 不是 ERROR (不能讓一筆名稱不確定就把整張發票判成「低」)。
+            issues.append(_issue(WARN, "description", "UNRECOGNIZED_OCR",
+                                 f"{label}的費用名稱 OCR 無法辨識，請核對正確名稱", row))
             continue
         if _is_blank(desc):
             issues.append(_issue(ERROR, "description", "MISSING_REQUIRED",
