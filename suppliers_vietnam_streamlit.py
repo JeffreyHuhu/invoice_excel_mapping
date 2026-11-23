@@ -5930,8 +5930,10 @@ _VT_SONG_TRIEU = [
                      # 「CƯỚC VẬN CHUYỂN CHƯA TĂNG」搞混)——這欄答案不列成項目 (樣本
                      # 答案 sample1 新版/sample2 舊版都要通過，2026-11-19)
                      "fixed_rate_fee": "=CUOC VAN CHUYEN",
+                     # "BOC XEP" (Bốc xếp，裝卸費)：少數月份多一欄 (2026-11-23 抽樣「越南1120」
+                     # T3.2026 PLV CHECK 發現，T07.2025(1) 也有這欄但都是空白，不影響既有樣本)
                      "fees": [(("CUOC VAN CHUYEN CHUA TANG", "CUOC VAN CHUYEN"), None), ("TROUBLE", None), ("=NEO", None),
-                              ("SO TIEN % TANG", "SỐ TIỀN % TĂNG {pct}%")]}),
+                              ("BOC XEP", None), ("SO TIEN % TANG", "SỐ TIỀN % TĂNG {pct}%")]}),
     (r"CONT (XUAT|NHAP)", {**_VT_ST_COMMON, "header": "SO CONTAINER", "key": ["=SO LO", "SO CONTAINER"], "bl_is_key": True,
                            # total_check / TOTAL PLV CHECK：帳單自己核對明細加總用的欄 (2026
                            # 年版才有，舊版 2025 樣本沒有這欄)；跟 TỔNG 常常各自缺漏、對不上，
