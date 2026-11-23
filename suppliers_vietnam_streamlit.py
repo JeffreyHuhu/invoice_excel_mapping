@@ -2124,9 +2124,16 @@ register_supplier(
 # 只在匯款資訊那段文字裡 ("MOL LOGISTICS (VIETNAM) INC")，跟費用表印在同一頁
 # ("Page 1 of 1")，直接用這個關鍵字判斷就夠，不用額外排除空頁。
 def detect_mol(text: str) -> bool:
-    if re.match(r"\s*Debit Note - ", text):
+    # 原本用 re.match (只認整份文字最前面)：第一次判斷供應商時傳進來的是
+    # 整份 PDF 全部頁面合併的文字，前面若夾著一頁非帳單的封面/參考號碼清單
+    # (例如 "INV# ARC-0810708559" 這種附件清單頁)，"Debit Note - " 就不在
+    # 整份文字最前面，整份 PDF 判定成「無法辨識的檔案」，真正一堆 MOL 帳單頁
+    # 整份漏掉 (2026-11-23 VN09 MOL 抽查 APR.2026 等月份)。改成 (?m)^ 比對
+    # 「任何一行的開頭」，一樣要求是獨立一行的抬頭 (不是文字中間剛好出現這幾個
+    # 字)，但不受前面夾雜的其他頁面影響。
+    if re.search(r"(?m)^\s*Debit Note - ", text):
         return "CHARGE DESCRIPTION" in text
-    if re.match(r"\s*PRO FORMA TAX INVOICE\b", text):
+    if re.search(r"(?m)^\s*PRO FORMA TAX INVOICE\b", text):
         return "MOL LOGISTICS" in text.upper()
     return _is_molcs(text)
 

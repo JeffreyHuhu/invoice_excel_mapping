@@ -1112,7 +1112,16 @@ def detect_maersk(text: str) -> bool:
     # MAERSK LOGISTICS，不是 MAERSK 的帳單 (2026-10-30 DSV "INVOICE - ID610184985 …")
     if "CHARGES IN IDR" in upper and re.search(r"^INVOICE\s+ID\d+\s+(?:ORIGINAL|COPY)\b", upper, re.MULTILINE):
         return False
-    return "MAERSK LOGISTICS" in upper
+    if "MAERSK LOGISTICS" not in upper:
+        return False
+    # 只看 "MAERSK LOGISTICS" 字樣不夠：這幾個字也可能只是別家供應商帳單裡
+    # CONSIGNEE 的轉運代理「C/O MAERSK LOGISTICS & SERVICES MALAYSIA SDN BHD」
+    # (跟 PT Maersk Logistics Indonesia 這家供應商本身無關)，上面排除清單只排
+    # 得到越南版 ("… SERVICES VI")，排不到其他國家分公司字尾，整張帳單會被
+    # 誤判成 MAERSK，真正的供應商 (例如 VN09 MOL) 反而漏掉 (2026-11-23 VN09
+    # MOL 抽查 APR.2026_rv)。改成再額外要求帳單本身的版面標籤 (SOLD TO/
+    # CUSTOMER NO/CREDIT PARTY，MAERSK 帳單一定有)，不是只有這幾個字母就算。
+    return "SOLD TO" in upper or "CUSTOMER NO" in upper or "CREDIT PARTY" in upper
 
 
 _MAERSK_LABEL_WORDS = [
