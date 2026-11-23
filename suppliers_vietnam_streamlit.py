@@ -493,12 +493,19 @@ def _rac_table(rows: List[list]):
     width = max(len(top), len(sub))
     top += [""] * (width - len(top))
     sub += [""] * (width - len(sub))
-    # 合併儲存格的群組名稱往右補，直到下一個群組或沒有子表頭的欄
+    # 合併儲存格的群組名稱往右補，直到下一個群組或沒有子表頭的欄。
+    # "PHI VAN CHUYEN" 有的版面是 3 欄 (DON GIA / 完全空白的小計欄 / THANH TIEN)，
+    # 中間那欄 top/sub 都是空白，不能當成群組已經結束——下一欄還是同一組的
+    # "THANH TIEN" 時，空白欄照樣算在這一組裡面 (2026-11-23 "CÔNG NỢ POU PHONG
+    # T05.2026 TỔNG - ĐỢT 2-XUAT-VC" 答案：中間欄被誤判成跳出群組，THANH TIEN
+    # 欄變成沒有歸類，後面稽核範圍漏掉排除規則，整欄被重複算進合計)
     group, groups = "", []
     for j in range(width):
         if top[j]:
             group = top[j]
-        elif not sub[j]:
+        elif not sub[j] and not (
+                group in ("PHI VAN CHUYEN", "PHI DICH VU")
+                and j + 1 < width and sub[j + 1] == "THANH TIEN"):
             group = ""
         groups.append(group)
     labels = [sub[j] or top[j] for j in range(width)]
@@ -557,7 +564,7 @@ def _rac_table(rows: List[list]):
     # 新的費用欄卻沒被辨識時，明細加總會跟合計列對不上，不會悄悄漏掉)
     skip = components | set(meta.values()) | {
         j for j in range(width) if labels[j] in _RAC_SUBTOTAL_LABELS
-        or (groups[j] == "PHI VAN CHUYEN" and sub[j] == "THANH TIEN")
+        or (groups[j] == "PHI VAN CHUYEN" and sub[j] in ("THANH TIEN", ""))
         or (groups[j] == "PHI DICH VU" and sub[j] == "DON GIA")}
     billing = [j for j in range(charges[0][0], width) if j not in skip and j not in vat_cols]
     # 每列的總金額欄 (費用 + VAT PASS THROUGH)：進口 TOTAL、IKEA 出口 TỔNG CỘNG；
@@ -610,6 +617,10 @@ def _rac_parse_sheet(name: str, rows: List[list]):
     last_file_no, last_file_box = None, {"container_no": None, "volume": None}
     last_bl_no, last_kgs_of_bl = None, None
     last_invoice_no = None
+    # 「這一筆貨運專屬」的識別欄位 (B/L、MBL、日期、港口、櫃號)，見下面迴圈裡的
+    # 合計列判斷說明；不含數量型欄位 (20'/40'/KGS/CBM)，那些合計列本身也會填
+    _RAC_ID_META = {"bl_no", "mbl_no", "container_no", "date_cd", "delivery_date",
+                    "invoice_date_col", "stuffing_date", "port"}
     for row in rows[start:]:
         invoice_no = _vn_text(_vn_cell(row, meta.get("invoice_no")))
         first = _vn_label(_vn_cell(row, 0))
@@ -617,7 +628,22 @@ def _rac_parse_sheet(name: str, rows: List[list]):
         # 第一欄是正常的 STT 數字，只是這一筆剛好沒填 SO INVOICE (不是沒有發票號
         # 就代表是合計列)，2026-11-20 抽樣 POU SUNG EX IKEA PART 3 OCT.2026 答案：
         # 第一欄有數字時一律當資料列，不要誤判成合計列整筆漏掉
-        if (not invoice_no and _vn_num(_vn_cell(row, 0)) is None) or first.startswith(("TOTAL", "TỔNG")):
+        # 同一張發票用兩個以上貨櫃時，第 2 個貨櫃起的 STT 跟 SO INVOICE 兩欄都會
+        # 空白 (跟真正的合計列一樣沒有發票號)，但這種續行列還留著日期/櫃號/B.L.
+        # 等「這一筆貨運專屬」的欄位；真正的合計列即使有數字也只會出現在「可以
+        # 整欄加總」的欄位 (櫃數 20'/40'、KGS、CBM 這種表尾也會寫整張合計的欄)，
+        # 不會有 B/L、MBL、日期、港口這種「只對某一筆貨運有意義」的值。只用這些
+        # 識別型欄位判斷，不要連數量型欄位也算進去，才不會把真正的合計列誤判成
+        # 續行列 (2026-11-23 抽查兩個樣本都要顧到：
+        # ① "CÔNG NỢ POU PHONG T05.2026 TỔNG - ĐỢT 2-XUAT-VC"：7 張發票只剩第 1
+        #   張，第 2 個貨櫃起的續行列被誤判成合計列，整張表後面全部漏掉；
+        # ② sample1/2 POU SUNG "FCL - IMPORT"：真正的合計列表尾剛好也填了櫃數
+        #   20'/40' 總計 (純數量，沒有 B/L 等識別欄)，如果連數量型欄位都算，
+        #   反而會把這張真正的合計列誤判成續行列，多算出一筆不存在的費用)
+        has_meta_data = any(_vn_cell(row, j) not in (None, "")
+                             for k, j in meta.items() if k in _RAC_ID_META)
+        if (not invoice_no and _vn_num(_vn_cell(row, 0)) is None and not has_meta_data) \
+                or first.startswith(("TOTAL", "TỔNG")):
             # 合計列：明細之後第一列有金額、但沒有發票號的列
             nums = [_vn_num(_vn_cell(row, j)) for j in table["billing"] + table["vat_cols"]]
             if any(n for n in nums):
