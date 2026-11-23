@@ -2009,14 +2009,31 @@ _TATA_RECEIPT_FULL_ITEM_LINE = re.compile(
 _TATA_RECEIPT_NUM_AMOUNT_ONLY_LINE = re.compile(
     r"^[|\s]*(?:\d+|[^\w\s])[.\s|]*(?:X[\s|]*)?(?P<amount>[\d.,]+)[\s|]*$", re.IGNORECASE)
 
+# ⚠️ 2026-11-23 抽樣再發現："Subtotal" 常被 OCR 讀成 "Subsotal"/"Suptatal"/
+# "Supiotal" 等 (B/P、T/I、O/A 互相誤讀)，但這些誤讀版本都還是「SU + 任意 3
+# 字元 + TAL」共 8 個字元；用這個寬鬆形狀取代寫死的 "Subtotal"，才抓得到表格
+# 結尾、不會把 Subtotal 這一行誤判成一筆費用明細 (金額會整張發票雙重計算)。
+_TATA_RECEIPT_SUBTOTAL_TOKEN_RE = re.compile(r"\bSU\w{3}TAL\b", re.IGNORECASE)
+
 
 def _tata_receipt_extract_items(text: str) -> List[Dict]:
     """逐行狀態機擷取費用明細，見上面區塊註解說明「第一筆換行排版」的
     特殊處理方式。只在 "KETERANGAN...JUMLAH" 表頭跟 "PESAN"/"Subtotal"
     之間的區塊裡找，避免抓到表格外其他也剛好符合格式的雜訊行。
+    ⚠️ 2026-11-23 抽樣再發現兩個邊界問題：
+    (1) 表頭 "KETERANGAN PAJAK JUMLAH" 三個字之間偶爾被 OCR 塞進雜字 (例如
+        "PAJAK ! JUMLAH")，原本要求純空白 (\\s+) 會配不到，整段表頭失效，
+        連帶把表格前面的發票抬頭/地址都當成一筆費用 (金額變成無意義的 1)。
+        字之間的分隔放寬成任意非英數字元。
+    (2) "Subtotal" (含上面誤讀版本) 常常跟其他雜字黏在同一行 (例如 "MAWB:
+        738-05318423 | Subsotal 7,228,082")，不是獨佔一行開頭，原本要求
+        行首就不會比對到，表格結尾值測失敗、整份文字 (含表格外雜訊) 都被
+        當成擷取範圍。改成只要這一行「含有」結尾字樣就視為表格結束，不要求
+        在行首。
     """
     block_m = re.search(
-        r"KETERANGAN\s+PAJAK\s+JUMLAH.*?\n(.*?)\n\s*(?:PESAN|Subtotal)",
+        r"KETERANGAN[^A-Za-z0-9]{0,3}PAJAK[^A-Za-z0-9]{0,3}JUMLAH.*?\n(.*?)"
+        r"\n[^\n]*?(?:PESAN|" + _TATA_RECEIPT_SUBTOTAL_TOKEN_RE.pattern + r")",
         text, re.DOTALL | re.IGNORECASE,
     )
     block = block_m.group(1) if block_m else text
@@ -2030,6 +2047,8 @@ def _tata_receipt_extract_items(text: str) -> List[Dict]:
         if not line:
             i += 1
             continue
+        if _TATA_RECEIPT_SUBTOTAL_TOKEN_RE.search(line) or "PESAN" in line.upper():
+            break
         m_num_only = _TATA_RECEIPT_NUM_AMOUNT_ONLY_LINE.match(line)
         m_full = None if m_num_only else _TATA_RECEIPT_FULL_ITEM_LINE.match(line)
         if m_full:
@@ -8103,6 +8122,17 @@ def _opl_dn_total(text: str) -> Optional[float]:
                 if m:
                     found = [m.group(1)]
                     break
+    if not found:
+        # 連「US$」三個字都認不出來時 (整行雜訊蓋過頭，"JKTHCSE2509041A" 的
+        # "ere, vllS$ 7,076.39" 完全沒有可比對的 "US$" 字樣)：這一行固定印在
+        # "Remark: -BANK DETAILS" 正上方，退而求其次抓這一行結尾那組乾淨的金額數字。
+        lines = text.splitlines()
+        for i, line in enumerate(lines):
+            if i and re.match(r"\s*Remark\s*:", line, re.IGNORECASE):
+                m = re.search(r"(\d{1,3}(?:,\s?\d{3})*\.\d{2})\.?\s*$", lines[i - 1])
+                if m:
+                    found = [m.group(1)]
+                break
     # 小數點前後多空白
     return _opl_amount(re.sub(r"\s", "", found[-1])) if found else None
 
@@ -8237,6 +8267,17 @@ def _opl_scan_score(text: str) -> int:
     return 2 if header.get("consignee") and header.get("invoice_date") and header.get("invoice_no") else 1
 
 
+def _opl_scan_diff(text: str) -> Optional[float]:
+    """明細加總跟帳單總額的差距 (抓不到總額時回傳 None)。雜訊很重的掃描頁常常每種
+    dpi/psm 設定都對不平總額 (score 一律 0)，這時用差距大小當次要排序依據：寧可選
+    「少漏一兩筆」的版本，也不要選「漏掉一大半品項」的版本。"""
+    total = _opl_dn_total(text)
+    if total is None:
+        return None
+    parsed = _parse_opl_dn(text)
+    return abs(sum(i["amount"] or 0 for i in parsed["items"]) - total)
+
+
 def _opl_dn_scan_page(fast_text: str) -> bool:
     """快速 OCR 看起來是 DN 頁：有公司名稱或標題，加上 DN 的任一欄位。快速 OCR 常漏讀
     FILE NO ("OLCXML2508090C05"、"SE25092500012")，所以 S/O#、HB/L、ITEM NAME、US$ 也算。"""
@@ -8268,6 +8309,11 @@ def _opl_pages(pdf_path: str) -> List[str]:
                 continue
             text = _opl_scan_ocr(pdf_path, page_index)
             score = _opl_scan_score(text)
+            diff = _opl_scan_diff(text)
+            # 這一頁第一次 (預設 dpi/psm) 讀到的總額當基準，後面比對「加總缺口」只跟這個基準比，
+            # 不可以換成別的候選人自己讀到的總額：總額本身印得比較大、比明細數字好讀，其他候選人
+            # 偏偏把總額也讀錯時 (例如 "140.00"，明顯不合理) 不可以用它取代這個基準 (見下)。
+            base_total = _opl_dn_total(text)
             others = []
             # 明細對不上總額、或缺 CONSIGNEE/發票日期時，依序改用 500 dpi 黑白、600 dpi psm 6
             # 重讀，分數較高才採用。雜訊很重的掃描頁 (整欄文字黐在一起，"OLCXML2501005C05"、
@@ -8277,6 +8323,12 @@ def _opl_pages(pdf_path: str) -> List[str]:
             # psm 6 + 黑白二值化在 500/700 dpi 對平總額 ("OLCXMF25090013"、"SPOE2501058"、
             # "SHKJKT25090059A-F"、"HKGJKT25090200A"、"JKTHCSE2503011A")，預設 600 dpi 或
             # 彩階 (bw=False) 讀不到這個組合
+            # ⚠️ 每一種設定都對不平總額時 (使用者 2026-11-23 抽查 "SHKJKT25010098(PT. NIKOMAS
+            # SHK 3RD)"：psm 4 把 O/F、TRUCK CHARGE 兩筆整筆漏讀，缺口 1,463；psm 3 這兩筆都讀
+            # 對了，缺口只剩 153 的 TRUCK CHARGE KUN SHENG 這一筆) ——分數同分時改比對「加總跟
+            # 基準總額的差距」，留住缺口比較小 (漏得比較少) 的那個版本。一定要先確認候選人自己讀
+            # 到的總額跟基準總額一樣才能換，否則會換到一個總額也讀錯、剛好跟明細加總誤差互相抵消
+            # 的版本 (表頭也可能跟著壞掉)，比原來更糟。
             for retry in ({"dpi": 500, "bw": True}, {"psm": 6}, {"psm": 3}, {"dpi": 500, "psm": 3},
                           {"dpi": 700, "psm": 3, "bw": True}, {"dpi": 700, "psm": 4},
                           {"dpi": 500, "psm": 6, "bw": True}, {"dpi": 700, "psm": 6, "bw": True}):
@@ -8284,8 +8336,13 @@ def _opl_pages(pdf_path: str) -> List[str]:
                     break
                 alt = _opl_scan_ocr(pdf_path, page_index, **retry)
                 alt_score = _opl_scan_score(alt)
-                if alt_score > score:
-                    text, score, alt = alt, alt_score, text
+                alt_diff = _opl_scan_diff(alt)
+                alt_total = _opl_dn_total(alt)
+                same_total = (base_total is not None and alt_total is not None
+                              and abs(alt_total - base_total) < 0.01)
+                if alt_score > score or (alt_score == score and same_total and alt_diff is not None
+                                          and (diff is None or alt_diff < diff)):
+                    text, score, diff, alt = alt, alt_score, alt_diff, text
                 others.append(alt)
             pages.append(_opl_fill_header(text, others, pdf_path, page_index))
     # 明細太多印到第 2 頁 ("SHKJKT25110571A")：續頁只有標題和明細，沒有 FILE NO，總額在續頁。
@@ -8315,8 +8372,19 @@ def _opl_fill_header(text: str, others: List[str], pdf_path: str, page_index: in
         messr = _opl_messr_band(pdf_path, page_index)
         if messr:
             extra.append(f"MESSR : {messr}")
+    # 開船日被 OCR 誤讀成「00 號」(月份不會有 00 號，使用者 2026-11-23："MAR. 00,2025" 其實是
+    # "MAR. 06,2025")：這種錯誤跟明細金額無關，_opl_scan_score 對平總額的那一輪挑不到正確版本，
+    # 所以直接在這裡找同一頁試過的其他 OCR 版本，哪一個開船日不是 00 號就改用那個日期。要直接
+    # 取代 text 裡的數字，不能只把補的行加在最後——_search 一律比對到最前面那次 (原本錯的那行)。
+    onboard_bad = re.search(r"(ON\s*BOARD\s*:\s*[A-Z]{3}\.?\s*)00(\s*,)", text, re.IGNORECASE)
+    if onboard_bad:
+        for alt in others:
+            alt_day = re.search(r"ON\s*BOARD\s*:\s*[A-Z]{3}\.?\s*(\d{1,2})\s*,", alt, re.IGNORECASE)
+            if alt_day and alt_day.group(1) != "00":
+                text = (text[:onboard_bad.start()] + onboard_bad.group(1) + alt_day.group(1)
+                        + onboard_bad.group(2) + text[onboard_bad.end():])
+                break
     return "\n".join([text] + extra)
-    return pages
 
 
 def _opl_dn_date(value: Optional[str]) -> Optional[str]:
