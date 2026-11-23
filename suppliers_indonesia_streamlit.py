@@ -3061,9 +3061,16 @@ def _yje_tata_classify(text: str) -> Optional[str]:
 
 def detect_yje_or_tata(text: str) -> bool:
     # DHL Express 帳單 (抬頭 "DHL Express … REGULAR INVOICE") 的附件頁可能出現 TATA
-    # 的關鍵字 (2026-10-27 抽樣 SRGR003222411 等 8 份被誤認)：看抬頭排除
+    # 的關鍵字 (2026-10-27 抽樣 SRGR003222411 等 8 份被誤認)：看抬頭排除。
+    # ⚠️ 2026-11-23 抽樣再發現：BDOIR/JKTIR 開頭的 DHL Express 帳單 (收件人同樣是
+    # NIKOMAS GEMILANG) 抬頭常被 OCR 掃得整段亂碼、抓不到 "DHL EXPRESS" 開頭，
+    # 單看頭 300 字會漏判。改用跟其他供應商 (INDOPROSTIME/MAERSK/EXPRESS 等)
+    # 一致的 _is_dhl_express_bill() 判斷 (整份文字找 "BIROTIKA SEMESTA" +
+    # "DHL EXPRESS")，不限定要出現在開頭。
     head = text[:300].upper()
     if head.lstrip().startswith("DHL EXPRESS") and ("INVOICE" in head or "DEBIT NOTE" in head):
+        return False
+    if _is_dhl_express_bill(text):
         return False
     return _yje_tata_classify(text) is not None
 
