@@ -453,7 +453,14 @@ _RAC_META_LABELS = {
 def detect_rong_a_chau(text: str) -> bool:
     upper = text.upper()
     return ("BẢNG KÊ PHÍ VẬN CHUYỂN" in upper or "ADC - JOB FILE" in upper
-            or ("CLEARING EXPENSE" in upper and "VAT PASS THROUGH" in upper))
+            or ("CLEARING EXPENSE" in upper and "VAT PASS THROUGH" in upper)
+            # 有些月份的 "FCL, LCL, AIR IKEA - EXPORT" 表頭上方沒有留標題列
+            # ("BẢNG KÊ PHÍ VẬN CHUYỂN HÀNG XUẤT KHO IKEA")，連公司名稱都沒有，
+            # 整張表只剩欄名可以辨認。這三個欄名合在一起 (SO INVOICE/D/O H/L THC
+            # CIC FEE/TỔNG CỘNG) 是這家特有的組合，不會跟其他供應商誤判
+            # (2026-11-23 "POU SUNG EX - IKEA PART 3 FEB 2026" 答案：原本完全
+            # 辨識不出來，列在「無法辨識的檔案」)
+            or ("SO INVOICE" in upper and "D/O, H/L, THC,CIC FEE" in upper and "TỔNG CỘNG" in upper))
 
 
 def _rac_consignee(path: str) -> Optional[str]:
@@ -6889,6 +6896,11 @@ def detect_rong_a_chau_any(text: str) -> bool:
     # SUPPLIER 欄位文字又剛好含供應商全名，會誤判成這家的帳單。這不是帳單，沒有
     # 費用明細可擷取，排除不處理 (使用者 2026-11-21 確認)
     if "[查驗結果]" in text:
+        return False
+    # "QUOTATION / 報价" 標頭的報價單 (例如 "PC-Quotation Trucking...pdf")：只是
+    # 運價報價，不是請款單，沒有發票號碼、收貨方、費用明細可擷取，排除不處理
+    # (使用者 2026-11-23 確認)
+    if "QUOTATION" in upper:
         return False
     if detect_rong_a_chau(text) or "ASIA DRAGON FORWARDING" in upper:
         return True
