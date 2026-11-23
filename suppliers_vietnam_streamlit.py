@@ -1523,15 +1523,46 @@ def cargowise_invoice_pages(pdf_path: str, key: str) -> Dict[str, List[int]]:
         keep = list(range(len(pages)))
     text = "\n".join(pages[i] for i in keep)
     docs, doc_pages = _cw_docs(text, page_nums=keep)
+    # DHL_VN 的一般 "INVOICE" 頁最後用的是 F 號碼，不是 SHIPMENT 號碼
+    # (parse_dhl_vn() 會改寫成 F 號碼，_dhl_vn_doc_key() 同一套判斷)。這裡沒
+    # 跟著用 F 號碼當 key 的話，頁碼表的 key 跟真正的發票號碼對不起來，
+    # 「可用」發票一張都對不到頁碼，整份就沒辦法拆檔 (2026-11-23 抽查 FEB/JAN/MAY
+    # 批次：split_low_confidence_pages() 一張都拆不出來，退回整份一起歸檔)
+    doc_key_fn = _dhl_vn_doc_key if key == "DHL_VN" else _cw_invoice_no
     result: Dict[str, List[int]] = {}
     for doc_text, nums in zip(docs, doc_pages):
-        inv = _cw_invoice_no(doc_text)
+        inv = doc_key_fn(doc_text)
         if not inv:
             continue
         bucket = result.setdefault(inv, [])
         for n in nums:
             if n is not None and (n + 1) not in bucket:
                 bucket.append(n + 1)  # 1 起算，給 pypdf 拆檔用
+    if key == "DHL_VN":
+        # VAT INVOICE 頁 (越南文電子發票) 是另一條擷取管道 (_dhl_vn_vat_docs()/
+        # _dhl_vn_vat_key())，不會被上面的 _cw_docs() 切出來，頁碼要在這裡另外
+        # 對應，否則這些發票永遠對不到頁碼。這幾份批次裡「可用」發票大多是
+        # VAT 發票，上面那段修法沒處理到這個，一樣拆不出東西
+        vat_group: List[int] = []
+        vat_key: Optional[str] = None
+
+        def _flush():
+            if vat_group and vat_key:
+                bucket = result.setdefault(vat_key, [])
+                for n in vat_group:
+                    if (n + 1) not in bucket:
+                        bucket.append(n + 1)
+
+        for i in keep:
+            page = pages[i]
+            if not _is_dhl_vn_vat_invoice(page):
+                continue
+            if vat_group and re.search(r"ti[eế]p theo trang tr[uướ]+c", page, re.IGNORECASE):
+                vat_group.append(i)
+                continue
+            _flush()
+            vat_group, vat_key = [i], _dhl_vn_vat_key(page)
+        _flush()
     for inv in result:
         result[inv].sort()
     return result
