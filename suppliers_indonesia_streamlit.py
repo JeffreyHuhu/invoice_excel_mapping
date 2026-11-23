@@ -1776,7 +1776,13 @@ _TATA_PPN_PATTERN = re.compile(r"^(?P<desc>PPN\s*\d+%)\s+Rp\s+(?P<vat>[\d,.]+)\s
 # 的文字標籤，OCR 版面分析模式 (psm) 不同時, 讀到的位數/順序都會跑掉，用
 # 公式算比用 OCR 數字可靠。
 _TATA_HE_HANDLING_FEE_RE = re.compile(
-    r"HANDLING\s*FEE[^\n\d]{0,6}(\d[\d., ]{2,15}\d)", re.IGNORECASE
+    r"HANDLING\s*FEE[^\n\d]{0,20}(\d[\d., ]{2,15}\d)", re.IGNORECASE
+)
+# ⚠️ 2026-11-23 抽樣再發現：部分 HE 發票「HANDLING FEE」跟金額間的 OCR 雜字
+# 更長 (例如 "HANDLING FEE i - ee ee 7.458.436")，上面的退路抓不到時，改抓
+# "SUB-TOTAL" 後面第一個金額 (跟 HANDLING FEE 金額一定相等，單筆收據格式)。
+_TATA_HE_SUBTOTAL_LABEL_RE = re.compile(
+    r"SUB[- ]?TOTAL[^\n\d]{0,20}(\d[\d., ]{2,15}\d)", re.IGNORECASE
 )
 
 
@@ -1790,8 +1796,8 @@ def _tata_he_clean_amount(text: Optional[str]) -> Optional[int]:
 
 def _tata_he_subtotal(text: str) -> Optional[int]:
     """抓 TATA classic 掃描版 (HE 開頭發票) 的未稅金額 (HANDLING FEE 後面
-    第一個金額)。"""
-    m = _TATA_HE_HANDLING_FEE_RE.search(text)
+    第一個金額，抓不到才退到 SUB-TOTAL 後面第一個金額)。"""
+    m = _TATA_HE_HANDLING_FEE_RE.search(text) or _TATA_HE_SUBTOTAL_LABEL_RE.search(text)
     if not m:
         return None
     return _tata_he_clean_amount(m.group(1))
@@ -1846,7 +1852,9 @@ def parse_tata_classic(text: str) -> Dict:
         # HE25001516")，發票號碼不在行首，上面兩種寫法都配不到。這裡限定
         # 一定要先看到 "TO" 才找 "No. :"，避免跟抬頭地址 "Blok B1 No. 27"
         # 的 "No." 搞混 (地址在 "TO :" 這一行之前，不會符合)。
-        header["invoice_no"] = _search(r"\bTO\s*:.*?\bNo\.?\s*:\s*(\S+)", text)
+        # ⚠️ 2026-11-23 再發現："TO :" 的冒號偶爾被 OCR 讀成分號 "TO;"，
+        # 冒號放寬成 "[:;]"。
+        header["invoice_no"] = _search(r"\bTO\s*[:;].*?\bNo\.?\s*:\s*(\S+)", text)
     header["invoice_date"] = _tata_parse_date(
         _search(r"INV\s*Date\s*[:>»]\s*(\d{4}[-/]\d{1,2}[-/]\d{1,2})", text)
     )
@@ -1866,10 +1874,16 @@ def parse_tata_classic(text: str) -> Dict:
     # ("PT. TATA HARMONI SARANATAMA IRMA")，公司名稱其實固定只有這四個字，
     # 抓到 "SARANATAMA" 就該停了 ("HARMON." 容忍 OCR 把 "I" 讀成 "!" 之類的
     # 單字元誤讀，見 HE26000762 樣本)。
+    # ⚠️ 2026-11-23 抽樣再發現："HARMON." 的萬用字元太寬，連真的讀成別的字母
+    # (例如 "HARMONE") 都會配到，把這個 OCR 誤讀字原封不動輸出，讀起來根本
+    # 看不出是「哈莫尼」；限定成常見 "I" 的 OCR 誤讀符號 (!/1/|/l)，不是這幾
+    # 個字元就配不到，退回下面寫死的正確名稱。
     header["supplier"] = _search(
-        r"Nama\s*:\s*(PT\.\s*TATA\s+HARMON.\s+SARANATAMA)", text
+        r"Nama\s*:\s*(PT\.\s*TATA\s+HARMON[Il!1|]\s+SARANATAMA)", text
     ) or "PT TATA HARMONI SARANATAMA"
-    header["consignee"] = _search(rf"\bTO\s*:\s*(.+?){_TATA_STOP}", text)
+    # ⚠️ 2026-11-23 抽樣 HE 開頭掃描發票再發現："TO :" 的冒號偶爾被 OCR 讀成
+    # 分號 "TO;"，冒號放寬成 "[:;]" (跟上面 invoice_no 退路同一個觀察)。
+    header["consignee"] = _search(rf"\bTO\s*[:;]\s*(.+?){_TATA_STOP}", text)
     header["mbl_no"] = _search(rf"\bMAWB\s*:\s*(.+?){_TATA_STOP}", text)
     header["bl_no"] = _search(rf"\bHAWB\s*:\s*(.+?){_TATA_STOP}", text)
     header["vessel"] = _search(rf"\bFlight\s*:\s*(.+?){_TATA_STOP}", text)
@@ -1983,13 +1997,17 @@ def _tata_receipt_clean_amount(text: Optional[str]) -> Optional[int]:
 #   少數行的金額用逗號千分位 (例如 "650,000"，2026-11-22 抽樣掃描版發現：
 #   同一行描述裡 "Min=Rp 650,000" 也混進一個逗號數字，靠 "$" 錨定行尾、
 #   非貪婪比對自然會先吃掉前面的雜訊數字，只留最後一個當金額)。
+# ⚠️ 2026-11-23 抽樣「INV TATA HARMONI TH2026xxxx-THS2133xx」系列再發現：
+# pdfplumber 把表格直線框認成文字 "|"，會插在行首 (項次前)、"X" 跟金額之間、
+# 行尾 (金額後面)，原本只在項次前後留一點容忍 (".\s|]*")，"X" 跟金額間、
+# 行尾沒有容忍，這幾種位置都放寬成可以有任意個空白/"|"。
 _TATA_RECEIPT_FULL_ITEM_LINE = re.compile(
-    r"^(?:\d+|[^\w\s])[.\s|]*(?P<desc>[A-Za-z].*?)\s+(?:X\s+)?(?P<amount>[\d.,]+)\s*$",
+    r"^[|\s]*(?:\d+|[^\w\s])[.\s|]*(?P<desc>[A-Za-z].*?)[\s|]+(?:X[\s|]*)?(?P<amount>[\d.,]+)[\s|]*$",
     re.IGNORECASE,
 )
 # 名稱換行時的金額行：「項次 金額」或「項次 X 金額」(例如 "4 X 600.000")
 _TATA_RECEIPT_NUM_AMOUNT_ONLY_LINE = re.compile(
-    r"^(?:\d+|[^\w\s])[.\s|]*(?:X\s+)?(?P<amount>[\d.,]+)\s*$", re.IGNORECASE)
+    r"^[|\s]*(?:\d+|[^\w\s])[.\s|]*(?:X[\s|]*)?(?P<amount>[\d.,]+)[\s|]*$", re.IGNORECASE)
 
 
 def _tata_receipt_extract_items(text: str) -> List[Dict]:
@@ -2825,21 +2843,56 @@ def _tata_pouyuen_pages(pdf_path: str) -> List[str]:
         import pdfplumber
         with pdfplumber.open(pdf_path) as pdf:
             for i in scanned_idx:
+                base_page = pages[i]
                 redo = _ocr_page_text(pdf_path, i, pdf.pages[i])
                 if redo.strip() and _tata_pouyuen_score(redo) < 4:
                     alt = _ocr_page_with_psm(pdf_path, i, 3)
                     if alt.strip() and _tata_pouyuen_score(alt) > _tata_pouyuen_score(redo):
                         redo = alt
+                # ⚠️ 2026-11-23 抽樣「INV TATA HARMONI TH2026xxxx-THS2133xx」
+                # (NOMOR INVOICE 收據格式) 發現：_scanned_page_indexes() 把這一頁
+                # 誤判成需要 OCR (其實頁面本身就有乾淨的文字層，不是掃描圖)，
+                # 上面 redo 重新 OCR 出來的反而是亂碼、比原本的文字層差很多。
+                # 跟上面「方向偵測版 vs 不轉向版」同一套判斷方式，原文字層
+                # (base_page) 表頭分數更高就用它，不要無條件相信 OCR 一定更好。
+                if base_page.strip() and _tata_pouyuen_score(base_page) > _tata_pouyuen_score(redo):
+                    redo = base_page
+                # ⚠️ 2026-11-23 再發現：上面那個比較只看表頭 4 欄，這個收據格式
+                # (NOMOR INVOICE) 表頭常常兩邊都是滿分、差別其實在費用明細
+                # 筆數 (OCR 重跑這一頁常常把表格對不齊、品項行配不到 regex)；
+                # 原文字層抓到的品項筆數更多就用它。
+                if base_page.strip() and "NOMOR INVOICE" in base_page.upper():
+                    if len(_tata_receipt_extract_items(base_page)) > len(_tata_receipt_extract_items(redo)):
+                        redo = base_page
                 # ⚠️ 2026-11-22 抽樣發現：TATA classic 掃描版「NON REIMBURSEMENT
                 # HANDLING FEE」單筆收據 (HE 開頭發票)，表頭欄位常常已經是滿分
                 # (不會進到上面 < 4 的重做)，但金額欄位用預設/psm 3 OCR 常漏讀
                 # 位數 (例如 '1.799.490' 掉成 '1.799.49')，psm 6 (整頁當一個
                 # 文字區塊) 讀出來的金額才完整——這裡看到這個版面特徵字樣就一定
                 # 多試一次 psm 6，只有真的讀到金額才採用，避免白白換成更差的結果。
-                if redo.strip() and "REIMBURSEMENT" in redo.upper() and "HANDLING" in redo.upper():
+                #
+                # ⚠️ 2026-11-23 再發現：上面「redo = _ocr_page_text() 直接重跑」
+                # 這一步本身常常把金額整個讀丟 (換行緊接在 "HANDLING FEE" 後面，
+                # 金額位數完全消失)。psm 6 還是優先試 (跟舊版行為一致，已經驗證
+                # 過的樣本都是靠 psm 6 讀到完整位數才過關，不能改掉這個順序)；
+                # 只有 psm 6 也讀不到金額時，才退回 extract_pages_from_pdf()
+                # 原本那份 (base_page，免費、不用再 OCR，常常金額還在，只是
+                # 標籤跟金額間多了幾個 OCR 雜字)。
+                # ⚠️ 2026-11-23 再發現：收據格式 (NOMOR INVOICE) 的品項裡本來就會
+                # 同時出現 "REIMBURSEMENT" 跟 "HANDLING" 字樣 (例如 "NON
+                # REIMBURSEMENT AE - HANDLING PENGIRIMAN BARANG...")，跟 HE 單筆
+                # 收據格式的判斷式撞在一起；這裡一定要排除收據格式，否則上面
+                # 已經選好的 base_page (品項筆數更多) 會被這裡的 psm 6 蓋掉。
+                def _is_he_page(t: str) -> bool:
+                    up = t.upper()
+                    return "REIMBURSEMENT" in up and "HANDLING" in up and "NOMOR INVOICE" not in up
+
+                if (redo.strip() and _is_he_page(redo)) or _is_he_page(base_page):
                     alt6 = _ocr_page_with_psm(pdf_path, i, 6)
                     if alt6.strip() and _tata_he_subtotal(alt6) is not None:
                         redo = alt6
+                    elif _tata_he_subtotal(redo) is None and _tata_he_subtotal(base_page) is not None:
+                        redo = base_page
                 if redo.strip():
                     pages[i] = redo
     merged: List[str] = []
@@ -6934,6 +6987,11 @@ _HANDAL_NUM = r'\d{1,3}(?:[,.]\d{3})+'  # 要求至少一個千分位符號 (>=1
 # 掃描檔 OCR 會把數量 "3" 讀成 "-" ("SEGEL 25,000 - 75,000")
 _HANDAL_SEP = r'[\s.,;+\-]*'
 
+# 費用名稱整段被 OCR 讀成無法辨識的亂碼、但金額還讀得到時的標記 (見
+# _handal_extract_items_core())。值要跟 validation_streamlit._HANDAL_UNRECOGNIZED_DESC
+# 一致，驗證層遇到這個標記只標 WARN (信心等級最多「中」)，不是 ERROR。
+_HANDAL_UNRECOGNIZED_DESC = "UNRECOGNIZED (OCR)"
+
 _HANDAL_NON_ITEM_PREFIXES = (
     "DESCRIPTION", "QTY", "UNIT PRICE", "AMOUNT", "NO.", "NO ",
     "VESSEL", "DATE", "INVIOCE", "INVOICE", "NO.BC", "NO. BC",
@@ -7133,8 +7191,13 @@ _HANDAL_SMALL_ITEM_RE = re.compile(
     r'^(?:\d+\s+)?(?P<desc>[A-Z][A-Za-z /().=*\->]*?)[\s,;:]+(?P<qty>\d{1,2})[\s,;:]+'
     r'(?P<unit>\d{1,3})[\s,;:]+(?P<amount>\d{1,3})(?!\d)[^\n0-9]*$'
 )
+# 單價跟金額之間偶爾夾一個 OCR 誤讀的項目編號殘字 ("1,500,000 7 1,500,000"，
+# 使用者 2026-11-23 樣本 NIKO-JAN 2025 HG00070125)：雜訊兩邊一定要是「真正的
+# 空白字元」才容許 (不能用 _HANDAL_SEP，那裡面的逗號/句點會讓雜訊這個可選
+# 群組誤吃到金額本身的千分位數字，導致金額被截斷——這是 _HANDAL_SEP 本身
+# 退回原樣優先比對，只有它比對不到時才試這個分支，不影響既有樣本)。
 _HANDAL_PAIR_ONLY_RE = re.compile(
-    rf'^(?P<unit>{_HANDAL_NUM}){_HANDAL_SEP}(?P<amount>{_HANDAL_NUM})(?!\d)[^\n0-9]*$'
+    rf'^(?P<unit>{_HANDAL_NUM})(?:{_HANDAL_SEP}|\s+\d{{1,2}}\s+)(?P<amount>{_HANDAL_NUM})(?!\d)[^\n0-9]*$'
 )
 _HANDAL_SINGLE_NUM_RE = re.compile(
     rf'^(?P<amount>{_HANDAL_NUM})(?!\d)[^\n0-9]*$'
@@ -7423,13 +7486,28 @@ def _handal_extract_items_core(text: str):
         done = sum(it["amount"] or 0 for it in items)
         if pending_numbers and total is not None and pending_numbers[-1] == total:
             pending_numbers = pending_numbers[:-1]   # 總額那行 (金額欄最後)
-        amounts = _handal_pick_amounts(pending_numbers, len(pending_descs),
+        n = len(pending_descs)
+        amounts = _handal_pick_amounts(pending_numbers, n,
                                        None if total is None else total - done)
         for desc, amount in zip(pending_descs, amounts):
             # 掃描檔表頭雜訊 (OCR 讀成 "NVIO"、"E.NLK.L E.M.K.U") 只有名稱、沒有金額：不是費用，跳過
             if amount is None:
                 continue
             items.append({"description": desc, "amount": amount, "vat": None})
+        # 費用名稱整段被 OCR 讀成無法辨識的亂碼時 (_looks_like_handal_item_desc
+        # 判定不是費用名稱，整行被跳過，不會進 pending_descs)，認得到的名稱數
+        # (n) 會少於帳單真正的費用筆數 (使用者 2026-11-23 樣本 NIKO-JAN 2025
+        # HG00270125/HG00070125)：UNIT PRICE/AMOUNT 兩欄攤平成一份數字清單時，
+        # 長度會是真正筆數 m 的兩倍 (兩欄數字逐筆相等)，m 大於 n 代表有
+        # (m-n) 筆費用的名稱認不出來。這些筆的金額不能跟著名稱一起丟掉，
+        # 不然金額勾稽會對不上；標記成 _HANDAL_UNRECOGNIZED_DESC (值要跟
+        # validation_streamlit._HANDAL_UNRECOGNIZED_DESC 一致，驗證層會標 WARN
+        # 提醒人工核對正確名稱)，金額照抓到的填。
+        if len(pending_numbers) % 2 == 0:
+            m = len(pending_numbers) // 2
+            if m > n and all(pending_numbers[i] == pending_numbers[m + i] for i in range(m)):
+                for amount in pending_numbers[n:m]:
+                    items.append({"description": _HANDAL_UNRECOGNIZED_DESC, "amount": amount, "vat": None})
 
     return items
 
@@ -8145,12 +8223,17 @@ def _opl_scan_ocr(pdf_path: str, page_index: int, dpi: int = _OPL_SCAN_DPI, bw: 
 
 
 def _opl_scan_score(text: str) -> int:
-    """OCR 結果好不好：2 = 明細對平總額且有 CONSIGNEE、發票日期、發票號碼；1 = 只對平總額；0 = 對不平。"""
+    """OCR 結果好不好：2 = 明細對平總額且有 CONSIGNEE、發票日期、發票號碼、開船日沒有「00 號」
+    這種不可能的日期；1 = 只對平總額，或開船日被 OCR 誤讀成 00 號 (使用者 2026-11-23：
+    "MAR. 00,2025" 其實是 "MAR. 06,2025"，OCR 把個位數 6 讀成 0。沒有月份有 00 號，當成可疑
+    結果降分，逼下面的重試迴圈改用別的 dpi/psm 設定，不要用這份有問題的開船日)；0 = 對不平。"""
     parsed = _parse_opl_dn(text)
     total = _opl_dn_total(text)
     if total is None or abs(sum(i["amount"] or 0 for i in parsed["items"]) - total) > 0.01:
         return 0
     header = parsed["header"]
+    if re.search(r"\bON\s*BOARD\s*:\s*[A-Z]{3}\.?\s*00\s*,", text.upper()):
+        return 1
     return 2 if header.get("consignee") and header.get("invoice_date") and header.get("invoice_no") else 1
 
 
