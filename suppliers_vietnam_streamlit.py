@@ -1235,6 +1235,12 @@ def _cw_overflow_chars(pg, chars) -> set:
                         for v in words)), None)
     if not hdr:
         return set()
+    # DHL "Air/Sea Freight Charge Sheet" 表頭多一欄 "CUR" (原幣別)：這個版面沒有
+    # 貨物說明溢出問題，CUR/AMOUNT/VAT 欄本身就是非 LucidaConsole 字型 (Helvetica)，
+    # 不能套用 YUSEN 的溢出清除規則，否則整欄被當雜訊砍掉 (2026-11-23 抽查
+    # 「無法辨識的檔案」Air Freight Charge Sheet，CUR/AMOUNT/VAT 全部消失)
+    if any(w["text"] == "CUR" and abs(w["top"] - hdr["top"]) < 2 for w in words):
+        return set()
     ends = [w["top"] for w in words if w["top"] > hdr["top"]
             and w["text"] in ("Continued", "TOTAL") and w["x0"] < 300]
     lo, hi = hdr["bottom"], min(ends) if ends else pg.height
@@ -1902,7 +1908,10 @@ def _dhl_vn_num(text: str) -> float:
 
 
 def _is_dhl_vn_charge_sheet(text: str) -> bool:
-    return "Freight Charge Sheet" in text and "Total (VND)" in text
+    # 標題至少有兩種："Air Freight Charge Sheet" / "Air Freight Arrival Charge
+    # Sheet" (2026-11-23 抽查「無法辨識的檔案」)，只認固定字尾 "Charge Sheet"，
+    # 用 "CHARGE DESCRIPTION" 表頭 + "Total (VND)" 總額列限定，避免誤判別的版面
+    return "Charge Sheet" in text and "CHARGE DESCRIPTION" in text and "Total (VND)" in text
 
 
 def _parse_dhl_vn_charge_sheet(text: str) -> Dict:
