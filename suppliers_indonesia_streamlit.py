@@ -6945,6 +6945,25 @@ _HANDAL_CODE_RE = re.compile(r'\b([A-Z]{4,8}\d{6,10})\b')
 _HANDAL_ORDER_NO_RE = re.compile(r'(?<![A-Z])([A-Z])(\d{5,7})(?!\d)')
 # 發票號碼後面可能多一個字母，例如 "HG01240125S"
 _HANDAL_INVOICE_NO_RE = re.compile(r'\bHG\s?\d{8}[A-Z]{0,2}\b')  # 2026-11-01：後綴可能是 SS (250112SS)；掃描檔 OCR 常在 HG 後多一個空白 ("HG 10670826")
+# 掃描檔嚴重 OCR 誤判時 (HANDAL-辨識等級(低) 2026-11-23 抽查)，數字層的 0/5/1
+# 偶爾被讀成字母 O/S/I/l (使用者確認：發票號碼不會出現 "HGi..." 這種開頭，
+# 出現就是 "HG1..." 被誤讀，是確定的字元對照，不是機率猜測)。嚴格版
+# (_HANDAL_INVOICE_NO_RE) 抓不到時才用這個救援，且救回結果必須剛好是 8 碼
+# 數字才採用，否則維持 None (無法確定時不猜)。
+_HANDAL_INVOICE_NO_OCR_MAP = str.maketrans({"O": "0", "o": "0", "S": "5", "s": "5", "I": "1", "i": "1", "l": "1"})
+_HANDAL_INVOICE_NO_LOOSE_RE = re.compile(r'\bHG\s?([0-9OoSsIil]{8})\b')
+
+
+def _handal_find_invoice_no(text: str) -> Optional[str]:
+    """抓發票號碼，嚴格版抓不到時用 OCR 字元對照表救援 (見上方說明)。"""
+    m = _HANDAL_INVOICE_NO_RE.search(text)
+    if m:
+        return re.sub(r'\s', '', m.group(0))
+    m = _HANDAL_INVOICE_NO_LOOSE_RE.search(text)
+    if not m:
+        return None
+    digits = m.group(1).translate(_HANDAL_INVOICE_NO_OCR_MAP)
+    return f"HG{digits}" if digits.isdigit() else None
 _HANDAL_INVOICE_DATE_RE = re.compile(r'\b(\d{1,3}\s+[A-Za-z]+\s+\d{4})\b')  # 掃描檔 OCR 會在日期前多黏一個數字 ("608 August 2025")
 _HANDAL_ROUTE_RE = re.compile(r'([A-Z][A-Z ]*?) *- *([A-Z][A-Z ]*?) *- *(\d{1,2}/\d{1,2}/\d{4})')
 # 多種櫃型用逗號連起來，例如 "1X20,6X40"
@@ -7174,8 +7193,7 @@ def _handal_extract_header(text: str) -> Dict:
     h['bl_no'] = code
     h['mbl_no'] = code
 
-    m = _HANDAL_INVOICE_NO_RE.search(text)
-    h['invoice_no'] = re.sub(r'\s', '', m.group(0)) if m else None
+    h['invoice_no'] = _handal_find_invoice_no(text)
 
     m = _HANDAL_INVOICE_DATE_RE.search(text)
     h['invoice_date'] = _handal_parse_date_monthname(m.group(1)) if m else None
@@ -8043,7 +8061,8 @@ _OPL_SCAN_ITEM_RE = re.compile(
     # {1 SRT..."，"HKGJKT24120372A")：括號雜訊直接接數字+單位，不像上面那組是先接單位字
     r"|[{(\[]\d\s*[A-Z]{2,5}"
     r"|&\s*(?:CBM|SETS?|SHPTS?|CNTRS?)(?=\s)|[LI1]?[SOA0](?:BLS?|SETS?|SHPTS?|CBM)|MIN[ITl1]{1,2}[\]|]?\d*"
-    r"|[|iIl]CNTRS?|\S*\d\S*(?:SETS?|SHPTS?|CNTRS?)"
+    # "1CNTR" 讀成 "ICNTR" 之外，字母順序也會讀錯 ("ICTNR"，"VN25E1784" 的 "VGM ICTNR")
+    r"|[|iIl](?:CNTR|CTNR)S?|\S*\d\S*(?:SETS?|SHPTS?|CNTRS?)"
     # 數量沒有單位 ("CUSTOM CLEARANCE-WAN 1 US$ 130.00"、"PORT SECURITY-C 4.63 US$ 1.30"，
     # 文字版 "JKTHCSE2508031A"、"JKTHCSE2508057A-G")
     r"|\d[\d.,]*(?=\s+U[S$]))"
