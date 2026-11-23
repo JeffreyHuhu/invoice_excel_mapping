@@ -3063,6 +3063,25 @@ def _vt_parse_sheet(name: str, rows: List[list], cfg: Dict, supplier: str,
         if re.match(r"^(TONG|TOTAL|TTL|CONG|VAT|XIN VUI|SO TK|THANH TIEN$)", first):
             end = i
             break
+        # end_blank_no_id：這張表表尾的欄位合計列沒有文字標籤 (直接是
+        # =SUM(...) 的數字，第一欄也是空白)，上面這段固定關鍵字抓不到。這種
+        # 合計列的「號碼欄」(key) 跟所有能識別這一筆貨運的欄位 (fields，例如
+        # B/L、CONT NO) 都是空白，只有費用欄位有數字——跟真正的續行列 (key 空白
+        # 但至少會有其中一個識別欄位) 不一樣，不會被下面的 cfg["carry"] 誤認。
+        # (2026-11-23 抽查 "FCL-ADC .../AIR-ADC..." 對帳表：表尾合計列 + 下面
+        # 再分類的 3 個小計列全部被續行邏輯當成資料，金額整張灌水)
+        elif (cfg.get("end_blank_no_id") and not any(_vn_text(_vn_cell(rows[i], k)) for k in keys)
+                and not any(_vn_text(_vn_cell(rows[i], c)) for c in fields.values() if c is not None)
+                and any(_vn_num(_vn_cell(rows[i], c)) for c, _ in fees)):
+            end = i
+            # 這一列本身就是表尾「各費用欄 SUM」的合計列：帳單沒有逐票合計，只有
+            # 這一筆整張表的加總，用它跟明細加總做「整張表」等級的勾稽 (invoice_no
+            # =None 代表整份檔案，同 cfg["sum_row"] 的做法，2026-11-23 使用者確認
+            # 要加這項勾稽，讓 ADC 對帳表有機會從「低」(未勾稽) 提升)
+            sheet_sum = sum(_vn_num(_vn_cell(rows[i], c)) or 0 for c, _ in fees)
+            prev = totals.get(None) or [0, None]
+            totals[None] = [prev[0] + sheet_sum, None]
+            break
     # 整張對帳表只有一個 VAT (合計列下方 "VAT 8% | 1,638,528")：單獨一張，
     # 發票號碼用設定的對帳表號碼欄 (vat_doc) 或工作表名稱
     for row in rows[end:end + 6]:
@@ -3881,7 +3900,8 @@ def _vt_make(supplier: str, cfgs: List[Tuple[str, Dict]]):
             # sum_row 也會算出一個可勾稽的未稅合計 (表尾 TOTAL 列各費用欄加總)，不是只有
             # "total"/"sheet_total" 才算有總額可勾稽 (2026-11-12 發現：VN18 SAIGON_TRANSPORT
             # 等好幾家供應商只設定 sum_row，這裡漏了判斷，整份一直顯示「沒有可勾稽的總額」)
-            has_total |= "total" in cfg or "sheet_total" in cfg or "sum_row" in cfg or "usd_audit" in cfg
+            has_total |= ("total" in cfg or "sheet_total" in cfg or "sum_row" in cfg or "usd_audit" in cfg
+                          or "end_blank_no_id" in cfg)
             has_grand |= "grand" in cfg or bool(cfg.get("sheet_total", (None, None))[1])
             for key, pair in _vt_parse_sheet(name, rows, cfg, supplier, book)[1].items():
                 if pair[1] is not None:
@@ -6830,13 +6850,14 @@ register_supplier(
 _VT_ADC = [
     (r"(FCL|LCL|AIR).*POU", {
         "header": "DECLERATION NO", "two_rows": False, "key": ["=LOT NO"], "carry": True,
+        "end_blank_no_id": True,
         "fees": [(x, None) for x in ("EXTRA CUSTOMS SHEET", "SERVICE FEE", "TRUCKING FEE", "CLEARING EXPENSE",
                                      "LIFT ON FEE", "LIFT OFF FEE", "LOCAL CHARGE", "STORAGE FEE", "DEMURRAGE",
                                      "EXTRA FEE")],
         "date": "DELIVERY", "boxes": {"20": "=20'", "40": "=40'"}, "cbm": "=CBM", "kg": "KGS OF",
         "fields": {"bl_no": "AWB/ B/L NO", "order_no": "=INVOICE NO", "container_no": "CONT NO"}}),
     (r"TAI CHO", {
-        "header": "DECLARATION #", "two_rows": False, "key": ["=NO"],
+        "header": "DECLARATION #", "two_rows": False, "key": ["=NO"], "end_blank_no_id": True,
         "fees": [("SERVICE CHARGE", None)], "date": "DECLARATION/ DATE",
         "fields": {"order_no": "=INVOICE NO"}}),
 ]
