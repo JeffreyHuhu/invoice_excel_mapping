@@ -1293,6 +1293,15 @@ _CW_MOL_CHARGE_RE = re.compile(
 _CW_MOL_NOQTY_RE = re.compile(
     r"^(?P<desc>\D.+?)\s+(?P<rate>[\d,]+(?:\.\d+)?)\s+(?P<pct>\d+)\s*%\s+(?P<cur>[A-Z]{3})\s+"
     r"(?P<gross>[\d,]+(?:\.\d+)?)$")
+# 少數費用列的數量沒有「- 單位」(例如全程計價的 "Phí vận đơn"/"Phí đơn"，不是
+# 按 CBM/Shipment 這種有單位的計價)，整行是「名稱 數量 單價 稅率% 幣別 金額」，
+# 沒有 "-"：原本只有 _CW_MOL_CHARGE_RE (一定要有 "- 單位") 跟 _CW_MOL_NOQTY_RE
+# (完全沒有數量，要退回上一行找)，兩種都比對不到，這筆費用整行漏算 (2026-11-23
+# VN09 MOL 抽查 AUG.2026 SSEM11Z05011："Phí vận đơn 2 1,000,000 8 % VND
+# 2,160,000"、"Phí đơn 2 950,000 8 % VND 2,052,000" 這兩筆漏掉，金額勾稽少兩筆)。
+_CW_MOL_FLAT_RE = re.compile(
+    r"^(?P<desc>\D.+?)\s+(?P<qty>\d+(?:[.,]\d+)?)\s+(?P<rate>[\d,]+(?:\.\d+)?)\s+"
+    r"(?P<pct>\d+)\s*%\s+(?P<cur>[A-Z]{3})\s+(?P<gross>[\d,]+(?:\.\d+)?)$")
 
 
 def _cw_date(value: Optional[str]) -> Optional[str]:
@@ -1699,6 +1708,10 @@ def _cw_parse_doc(doc: str, supplier: Optional[str]) -> List[Dict]:
     mol_matches = []
     for i, line in enumerate(doc_lines):
         im = _CW_MOL_CHARGE_RE.match(line)
+        if im:
+            mol_matches.append((im, im.group("qty").replace(",", "."), i))
+            continue
+        im = _CW_MOL_FLAT_RE.match(line)
         if im:
             mol_matches.append((im, im.group("qty").replace(",", "."), i))
             continue
@@ -2132,7 +2145,15 @@ def detect_mol(text: str) -> bool:
     # 「任何一行的開頭」，一樣要求是獨立一行的抬頭 (不是文字中間剛好出現這幾個
     # 字)，但不受前面夾雜的其他頁面影響。
     if re.search(r"(?m)^\s*Debit Note - ", text):
-        return "CHARGE DESCRIPTION" in text
+        # 有費用表標題 "CHARGE DESCRIPTION" 才算這家帳單頁 (見上方說明)，但
+        # 2 頁的 Debit Note，續頁有時還有費用表「沒印完」的最後一筆費用列
+        # (表頭 "CHARGE DESCRIPTION" 只印在第 1 頁)，這一頁看不到標題但確實
+        # 有真正的費用，原本整頁被排除，這筆費用連帳帶總額全部漏算 (2026-11-23
+        # VN09 MOL 抽查 MAY.2026 SSEM11Z02538：第 2 頁的 "Phí làm hàng" 這筆
+        # 漏掉，金額勾稽少了一個 FCR 子託運單的費用)。改成有費用表標題，或是
+        # 這一頁本身就看得到一筆費用列格式 (跟品項擷取用同一個 regex)，兩者
+        # 任一成立就算。
+        return "CHARGE DESCRIPTION" in text or bool(_CW_MOL_CHARGE_RE.search(text))
     if re.search(r"(?m)^\s*PRO FORMA TAX INVOICE\b", text):
         return "MOL LOGISTICS" in text.upper()
     return _is_molcs(text)

@@ -1805,8 +1805,16 @@ def _page_duplicate_signature(rows: List[Dict]) -> Optional[tuple]:
         return None
     total = sum(r.get("amount") for r in rows if isinstance(r.get("amount"), (int, float)))
     order_no = rows[0].get("order_no")
+    # Order No. 抓不到時 (MOL 空運草稿發票常見，版面沒有 Order No. 欄位) 退回
+    # 看 bl_no (這幾張草稿版面的 HAWB)：同一個 Ký hiệu 底下好幾個子託運單各開
+    # 一張草稿，費用剛好是同一筆固定費率、總金額一樣、連 Description/AMOUNT
+    # 都一樣，只有 HAWB 不同，原本退回 (invoice_no, total) 判斷，6 張不同的
+    # 子託運草稿被當成同一張重複頁，只留 1 張 (2026-11-23 VN09 MOL 抽查
+    # APR.2026 SAEM11Z00585：6 個 HAWB 各 888,300，只剩 1 筆，金額勾稽少算
+    # 5 倍)。
+    extra = order_no if order_no not in (None, "N/A", "") else rows[0].get("bl_no")
     items_sig = tuple((r.get("description"), r.get("amount")) for r in rows)
-    return (inv, total, order_no, items_sig) if order_no not in (None, "N/A", "") else (inv, total)
+    return (inv, total, extra, items_sig) if extra not in (None, "N/A", "") else (inv, total)
 
 
 def _force_ocr_duplicate_pages(pages: List[str], entry: Dict) -> set:
