@@ -7490,6 +7490,11 @@ def _handal_extract_items_core(text: str):
         # (見 _looks_like_handal_item_desc)，行內出現的小寫字一定是雜訊，先拿掉
         # 才能跟大寫名稱比對到，不然整行會被誤判成不是費用項目而漏算。
         line = re.sub(r'(?<=[A-Z])\s+[a-z]{1,4}(?=\s+\d)', '', line)
+        # 單價跟金額兩個數字之間偶爾被 OCR 多塞一兩個小寫雜字 ("2,940,000 le
+        # 2,940,000"，使用者 2026-11-23 樣本 NIKO-APR 2025 HG05230425)：雜訊前面
+        # 是數字不是大寫字母，上面那條規則抓不到，這裡補一條「前後都是數字」的
+        # 版本，一樣只刪 1~4 個小寫字母，不影響真正的英文名稱。
+        line = re.sub(r'(?<=\d)\s+[a-z]{1,4}(?=\s+\d)', '', line)
         if not line:
             continue
         if re.match(r'for and on', line, re.IGNORECASE):
@@ -7571,6 +7576,29 @@ def _handal_extract_items_core(text: str):
             if m > n and all(pending_numbers[i] == pending_numbers[m + i] for i in range(m)):
                 for amount in pending_numbers[n:m]:
                     items.append({"description": _HANDAL_UNRECOGNIZED_DESC, "amount": amount, "vat": None})
+    elif pending_numbers:
+        # 名稱整段被 OCR 讀成雜訊、連 pending_descs 都沒有進去 (不是「名稱認得、
+        # 金額另欄」的狀況)，但該行本身的單價/金額欄還讀得到 (_HANDAL_PAIR_ONLY_RE/
+        # _HANDAL_SINGLE_NUM_RE 比對到)：不能整筆丟掉，否則金額勾稽會少算 (使用者
+        # 2026-11-23 樣本 NIKO-APR 2025 HG05190425："721,500 721,500"/"25,000
+        # 25,000" 兩行完全沒有名稱可配對，之前整個被丟棄)。標記成
+        # _HANDAL_UNRECOGNIZED_DESC，金額照抓到的填，驗證層只標 WARN。
+        total = _handal_extract_total(text)
+        nums = pending_numbers
+        done = sum(it["amount"] or 0 for it in items)
+        # 總額標籤被 OCR 整段吃掉時，金額數字會變成最後一行孤兒數字留在
+        # pending_numbers 裡 (不是費用)；且常常跟大寫金額本身又有一兩位數字
+        # 誤讀的落差 (使用者 2026-11-23 樣本 HG05230425："19,604,414" 應為
+        # "19,694,414")，不能只用「完全相等」判斷。改成比較「去掉最後一筆」
+        # 跟「留著最後一筆」哪個跟總額更接近，去掉後更接近就代表那筆其實是
+        # 總額，不是費用 (沒有總額可比對時不做這個判斷，維持原樣)。
+        if nums and total is not None:
+            with_last = abs((done + sum(nums)) - total)
+            without_last = abs((done + sum(nums[:-1])) - total)
+            if without_last < with_last:
+                nums = nums[:-1]
+        for amount in nums:
+            items.append({"description": _HANDAL_UNRECOGNIZED_DESC, "amount": amount, "vat": None})
 
     return items
 
