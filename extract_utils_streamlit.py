@@ -772,7 +772,10 @@ def excel_formula_issues(path: str) -> Optional[List[Dict]]:
     from openpyxl import load_workbook as _load
     from openpyxl.utils import column_index_from_string
 
-    sum_re = re.compile(r"^=SUM\(\$?([A-Z]{1,3})\$?(\d+):\$?([A-Z]{1,3})\$?(\d+)\)$", re.I)
+    # 公式前面可能有多餘的 "+" (例 '=+SUM(AB3:AB6)')，跟同一列其他欄的
+    # '=SUM(...)' 不一致也要認得出來 (2026-11-23 RỒNG Á CHÂU POU PHONG：
+    # AB8 用 '=+SUM(AB3:AB6)' 漏掉最後一列，其他欄都是 SUBTOTAL 到最後一列)
+    sum_re = re.compile(r"^=\+?SUM\(\$?([A-Z]{1,3})\$?(\d+):\$?([A-Z]{1,3})\$?(\d+)\)$", re.I)
     values = dict(read_spreadsheet(path).sheets)
     wb = _load(path, read_only=True, data_only=False)
     issues: List[Dict] = []
@@ -818,6 +821,8 @@ def excel_formula_issues(path: str) -> Optional[List[Dict]]:
             issues.extend(_row_double_count_issues(ws.title, formulas, grid))
             issues.extend(_embedded_subtotal_issues(ws.title, sums, grid))
             issues.extend(_hardcoded_total_issues(ws.title, formulas, sums, grid))
+            issues.extend(_hardcoded_row_total_issues(ws.title, formulas, grid))
+            issues.extend(_col_start_gap_issues(ws.title, sums, grid))
             # 公式沒有存計算結果 (用程式產生、沒在 Excel 開過的 xlsx)：讀不到金額，
             # 使用者 2026-10-27 規定標 ERROR
             blank = [f"{col}{r}" for (r, col) in formulas
@@ -828,6 +833,13 @@ def excel_formula_issues(path: str) -> Optional[List[Dict]]:
             # 少數公式本來就算出空白 (=IF(…,"",…))：一半以上的公式都沒有值才算
             if len(blank) >= 3 and len(blank) * 2 >= len(formulas):
                 issues.append({"kind": "uncached", "sheet": ws.title, "cells": blank})
+            # 公式參照已刪除的欄/列，變成 #REF! 錯誤 (2026-11-23 RỒNG Á CHÂU FCL-ADC
+            # MAR.26：P13 '=RF!#REF!'，連帶拖累 P18 '=SUM(P2:P16)' 整欄合計也變成
+            # #REF!)：這種壞公式快取的值是空字串，不是文字 "#REF!"
+            # (python_calamine 讀出來是 '')，要從公式文字本身判斷
+            ref_err = [f"{col}{r}" for (r, col), v in formulas.items() if "#REF!" in v.upper()]
+            if ref_err:
+                issues.append({"kind": "ref_error", "sheet": ws.title, "cells": ref_err})
     finally:
         wb.close()
     return issues
@@ -876,9 +888,12 @@ def _rate_total_issues(sheet: str, formulas: Dict[Tuple[int, str], str],
     return issues
 
 
-# 每列合計 (橫向) 只加一段欄位 + 幾個單格，例如 AI3 '=SUM(AC3:AH3)+AA3'
-_ROW_SUM_RE = re.compile(r"^=\+?SUM\(\$?([A-Z]{1,3})\$?(\d+):\$?([A-Z]{1,3})\$?(\d+)\)((?:\+\$?[A-Z]{1,3}\$?\d+)*)$",
-                         re.I)
+# 每列合計 (橫向) 只加一段欄位 + 幾個單格，例如 AI3 '=SUM(AC3:AH3)+AA3'。
+# 單格也可能寫在 SUM 前面 (2026-11-23 RỒNG Á CHÂU IKEA EXPORT：Z9 '=R9+SUM(T9:Y9)')，
+# 所以前後都要接受 "+單格"。
+_ROW_SUM_RE = re.compile(
+    r"^=\+?((?:\$?[A-Z]{1,3}\$?\d+\+)*)SUM\(\$?([A-Z]{1,3})\$?(\d+):\$?([A-Z]{1,3})\$?(\d+)\)"
+    r"((?:\+\$?[A-Z]{1,3}\$?\d+)*)$", re.I)
 # 費用欄表頭 (漏在合計左邊的欄要是費用欄才算)；數量/重量/費率類的欄不算
 _FEE_HEADER_RE = re.compile(r"FEE|CHARGE|PH[IÍ]|FREIGHT|CUSTOM|SURCHARGE|TRUCKING|SERVICE", re.I)
 # FEET (貨櫃呎數，例如 40) 含有 "FEE"，不是費用，要排除 (PSS 2026-10-31：F 欄 40 被當成漏算費用)
@@ -905,25 +920,35 @@ def _row_gap_issues(sheet: str, formulas: Dict[Tuple[int, str], str], grid: List
         return ""
 
     # 每一列被公式用到的欄 (同列的 TOTAL 欄可能把合計欄漏的費用加回去，例如
-    # '=AL3+AD3+AB3'，那就不是漏算)
+    # '=AL3+AD3+AB3'，那就不是漏算)。只算「加法」用途：乘/除 (例如 VAT 欄
+    # '=AK3*0.08' 只是拿 AK 算稅額，AK 本身並沒有被算進任何總額) 不算
+    # (2026-11-23 RỒNG Á CHÂU POU SUNG IM "LCL+LOCAL - IMPORT" 答案：AW3
+    # '=SUM(AL3:AV3)' 漏掉左邊 AK (TRUCKING FEE)，因為 AV3 '=AK3*0.08' 引用
+    # 了 AK，以前誤判成「AK 已經被加進別的欄」而沒有列出來)
     used: Dict[int, set] = {}
     for (r, own), f in formulas.items():
+        u = f.upper()
         cols = set()
-        for a, ra, b, rb in re.findall(r"\$?([A-Z]{1,3})\$?(\d+):\$?([A-Z]{1,3})\$?(\d+)", f.upper()):
+        for a, ra, b, rb in re.findall(r"\$?([A-Z]{1,3})\$?(\d+):\$?([A-Z]{1,3})\$?(\d+)", u):
             if int(ra) == r == int(rb):
                 cols |= set(range(ci(a), ci(b) + 1))
-        for a, ra in re.findall(r"(?<![A-Z:$])\$?([A-Z]{1,3})\$?(\d+)(?![\d:])", f.upper()):
-            if int(ra) == r:
-                cols.add(ci(a))
+        for m in re.finditer(r"(?<![A-Z:$])\$?([A-Z]{1,3})\$?(\d+)(?![\d:])", u):
+            a, ra = m.group(1), m.group(2)
+            if int(ra) != r:
+                continue
+            if u[:m.start()].endswith(("*", "/")) or u[m.end():].startswith(("*", "/")):
+                continue
+            cols.add(ci(a))
         used.setdefault(r, {})[ci(own)] = cols
 
     grouped: Dict[tuple, Dict] = {}
     for (f_row, col), formula in formulas.items():
         m = _ROW_SUM_RE.match(formula)
-        if not m or int(m.group(2)) != f_row or int(m.group(4)) != f_row:
+        if not m or int(m.group(3)) != f_row or int(m.group(5)) != f_row:
             continue
-        refs = set(range(ci(m.group(1).upper()), ci(m.group(3).upper()) + 1))
-        refs |= {ci(re.sub(r"[\d$+]", "", t).upper()) for t in m.group(5).split("+") if t}
+        refs = set(range(ci(m.group(2).upper()), ci(m.group(4).upper()) + 1))
+        refs |= {ci(re.sub(r"[\d$+]", "", t).upper()) for t in m.group(1).split("+") if t}
+        refs |= {ci(re.sub(r"[\d$+]", "", t).upper()) for t in m.group(6).split("+") if t}
         lo, hi = min(refs), max(refs)
         gaps = [j for j in range(lo, hi + 1) if j not in refs
                 and not _NOT_FEE_HEADER_RE.search(header(j, f_row))]
@@ -964,9 +989,9 @@ def _row_double_count_issues(sheet: str, formulas: Dict[Tuple[int, str], str],
     by_row: Dict[int, List[tuple]] = {}
     for (r, col), f in formulas.items():
         m = _ROW_SUM_RE.match(f)
-        if not m or int(m.group(2)) != r or int(m.group(4)) != r:
+        if not m or int(m.group(3)) != r or int(m.group(5)) != r:
             continue
-        by_row.setdefault(r, []).append((col, ci(m.group(1).upper()), ci(m.group(3).upper()), f))
+        by_row.setdefault(r, []).append((col, ci(m.group(2).upper()), ci(m.group(4).upper()), f))
 
     issues = []
     for r, entries in by_row.items():
@@ -1059,8 +1084,94 @@ def _hardcoded_total_issues(sheet: str, formulas: Dict[Tuple[int, str], str],
     return issues
 
 
+def _hardcoded_row_total_issues(sheet: str, formulas: Dict[Tuple[int, str], str],
+                                grid: List[list]) -> List[Dict]:
+    """同一欄在別的列都是「橫向」列加總公式 (例 '=SUM(X5:AE5)')，這一列卻是
+    寫死的數字 (通常是 0)，跟這一列自己的費用加總對不上 (2026-11-23 RỒNG Á
+    CHÂU POU PHONG T2.2026 "NHAP FCL DOT 1" 答案：AG5 寫死 0，同一欄其他列
+    都是公式；這一列 X5/Y5 本身有金額，合計卻漏算成 0，整張發票的列合計
+    因此少了這一列)。這是 _hardcoded_total_issues() 的橫向版本 (那個檢查的
+    是「直向」SUM 欄合計被同一列寫死的數字取代；這裡反過來，是「橫向」
+    列合計欄被同一欄某幾列寫死的數字取代)。回傳 {"kind": "hardcoded_row_total",
+    "sheet", "row", "col", "value", "detail_sum", "start_col", "end_col"}。"""
+    from openpyxl.utils import column_index_from_string as ci, get_column_letter as gl
+
+    def num(r, c):
+        v = grid[r - 1][c - 1] if r - 1 < len(grid) and c - 1 < len(grid[r - 1]) else None
+        return v if isinstance(v, (int, float)) and not isinstance(v, bool) else None
+
+    by_col: Dict[str, List[tuple]] = {}
+    for (r, col), f in formulas.items():
+        m = _ROW_SUM_RE.match(f)
+        if m and int(m.group(3)) == r and int(m.group(5)) == r:
+            by_col.setdefault(col, []).append((r, ci(m.group(2).upper()), ci(m.group(4).upper())))
+    issues = []
+    for col, entries in by_col.items():
+        if len(entries) < 2:
+            continue   # 至少兩列都用公式，才夠篤定這一欄本來應該每列都是公式
+        own = ci(col)
+        offsets = {(own - s, own - e) for _, s, e in entries}
+        if len(offsets) != 1:
+            continue   # 每列參照範圍的相對位置不一致，不夠篤定，跳過
+        off_start, off_end = next(iter(offsets))
+        rows_with_formula = {r for r, _, _ in entries}
+        lo, hi = min(rows_with_formula), max(rows_with_formula)
+        for r in range(lo, hi + 1):
+            if r in rows_with_formula or (r, col) in formulas:
+                continue
+            v = num(r, own)
+            if v is None:
+                continue
+            start_c, end_c = own - off_start, own - off_end
+            detail = sum(num(r, c) or 0 for c in range(start_c, end_c + 1))
+            if detail and abs(v - detail) > 1:
+                issues.append({"kind": "hardcoded_row_total", "sheet": sheet, "row": r, "col": col,
+                               "value": v, "detail_sum": detail,
+                               "start_col": gl(start_c), "end_col": gl(end_c)})
+    return issues
+
+
+def _col_start_gap_issues(sheet: str, sums: list, grid: list) -> List[Dict]:
+    """同一個合計列裡，各欄 SUM 範圍理應從同一列開始，這一欄卻從更晚的列
+    開始，漏算開頭幾列 (2026-11-23 RỒNG Á CHÂU AIR-ADC JUL.25：M48
+    '=SUM(M5:M46)'，同一列其他欄都是 '=SUM(X2:X46)'，M 欄漏算第 2~4 列的
+    SERVICE FEE)。這是現有「SUM 範圍漏掉後面幾列」檢查的對稱版本 (漏掉
+    前面幾列)。回傳 {"kind": "col_start_gap", "sheet", "row", "col",
+    "formula", "expected_start", "start", "missing": {欄: 漏算金額}}。"""
+    from openpyxl.utils import column_index_from_string
+
+    issues = []
+    by_row: Dict[int, List[tuple]] = {}
+    for f_row, col, start, end, formula in sums:
+        by_row.setdefault(f_row, []).append((col, start, end, formula))
+    for f_row, siblings in by_row.items():
+        if len(siblings) < 2:
+            continue   # 至少兩欄都用公式，才夠篤定這幾欄的起始列應該一致
+        min_start = min(s for _, s, _, _ in siblings)
+        for col, start, end, formula in siblings:
+            if start <= min_start:
+                continue
+            c = column_index_from_string(col) - 1
+            missing = 0.0
+            for r in range(min_start, start):
+                v = grid[r - 1][c] if r - 1 < len(grid) and c < len(grid[r - 1]) else None
+                if isinstance(v, (int, float)) and not isinstance(v, bool):
+                    missing += v
+            if missing:
+                issues.append({"kind": "col_start_gap", "sheet": sheet, "row": f_row, "col": col,
+                               "formula": formula, "expected_start": min_start, "start": start,
+                               "missing": {col: missing}})
+    return issues
+
+
 def format_formula_issue(issue: Dict) -> str:
     """公式問題 -> 說明文字 (給驗證異常、轉檔總表、查驗結果用)。"""
+    if issue.get("kind") == "col_start_gap":
+        missing = issue["missing"][issue["col"]]
+        return (f"原帳單問題 (Excel 公式有誤)：[{issue['sheet'].strip()}] {issue['col']}{issue['row']} "
+                f"用 {issue['formula']} 計算，同一列其他欄的合計都是從第 {issue['expected_start']} 列"
+                f"開始，這一欄從第 {issue['start']} 列才開始，漏算第 "
+                f"{issue['expected_start']}~{issue['start'] - 1} 列；漏算 {missing:,.2f}")
     if issue.get("kind") == "row_gap":
         rows = issue["rows"]
         where = f"第 {rows[0]} 列" if len(rows) == 1 else f"{len(rows)} 列 (例第 {rows[0]} 列)"
@@ -1072,6 +1183,11 @@ def format_formula_issue(issue: Dict) -> str:
         cells = issue["cells"]
         return (f"原帳單問題 (Excel 公式沒有存計算結果)：[{issue['sheet'].strip()}] {len(cells)} 個公式"
                 f"儲存格讀不到金額 (例 {'、'.join(cells[:3])})；請用 Excel 開啟後另存，再重新轉檔")
+    if issue.get("kind") == "ref_error":
+        cells = issue["cells"]
+        return (f"原帳單問題 (Excel 公式有誤)：[{issue['sheet'].strip()}] {len(cells)} 個公式"
+                f"儲存格參照已刪除的欄位/列，算出 #REF! 錯誤 (例 {'、'.join(cells[:3])})；"
+                f"受影響的合計欄位少算")
     if issue.get("kind") == "rate":
         blank = "、".join(issue["blank"][:5]) + (" 等" if len(issue["blank"]) > 5 else "")
         col, start, end = issue["col"], issue.get("start"), issue.get("end")
@@ -1094,6 +1210,11 @@ def format_formula_issue(issue: Dict) -> str:
         return (f"原帳單問題 (Excel 公式有誤)：[{issue['sheet'].strip()}] {issue['col']}{issue['row']} "
                 f"是寫死的數字 {issue['value']:,.2f}，不是公式，跟第 {issue['start']}~{issue['end']} "
                 f"列明細加總 {issue['detail_sum']:,.2f} 不一致 (差額 {diff:,.2f})")
+    if issue.get("kind") == "hardcoded_row_total":
+        diff = issue["value"] - issue["detail_sum"]
+        return (f"原帳單問題 (Excel 公式有誤)：[{issue['sheet'].strip()}] {issue['col']}{issue['row']} "
+                f"是寫死的數字 {issue['value']:,.2f}，不是公式，跟同一列 {issue['start_col']}~"
+                f"{issue['end_col']} 欄加總 {issue['detail_sum']:,.2f} 不一致 (差額 {diff:,.2f})")
     cols = list(issue["missing"])
     amounts = "、".join(f"{c} 欄 {v:,.2f}" for c, v in issue["missing"].items() if v)
     return (f"原帳單問題 (Excel 公式有誤)：[{issue['sheet'].strip()}] 第 {issue['row']} 列 "

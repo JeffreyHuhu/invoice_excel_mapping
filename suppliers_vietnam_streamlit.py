@@ -717,8 +717,17 @@ def _rac_parse_sheet(name: str, rows: List[list]):
             if amount:
                 items.append({"description": charge, "amount": amount, "vat": None, **shared})
                 net += amount
-        vat = sum(_vn_num(_vn_cell(row, j)) or 0 for j in table["vat_cols"]) or \
-            sum(_vn_num(_vn_cell(row, j)) or 0 for j in table["vat_cols_left"])
+        # 右表 (vat_cols) 這一列「依 KGS 分攤後」真的沒算 VAT 時才退回左表
+        # (vat_cols_left) 的值；右表欄位本來就是空白 (None) 才算沒算，不能用
+        # "falsy" 判斷——續行列 (同一張發票多一筆報關單，只多收報關費、沒有
+        # 另外分攤 VAT) 右表 VAT 欄正確地填 0，以前用 "or" 誤判成沒算，退回
+        # 左表留著舊公式複製下來的殘值，多算出不存在的 VAT (2026-11-23 抽查
+        # "POU SUNG IM PART 1 MARCH 2026" FCL - IMPORT 答案)
+        vat_right = [_vn_num(_vn_cell(row, j)) for j in table["vat_cols"]]
+        if any(v is not None for v in vat_right):
+            vat = sum(v or 0 for v in vat_right)
+        else:
+            vat = sum(_vn_num(_vn_cell(row, j)) or 0 for j in table["vat_cols_left"])
         # Description 固定「VAT PASS THROUGH (VAT x%)」(使用者 2026-11-09 規定，取代舊的
         # 「VAT」/「VAT PASS THROUGH」沒有稅率寫法)；稅率 = VAT ÷ 費用加總，四捨五入到整數
         vat_desc = f"VAT PASS THROUGH (VAT {round(vat / net * 100)}%)" if net and vat else "VAT PASS THROUGH"
