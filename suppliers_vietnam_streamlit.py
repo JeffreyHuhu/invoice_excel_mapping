@@ -5939,11 +5939,18 @@ _VT_SONG_TRIEU = [
                            "total_check": "TOTAL PLV CHECK",
                            # "CUOC VC"：同上，2025.01~2026.02 沒有漲價機制，表頭只寫「CƯỚC VC」
                            "fixed_rate_fee": "=CUOC VC",
+                           # inherit_blank：PHÍ CÂN 這組 (SHĐ 欄 + 金額欄) 有些月份子標題列整組
+                           # 空白 (不像 NÂNG/HẠ 有 "SHD"/"NÂNG"/"HẠ" 字樣可以分欄)，金額欄因此沒有
+                           # 標題，往左沿用 "PHÍ CÂN" (2026-11-23 抽樣「越南1120」T04.2025 等發現：
+                           # 金額欄抓不到，整欄費用漏算，差額剛好等於 PHÍ CÂN 金額)
+                           "inherit_blank": True,
                            "fees": [(("CUOC VC CHUA TANG", "CUOC VC"), None), ("SO TIEN % TANG", "SỐ TIỀN % TĂNG {pct}%"),
                                     ("BD NANG", None), (("PHI KHAC PHI", "PHI KHAC SO TIEN"), None),
                                     (("PHI NANG/HA NANG", "PHI NANG / HA NANG"), "PHÍ NÂNG (SHĐ {shd})"),
                                     (("PHI NANG/HA HA", "PHI NANG / HA HA"), "PHÍ HẠ (SHĐ {shd})"),
-                                    ("PHI CAN CAN", "PHÍ CÂN (SHĐ {shd})"),
+                                    # "$=PHI CAN"：子標題空白時，inherit_blank 讓金額欄跟 SHĐ 欄
+                                    # 標題一樣都是 "PHÍ CÂN"，取最後一個 (金額欄) 而不是第一個 (SHĐ 欄)
+                                    (("PHI CAN CAN", "$=PHI CAN"), "PHÍ CÂN (SHĐ {shd})"),
                                     # 沖銷 (TỔNG 要減掉，2026-10-28 抽樣 T7.2026)；名稱前的 "-" 代表減項
                                     ("CAN TRU", "-Cấn trừ phí phát sinh")]}),
 ]
