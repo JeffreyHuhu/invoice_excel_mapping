@@ -7471,9 +7471,11 @@ _DHL_VN_MAIN_RE = re.compile(
     # 對齊位置，放寬成「任何一個不是空白的字元」，不強求像數字或字母。
     # ORG 偶爾掉一個字變成只有 2 碼 ("CA"，2026-11-09 抽查 "SGNIR00317248 IMPORT.pdf"
     # 的 "CA 2946902066"，照抄帳單原樣，不猜第 3 碼)，或多一個句點 ("DG."，2026-11-09
-    # 抽查 "SGNIR00402876.pdf"；句點不算進代碼本身)
+    # 抽查 "SGNIR00402876.pdf"；句點不算進代碼本身)。重量小數點掃描檔偶爾讀成逗號
+    # ("9,00"，2026-11-23 抽查 "SGNIR00317248/00351424/00402876/SGNR000645453"：
+    # 整行因此比對失敗，跟上面 pcs 讀成 "+" 一樣會整票漏抓)，一併放寬允許逗號。
     r"^(?P<date>\d{2}/\d{2}/\d{4})\s+(?P<org>[A-Za-z0-9]{2,3})\.?\s+(?P<hawb>\d{8,})\s+(?P<dest>[A-Za-z0-9]{3})\s+"
-    r"(?P<pcs>\S+)\s+(?P<kg>[\d.]+)(?:\s+(?P<regular>[\d,]+)(?:\s+[\d,]+)*\s+(?P<net>[\d,]+))?$")
+    r"(?P<pcs>\S+)\s+(?P<kg>[\d.,]+)(?:\s+(?P<regular>[\d,]+)(?:\s+[\d,]+)*\s+(?P<net>[\d,]+))?$")
 # 附加費名稱有大小寫混合 ("Direct Signature 150,000 150,000")
 # 只有一個金額的附加費 ("SHIPMENT VALUE PROTECTION 354,532") 也算；金額要有千分位或 3 位以內，
 # 不會誤抓 "YOUR VAT CODE 3900911265" 這種代碼
@@ -7600,7 +7602,7 @@ def parse_dhl_express_vn(text: str) -> Dict:
         if m:
             current = {"bl_no": m.group("hawb"), "onboard_date": _vn_pdf_date(m.group("date")),
                        "port_of_loading": m.group("org").upper(), "port_of_discharge": m.group("dest").upper(),
-                       "volume": _fmt_volume(kg=m.group("kg"))}
+                       "volume": _fmt_volume(kg=m.group("kg").replace(",", "."))}
             # 件數/重量 0 的稅費單這一行沒有金額，金額在下面的附加費行 (不建立
             # FREIGHT CHARGE 項目；PROD CODE 改套到那筆附加費，見下方)
             if m.group("net"):
