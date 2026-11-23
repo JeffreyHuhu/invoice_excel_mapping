@@ -5687,7 +5687,18 @@ def detect_dsv(text: str) -> bool:
     ("CREDIT NOTE ID620023184 ORIGINAL")，頭銜不是 INVOICE，要一併辨識
     ORIGINAL/COPY，否則 COPY 頁也會被當成獨立發票重複計入
     (2026-11-14 HARDASES_16OKTOBER)。"""
-    if "CHARGES IN IDR" not in text.upper():
+    upper = text.upper()
+    if "CHARGES IN IDR" not in upper:
+        return False
+    # "CHARGES IN IDR" 這個欄位名稱不是 DSV 獨有的：PT KINTETSU WORLD
+    # EXPRESS INDONESIA 的帳單也用同一欄名，但完全沒有「INVOICE 發票號碼
+    # ORIGINAL/COPY」這個 DSV 固定會印的頭銜 (Kintetsu 只印 "TAX INVOICE
+    # 61013029882500"，沒有 ORIGINAL/COPY 字樣)，會被誤判成 DSV 帳單，擷取
+    # 出一堆抓不到值的欄位 (2026-11-23 使用者回報「61013029882500 - INV.pdf」
+    # 誤判)。注意：不能改成要求整頁出現 "DSV" 字樣——正本的「Page 1 of 2」
+    # 品項頁本身並不會印 DSV 公司名稱 (只有「Page 2 of 2」附屬頁才有)，那樣
+    # 改會讓品項頁偵測失敗 (2026-11-23 regression sample1/sample2 證實)。
+    if not re.search(r"^(?:INVOICE|CREDIT\s+NOTE)\s+\S+\s+(?:ORIGINAL|COPY)\b", text, re.MULTILINE):
         return False
     return not _dsv_is_copy_only(text)
 
