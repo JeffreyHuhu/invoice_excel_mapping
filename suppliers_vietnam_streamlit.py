@@ -1435,6 +1435,7 @@ def _cw_docs(text: str, page_nums: Optional[List[int]] = None):
     docs: List[List[str]] = []
     doc_pages: List[List[Optional[int]]] = []
     doc_inv: List[Optional[str]] = []
+    doc_decl_total: List[Optional[int]] = []
     current = None
     for page, num in zip(pages, nums):
         inv = _cw_invoice_no(page)
@@ -1446,6 +1447,14 @@ def _cw_docs(text: str, page_nums: Optional[List[int]] = None):
         first_page = bool(re.search(r"\bPage 1 of \d+", page)) or (
             not re.search(r"\bPage \d+ of \d+", page)
             and ("SHIPMENT DETAILS PRINTED BY" in page or "GOODS DESCRIPTION" in page))
+        # DHL 同一張發票的續頁偶爾自己標錯頁碼 ("Page 1 of 2" 後面接著同號碼的
+        # 一頁卻寫 "Page 1 of 1"，不是 "Page 2 of 2")，被誤判成另開一張新發票，
+        # 續頁的費用/總額併不進第一頁那張，金額稽核直接找不到總額 (2026-11-23
+        # 抽查 JAN.2026 S2506196094)。目前這張宣告的頁數還沒收滿、號碼又相同時，
+        # 當續頁處理，不要被頁碼標錯騙走
+        if (first_page and inv and inv == current and docs and doc_decl_total
+                and doc_decl_total[-1] and len(docs[-1]) < doc_decl_total[-1]):
+            first_page = False
         if inv is None and not re.search(r"\bPage \d+ of \d+", page):
             continue
         # "Page 2 of N" 以後一定是上一張的續頁 (掃描頁 OCR 號碼可能讀錯，不能只靠號碼)
@@ -1467,6 +1476,8 @@ def _cw_docs(text: str, page_nums: Optional[List[int]] = None):
             docs.append([page])
             doc_pages.append([num])
             doc_inv.append(inv)
+            m = re.search(r"\bPage 1 of (\d+)", page)
+            doc_decl_total.append(int(m.group(1)) if m else None)
             current = inv
     # SHIPMENT 號碼整頁讀壞 (None) 時，用 SRN 從同份帳單裡找得到號碼的那張借
     # (同一個 SHIPMENT 的 Freight-only 續頁字少，常常連 SHIPMENT 都讀不到；
