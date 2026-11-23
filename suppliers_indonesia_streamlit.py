@@ -8219,7 +8219,9 @@ _OPL_SCAN_ITEM_RE = re.compile(
     # 羅馬數字 I/II 跟數量黏在一起 ("GATE CHARGE (ASIATAN) [1 SET..."、"PARKING FEE (ASTATAN)
     # {1 SRT..."，"HKGJKT24120372A")：括號雜訊直接接數字+單位，不像上面那組是先接單位字
     r"|[{(\[]\d\s*[A-Z]{2,5}"
-    r"|&\s*(?:CBM|SETS?|SHPTS?|CNTRS?)(?=\s)|[LI1]?[SOA0](?:BLS?|SETS?|SHPTS?|CBM)|MIN[ITl1]{1,2}[\]|]?\d*"
+    # "7BLS" 讀成 "TBLS" (7 誤讀成 T，跟上面 "7X40'HQ" 讀成 "TX40'HQ" 同一種字型混淆，
+    # "SHKJKT25080703A-G" 的 "Doc-POD TBLS US 60.00 420.00")
+    r"|&\s*(?:CBM|SETS?|SHPTS?|CNTRS?)(?=\s)|[LI1]?[SOA0](?:BLS?|SETS?|SHPTS?|CBM)|T(?:BLS?)|MIN[ITl1]{1,2}[\]|]?\d*"
     # "1CNTR" 讀成 "ICNTR" 之外，字母順序也會讀錯 ("ICTNR"，"VN25E1784" 的 "VGM ICTNR")
     r"|[|iIl](?:CNTR|CTNR)S?|\S*\d\S*(?:SETS?|SHPTS?|CNTRS?)"
     # 數量沒有單位 ("CUSTOM CLEARANCE-WAN 1 US$ 130.00"、"PORT SECURITY-C 4.63 US$ 1.30"，
