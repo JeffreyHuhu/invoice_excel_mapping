@@ -5564,6 +5564,15 @@ _OLM_EINV_ITEM_RE = re.compile(
     # 開頭的項目序號：掃描版偶爾把 "1" 認成單個字母 (例如 "j")，數字跟單個字母都接住
     r"^\s*(?:\d+|[A-Za-z])\s+(?P<desc>.+?)\s+(?P<bl>\S*\d{6,}\S*)\s+(?P<mid>.*?)\s+"
     r"(?P<price>[\d.]+)\s+(?P<amt>[\d.]+)[,.]?\s*$", re.MULTILINE)
+# 備援：掃描版偶爾把同一張發票裡的 B/L 編號拆成兩段 (例如 "OLCTPE260802" 漏字變成
+# "OLC 802")，每段都不到 6 位數字，上面那個正規表示式整行配不到、漏算這一筆費用
+# (2026-11-23 "Hóa đơn Oriental + Bill - T9-2026.pdf" 樣本第 8 項「Phí xe nâng đầu
+# nước ngoài」263,000 因此被漏算)。B/L 只要求至少 1 位數字，只套用在上面那個正規
+# 表示式配不到的列 (parse_oriental_pdf() 裡用 consumed 範圍判斷)，不影響其他本來就
+# 配得到的樣本。
+_OLM_EINV_ITEM_FALLBACK_RE = re.compile(
+    r"^\s*(?:\d+|[A-Za-z])\s+(?P<desc>.+?)\s+(?P<bl>\S*\d+\S*)\s+(?P<mid>.*?)\s+"
+    r"(?P<price>[\d.]+)\s+(?P<amt>[\d.]+)[,.]?\s*$", re.MULTILINE)
 _OLM_EINV_MID_RE = re.compile(r"([\d,]+(?:\.\d+)?)\s*(\S+)?")
 # 標籤後面的括號／冒號掃描版常認錯 (句點、分號、漏掉右括號都出現過)，比對都用
 # [.):;]* 寬鬆接住 (下面多處共用)
@@ -5614,12 +5623,19 @@ def parse_oriental_pdf(text: str) -> Dict:
     if m:
         h["port_of_loading"], h["port_of_discharge"], h["vessel"] = (x.strip() for x in m.groups())
     cbm = 0.0
+    consumed = []
     for m in _OLM_EINV_ITEM_RE.finditer(text):
+        consumed.append((m.start(), m.end()))
         h.setdefault("bl_no", m.group("bl"))
         # 數量單位是 KHỐI (= CBM，「,」是小數)；單位 LÔ (批次) 不計入材積 (2026-11-10 答案)
         mid_m = _OLM_EINV_MID_RE.match(m.group("mid"))
         if mid_m and mid_m.group(2) and _vt_norm(mid_m.group(2)).startswith("KH"):
             cbm = max(cbm, float(mid_m.group(1).replace(",", ".")))
+        items.append({"description": m.group("desc").strip(),
+                      "amount": _dsv_vn_dot_amount(m.group("amt")), "vat": None})
+    for m in _OLM_EINV_ITEM_FALLBACK_RE.finditer(text):
+        if any(a < m.end() and m.start() < b for a, b in consumed):
+            continue    # 上面那個正規表示式已經配到的列，不要重複算一次
         items.append({"description": m.group("desc").strip(),
                       "amount": _dsv_vn_dot_amount(m.group("amt")), "vat": None})
     # 掃描版這兩個標籤的右括號偶爾被認成 "}"，跟 CLOSE 合併多接一種

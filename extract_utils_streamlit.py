@@ -815,6 +815,7 @@ def excel_formula_issues(path: str) -> Optional[List[Dict]]:
             issues.extend(grouped.values())
             issues.extend(_rate_total_issues(ws.title, formulas, sums, grid))
             issues.extend(_row_gap_issues(ws.title, formulas, grid))
+            issues.extend(_row_double_count_issues(ws.title, formulas, grid))
             issues.extend(_embedded_subtotal_issues(ws.title, sums, grid))
             issues.extend(_hardcoded_total_issues(ws.title, formulas, sums, grid))
             # 公式沒有存計算結果 (用程式產生、沒在 Excel 開過的 xlsx)：讀不到金額，
@@ -944,6 +945,47 @@ def _row_gap_issues(sheet: str, formulas: Dict[Tuple[int, str], str], grid: List
     return list(grouped.values())
 
 
+def _row_double_count_issues(sheet: str, formulas: Dict[Tuple[int, str], str],
+                             grid: list) -> List[Dict]:
+    """同一列有兩個橫向 SUM 公式，範圍大的那個把範圍小的那個 (本身也是公式) 也
+    算進去：範圍小的明細被加了兩次 (一次是原始值，一次是小 SUM 的結果又被
+    算進大 SUM)，總額變成接近兩倍 (2026-11-23 VN21 ORIENTAL_USD 抽查 POUYUEN
+    T11-2025：U18 '=SUM(H18:T18)'，範圍內 T18 本身是 '=SUM(J18:S18)'，
+    J~S 的明細因此被算了兩次，180 變成 360)。這是 _embedded_subtotal_issues()
+    的橫向版本 (那個檢查的是同一欄、不同列；這裡是同一列、不同欄)。回傳
+    {"kind": "row_double_count", "sheet", "row", "outer_cell", "outer_formula",
+    "inner_cell", "inner_formula", "extra"}。"""
+    from openpyxl.utils import column_index_from_string as ci
+
+    def num(r, c):
+        v = grid[r - 1][c - 1] if r - 1 < len(grid) and c - 1 < len(grid[r - 1]) else None
+        return v if isinstance(v, (int, float)) and not isinstance(v, bool) else None
+
+    by_row: Dict[int, List[tuple]] = {}
+    for (r, col), f in formulas.items():
+        m = _ROW_SUM_RE.match(f)
+        if not m or int(m.group(2)) != r or int(m.group(4)) != r:
+            continue
+        by_row.setdefault(r, []).append((col, ci(m.group(1).upper()), ci(m.group(3).upper()), f))
+
+    issues = []
+    for r, entries in by_row.items():
+        for outer_col, o_start, o_end, outer_f in entries:
+            for inner_col, i_start, i_end, inner_f in entries:
+                if inner_col == outer_col:
+                    continue
+                inner_idx = ci(inner_col)
+                if not (o_start <= inner_idx <= o_end and o_start <= i_start and i_end <= o_end):
+                    continue
+                extra = sum(num(r, c) or 0 for c in range(i_start, i_end + 1))
+                if extra:
+                    issues.append({"kind": "row_double_count", "sheet": sheet, "row": r,
+                                   "outer_cell": f"{outer_col}{r}", "outer_formula": outer_f,
+                                   "inner_cell": f"{inner_col}{r}", "inner_formula": inner_f,
+                                   "extra": extra})
+    return issues
+
+
 def _embedded_subtotal_issues(sheet: str, sums: list, grid: list) -> List[Dict]:
     """合計公式的 SUM 範圍裡夾了一列小計 (這一列本身就是範圍內其他列的加總)，
     小計被重複算進最終合計，總額變成接近兩倍 (2026-11-18 SAIGON_TRANSPORT
@@ -1043,6 +1085,10 @@ def format_formula_issue(issue: Dict) -> str:
                 f"用 {issue['formula']} 計算，範圍裡第 {issue['subtotal_row']} 列本身是上面明細列的"
                 f"小計 ({issue['subtotal_value']:,.2f})，被這個公式重複加總進最終合計，"
                 f"導致總額不正確")
+    if issue.get("kind") == "row_double_count":
+        return (f"原帳單問題 (Excel 公式有誤)：[{issue['sheet'].strip()}] {issue['outer_cell']} 用 "
+                f"{issue['outer_formula']} 計算，範圍裡的 {issue['inner_cell']} 本身是 "
+                f"{issue['inner_formula']}，裡面的明細被重複加總一次，多算 {issue['extra']:,.2f}")
     if issue.get("kind") == "hardcoded_total":
         diff = issue["value"] - issue["detail_sum"]
         return (f"原帳單問題 (Excel 公式有誤)：[{issue['sheet'].strip()}] {issue['col']}{issue['row']} "
