@@ -8116,8 +8116,13 @@ def _opl_dn_total(text: str) -> Optional[float]:
         # 結尾是乾淨數字的那一行 (明細列通常有兩個 US$：UNIT PRICE 跟 PREPAID AMT，不會誤判；
         # 但單價是 HKD 的明細列只有一個 US$ ("HKGJKT24120372A" 的 PARKING FEE 用 HKD 計價)，
         # 要排除明細列常見的單位字樣，不然會把某一筆費用誤判成總額)
+        # ⚠️ 單位字樣本身也會被 OCR 讀錯 (使用者 2026-11-23 抽查 "HKGJKT25030603A"："1 SET
+        # HKD" 讀成 "1 SEE HK)"，"SET"/"HKD" 兩個關鍵字都認不出來，單位排除失效，誤把這筆
+        # 費用當總額)：改認 PAYER 欄「PT.」這個字樣——每一筆明細都有 PAYER 公司名稱 (PT.
+        # NIKOMAS/PT. POU YUEN/...)，真正的總額行不會有，比單位字樣可靠，兩個條件都要排除。
         for line in reversed(text.splitlines()):
-            if line.count("US$") == 1 and not re.search(r"\b(?:SET|KGS|CBM|USD|HKD|CIN)\b", line.upper()):
+            if line.count("US$") == 1 and "PT." not in line.upper() \
+                    and not re.search(r"\b(?:SET|KGS|CBM|USD|HKD|CIN)\b", line.upper()):
                 m = re.search(r"US\$\s*[=:.\s\-—~«»]*?\s*(\d+(?:\s*[,.]\s*\d+)*)\.?\s*$", line)
                 if m:
                     found = [m.group(1)]
