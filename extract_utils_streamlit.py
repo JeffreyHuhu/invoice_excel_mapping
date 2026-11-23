@@ -1783,17 +1783,58 @@ def _drop_duplicate_invoice_pages(page_rows: List[List[Dict]]) -> List[Dict]:
     for rows in page_rows:
         if not rows:
             continue
-        inv = rows[0].get("invoice_no")
-        total = sum(r.get("amount") for r in rows if isinstance(r.get("amount"), (int, float)))
-        order_no = rows[0].get("order_no")
-        items_sig = tuple((r.get("description"), r.get("amount")) for r in rows)
-        key = (inv, total, order_no, items_sig) if order_no not in (None, "N/A", "") else (inv, total)
-        if inv not in (None, "N/A", ""):
-            if key in seen:
+        sig = _page_duplicate_signature(rows)
+        if sig is not None:
+            if sig in seen:
                 continue
-            seen[key] = True
+            seen[sig] = True
         kept.extend(rows)
     return kept
+
+
+def _page_duplicate_signature(rows: List[Dict]) -> Optional[tuple]:
+    """算一頁『是不是重印頁』的比對簽章 (發票號碼+Order No.+費用明細，缺
+    Order No. 時退回發票號碼+總額)，給 _drop_duplicate_invoice_pages() 跟
+    audit_invoice_totals() 的強制 OCR 分支 (_force_ocr_duplicate_pages())
+    共用同一套判斷，不要各自重複一份邏輯。發票號碼抓不到 (N/A) 時回傳
+    None，代表這一頁不比對。"""
+    if not rows:
+        return None
+    inv = rows[0].get("invoice_no")
+    if inv in (None, "N/A", ""):
+        return None
+    total = sum(r.get("amount") for r in rows if isinstance(r.get("amount"), (int, float)))
+    order_no = rows[0].get("order_no")
+    items_sig = tuple((r.get("description"), r.get("amount")) for r in rows)
+    return (inv, total, order_no, items_sig) if order_no not in (None, "N/A", "") else (inv, total)
+
+
+def _force_ocr_duplicate_pages(pages: List[str], entry: Dict) -> set:
+    """強制 OCR 的 multi_page 供應商專用：帳單本身可能把同一張發票印成兩頁
+    連續的「正本/副本」(HANDAL 2026-11-23 樣本 NIKO-AGUS 2025 HG13410825：
+    同一張發票連續印兩頁)。audit_invoice_totals() 原本用『整頁文字是否完全
+    相同』判斷是不是重印頁 (_merge() 的 page_sig)，但掃描頁兩次各自 OCR，
+    雜訊 (誤讀的數字、斷行位置) 不會完全一樣，導致重印頁被誤判成兩份不同
+    文件，總額被算兩次 (多出的差額剛好等於這張發票的總額)。改成跟項目擷取
+    用同一套「發票號碼+Order No.+費用明細」判斷 (_page_duplicate_signature())，
+    抓到的重印頁，呼叫端 (audit_invoice_totals()) 跳過它的總額，只算一次。"""
+    seen: Dict[tuple, bool] = {}
+    duplicates: set = set()
+    for i, page_text in enumerate(pages):
+        try:
+            if not entry["detect"](page_text):
+                continue
+        except Exception:
+            continue
+        rows = expand_to_rows(entry["parse"](page_text))
+        sig = _page_duplicate_signature(rows)
+        if sig is None:
+            continue
+        if sig in seen:
+            duplicates.add(i)
+        else:
+            seen[sig] = True
+    return duplicates
 
 
 def generic_multi_page_invoice_pages(pdf_path: str, key: str) -> Dict[str, List[int]]:
@@ -2937,8 +2978,12 @@ def audit_invoice_totals(
         # NO_TOTAL_AUDIT (HANDAL 2026-11-16)。
         if entry.get("force_ocr"):
             pages = extract_pages_from_pdf_force_ocr(pdf_path)
+            # 同一張發票印成兩頁重印頁時，兩次 OCR 的雜訊不一樣，下面 _merge()
+            # 的「整頁文字完全相同才算重印」判斷會失效，見 _force_ocr_duplicate_pages()
+            dup_page_idx = _force_ocr_duplicate_pages(pages, entry)
         else:
             pages = supplier_pages(pdf_path, supplier_key, **pdfplumber_kwargs)
+            dup_page_idx = set()
         groups = _group_rows_by_invoice(rows, supplier_key)
         # 分組 key -> 原始發票號碼字串，用來在「不是發票抬頭頁」的頁面裡，
         # 用文字比對的方式判斷這一頁屬於哪一張發票 (見下方)。VN09 MOL 的
@@ -3023,7 +3068,9 @@ def audit_invoice_totals(
                     _merge(found, inv_key, value, page_upper)
                     break
 
-        for page_text in pages:
+        for page_idx, page_text in enumerate(pages):
+            if page_idx in dup_page_idx:
+                continue
             page_tolerance = _tolerance_of(page_text)
             found_before = set(totals_found) | set(grand_totals_found) | set(final_totals_found)
             # 大部分供應商的『未稅總額』就印在發票抬頭頁本身 (detect_fn 認得
