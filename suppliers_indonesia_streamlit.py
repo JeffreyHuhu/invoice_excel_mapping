@@ -2255,12 +2255,16 @@ def parse_tata_receipt(text: str) -> Dict:
     header["port_of_discharge"] = None
 
     items = _tata_receipt_extract_items(text)
-    if not items:
-        items = [{"description": None, "amount": None}]
 
     # PPN 稅金：整張帳單只有一個稅額 (不是逐筆品項各自的稅額)，獨立附加
     # 成一筆「只有 description/vat」的 item，展開成獨立一列，Order No. 等
     # 其他抬頭欄位留 None 讓 expand_to_rows() 補 N/A。
+    # ⚠️ 2026-11-24 抽樣 TH20250865 發現：這張發票分兩個實體頁，第 2 頁是
+    # 出貨資訊/PPN 小結頁，沒有費用明細表 (KETERANGAN...JUMLAH)，
+    # _tata_receipt_extract_items() 在這頁回傳空列表。原本「抓不到品項就補
+    # 一筆全 N/A 佔位列」的判斷在 PPN 加進來之前就做了，造成這頁多出一筆
+    # 沒意義的空列 (Description/AMOUNT 都是 N/A)，PPN 才是這頁真正要保留的
+    # 一筆。改成先加 PPN，確認「連 PPN 都沒有」才補佔位列。
     _ppn_m = _TATA_RECEIPT_PPN_RE.search(text)
     if _ppn_m:
         items.append({
@@ -2268,6 +2272,8 @@ def parse_tata_receipt(text: str) -> Dict:
             "amount": None,
             "vat": _tata_receipt_clean_amount(_ppn_m.group("vat")),
         })
+    if not items:
+        items = [{"description": None, "amount": None}]
 
     return {"header": header, "items": items}
 
@@ -4253,6 +4259,10 @@ register_supplier(
     extract_total=_yje_tata_extract_total,
     extract_grand_total=_yje_tata_extract_grand_total,
     page_text=_tata_pouyuen_pages,
+    # ⚠️ 2026-11-24 TH20250865 樣本：tata_receipt 子格式有些發票跨兩個實體
+    # 頁，第 2 頁只印出貨資訊/PPN 小結，沒有收件人名稱，見
+    # extract_utils_streamlit.py 的 register_supplier() 說明。
+    backfill_fields=("consignee",),
 )
 register_supplier(
     "TRANS_DAYA_PRIMA", "PT. TRANS DAYA PRIMA", detect_trans, parse_trans,

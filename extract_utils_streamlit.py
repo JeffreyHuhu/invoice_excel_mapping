@@ -1573,7 +1573,8 @@ def register_supplier(key: str, label: str,
                        page_text: Optional[Callable[[str], List[str]]] = None,
                        ocr_attachments: bool = True,
                        audit_tolerance_fn: Optional[Callable[[str], float]] = None,
-                       invoice_page_map: Optional[Callable[[str], Dict[str, List[int]]]] = None) -> None:
+                       invoice_page_map: Optional[Callable[[str], Dict[str, List[int]]]] = None,
+                       backfill_fields: Tuple[str, ...] = ()) -> None:
     """註冊一家供應商。
 
     ocr_attachments (可選，要搭配 invoice_page)：False 時，文字層已經有這家的
@@ -1671,6 +1672,15 @@ def register_supplier(key: str, label: str,
     一致)。DSV_VN/MOL/DHL_VN/YUSEN 這 4 家『一張發票可能跨好幾頁』，改傳
     cargowise_invoice_pages() 覆蓋掉預設值 (2026-11-16)。非 multi_page 供應商
     (一份 PDF 只有一張發票) 不需要這個參數。
+
+    backfill_fields (可選，multi_page 供應商用)：這家供應商『同一個發票號碼』
+    跨好幾個實體頁時 (例如 YJE_TATA TH20250865：第 1 頁是費用明細，第 2 頁
+    只印出貨資訊/PPN 小結，沒有收件人名稱)，列出哪些欄位要在同一張發票裡
+    互相補值——某一頁抓不到 (N/A)、但同一個發票號碼的別頁已經抓到值時，用
+    那個值補上。預設空 tuple (不補)：MOL 的草稿發票 (Số/日期空白、共用 Ký
+    hiệu) 正確答案就是同一個發票號碼、不同列的 CONSIGNEE 刻意留空，不能套用
+    這個補值 (2026-11-24 實測會害 MOL sample12 變錯)，所以預設關閉，只有
+    明確列出的供應商才套用。
     """
     if multi_page and invoice_page_map is None:
         invoice_page_map = lambda p, _k=key: generic_multi_page_invoice_pages(p, _k)
@@ -1683,7 +1693,7 @@ def register_supplier(key: str, label: str,
         "extract_vat_total": extract_vat_total, "invoice_page": invoice_page,
         "ocr_psm": ocr_psm, "ocr_psm_if": ocr_psm_if, "page_text": page_text, "multi_page_pdf": multi_page,
         "ocr_attachments": ocr_attachments, "audit_tolerance_fn": audit_tolerance_fn,
-        "invoice_page_map": invoice_page_map,
+        "invoice_page_map": invoice_page_map, "backfill_fields": backfill_fields,
         # Excel 供應商一份檔案可能有好幾張對帳單，比對時跟 multi_page 一樣用
         # invoice_no 分組
         "multi_page": multi_page or sheet_parse is not None,
@@ -1923,10 +1933,33 @@ def _parse_multi_page_pdf(pdf_path: str, key: str, **pdfplumber_kwargs) -> List[
         _fill_missing_invoice_date(rows_for_page, pdf_path, page_text)
         page_rows.append(rows_for_page)
     rows = _drop_duplicate_invoice_pages(page_rows, detect_reopened=bool(entry.get("force_ocr")))
+    # ⚠️ 2026-11-24 YJE_TATA TH20250865 樣本發現：同一張發票跨兩個實體頁，
+    # 第 1 頁是費用明細表 (印著收件人 PELANGGAN)，第 2 頁只印出貨資訊/PPN
+    # 小結，沒有收件人名稱，這頁產生的列 CONSIGNEE 變成 N/A，跟第 1 頁同一
+    # 張發票的其他列不一致。只對明確列在 backfill_fields 的供應商補值——
+    # 這不是所有 multi_page 供應商都適用 (MOL 的草稿發票同一發票號碼、
+    # 不同列的 CONSIGNEE 正確答案就是刻意留空，見 register_supplier() 說明)。
+    for field in entry.get("backfill_fields") or ():
+        _backfill_missing_field_within_invoice(rows, field)
     if not rows:
         rows = expand_to_rows({"header": {}, "items": [{}]})
         _fill_missing_invoice_date(rows, pdf_path, None)
     return rows
+
+
+def _backfill_missing_field_within_invoice(rows: List[Dict], field: str) -> None:
+    """同一個 invoice_no 裡，有列缺某個欄位 (值是 N/A) 但同一張發票的別的
+    列已經抓到值時，用那個值補上。只在 invoice_no 完全相同時才補——同一張
+    發票不可能有兩個不同的值，不會錯接到別張發票。"""
+    known: Dict[str, str] = {}
+    for row in rows:
+        inv, val = row.get("invoice_no"), row.get(field)
+        if inv and inv != NA and val and val != NA:
+            known.setdefault(inv, val)
+    for row in rows:
+        inv = row.get("invoice_no")
+        if inv in known and (not row.get(field) or row.get(field) == NA):
+            row[field] = known[inv]
 
 
 def _drop_duplicate_invoice_pages(page_rows: List[List[Dict]], detect_reopened: bool = False) -> List[Dict]:
