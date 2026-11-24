@@ -5100,7 +5100,7 @@ def _dhl_customs_extract_items(text: str) -> List[Dict]:
 
 
 _DHL_VAT_CODE_RE = re.compile(
-    r"^[A-Z][a-z]?\s+[A-Za-z][A-Za-z ]*?\s+(?P<rate>\d+(?:\.\d+)?)%\s+(?P<base>[\d,]+)\s+(?P<vat>[\d,]+)\s*$",
+    r"^(?P<code>[A-Z])[a-z]?\s+[A-Za-z][A-Za-z ]*?\s+(?P<rate>\d+(?:\.\d+)?)%\s+(?P<base>[\d,]+)\s+(?P<vat>[\d,]+)\s*$",
     re.MULTILINE)
 
 
@@ -5205,6 +5205,7 @@ def _parse_dhl_duty(text: str) -> Dict:
     if m:
         header.update(bl_no=m.group(1), port_of_loading=m.group(2), port_of_discharge=m.group(3))
     items: List[Dict] = []
+    item_codes: List[str] = []  # 跟 items 一一對應的稅別代碼，備援補費用判斷要用
     for line in text.splitlines():
         line = line.strip()
         if line.upper().startswith(("ANALYSIS OF VAT", "TOTAL")):
@@ -5243,18 +5244,28 @@ def _parse_dhl_duty(text: str) -> Dict:
         else:
             vat = total - amount if amount is not None and total is not None else None
         items.append({"description": im.group("desc").strip(), "amount": amount, "vat": vat})
+        item_codes.append(im.group("code").upper())
     # 掃描檔「DISBURSEMENT」那一行常被貨物說明欄的雜訊字元插在費用名稱跟
     # 金額中間 (OCR 把這些雜訊字元也印出來)，整行 regex 比對失敗，漏掉這一
     # 整筆費用 (2026-11-18 低等級 JKTZR00651097 等)。"Analysis of VAT" 稅別
-    # 表的課稅基礎不會被貨物說明欄污染，比較乾淨：缺這筆費用時才用它補回，
-    # 已經抓到的 (amount 對得上) 不重複加。
+    # 表的課稅基礎不會被貨物說明欄污染，比較乾淨：缺這筆費用時才用它補回。
+    # 只在這個稅別代碼完全沒抓到任何費用時才補：代碼底下可能同時有兩筆以上
+    # 費用 (例如 DISBURSEMENT + BONDED STORAGE 都是 A 碼)，稅別表這行是
+    # 同代碼全部費用的合計、不是單筆金額，拿合計跟「單筆金額對不上」當判斷
+    # 會把合計誤當成另一筆費用、重複多算一次 (2026-11-24 低等級 JKTZR00609428：
+    # A 碼已經抓到 190,000+20,500 兩筆，又把合計 210,500 當第三筆 DISBURSEMENT
+    # 加回去，整張未稅總額多算了一倍 210,500)。
     for m in _DHL_VAT_CODE_RE.finditer(text):
         if m.group("rate") in ("0", "0.0"):
             continue
+        code = m.group("code").upper()
+        if code in item_codes:
+            continue
         base = _dhl_clean_amount(m.group("base"))
         vat = _dhl_clean_amount(m.group("vat"))
-        if base and not any(it.get("amount") == base for it in items):
+        if base:
             items.append({"description": "DISBURSEMENT", "amount": base, "vat": vat or 0})
+            item_codes.append(code)
     _dhl_clear_unused_header(header, keep=("bl_no", "onboard_date", "port_of_loading",
                                            "port_of_discharge"), use_setdefault=True)
     # 一筆費用都擷取不到：判無法判讀 (同掃描版型，使用者 2026-10-31 確認)
