@@ -1706,7 +1706,10 @@ def detect_tata_classic(text: str) -> bool:
 
 _TATA_LABEL_WORDS = [
     r"MAWB", r"HAWB", r"Telp", r"Attn", r"Flight", r"Date", r"QTY",
-    r"Shipper", r"Address", r"Consignee", r"ORIGIN", r"No",
+    # ⚠️ 2026-11-24 抽樣 HE26001207 重新轉檔發現："No," 這個標籤本身也會被
+    # OCR 把 "o" 讀成 "a" ("Na.")，放寬成 "N[oa]"——後面要求 \b 邊界，
+    # 不會誤配到 "Nama"(後面接 m，不是邊界)。
+    r"Shipper", r"Address", r"Consignee", r"ORIGIN", r"N[oa]",
 ]
 _TATA_NEXT = "(?:" + "|".join(_TATA_LABEL_WORDS) + ")"
 _TATA_STOP = rf"(?=\s+{_TATA_NEXT}\b|\n|$)"
@@ -1903,14 +1906,17 @@ def parse_tata_classic(text: str) -> Dict:
         # 成 "[:;]"，"TO" 不分大小寫。
         # ⚠️ 2026-11-24 再發現："No." 的句點偶爾被 OCR 讀成逗號 ("No,  :
         # HE26001207")，句點放寬成 "[.,]"。
-        header["invoice_no"] = _search(r"[Tt][Oo]\s*[:;].*?\bNo[.,]?\s*[:;]\s*(\S+)", text)
+        # ⚠️ 2026-11-24 同一份 HE26001207 重新轉檔再發現：同一個 "No," 字樣
+        # 另一次 OCR 把 "o" 讀成 "a" ("Na." )，"N" 後面那個字母也放寬成
+        # "[oa]"，不只句點/逗號。
+        header["invoice_no"] = _search(r"[Tt][Oo]\s*[:;].*?\bN[oa][.,]?\s*[:;]\s*(\S+)", text)
     if not header["invoice_no"]:
         # ⚠️ 2026-11-23 再發現：雙欄排版偶爾整段被拆散 ("TO:"/"Altn.:"/
         # "MAWB"/"HAWB" 幾個標籤先各自成行，值另外排在後面)，上面「TO 後面
         # 接 No.」的寫法完全配不到。退回只找「No. : <值>」本身，不要求前面
         # 先出現 TO——地址 "Blok B1 No. 27" 這種寫法後面沒有冒號/分號，不會
         # 誤配到。
-        header["invoice_no"] = _search(r"\bNo[.,]?\s*[:;]\s*(\S+)", text)
+        header["invoice_no"] = _search(r"\bN[oa][.,]?\s*[:;]\s*(\S+)", text)
     header["invoice_date"] = _tata_parse_date(
         _search(r"IN[VY]\s*Date\s*[:>»]\s*(\d{4}[-/]\d{1,2}[-/]\d{1,2})", text)
     )
