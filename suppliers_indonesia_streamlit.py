@@ -4067,8 +4067,12 @@ def _pancaran_extract_total(text: str) -> Optional[int]:
 
 def _dhl_extract_total(text: str) -> Optional[int]:
     if _dhl_is_forwarding(text):
-        # 海運帳單的未稅小計 "SUBTOTAL 7.316.854" (不含 PPN)
-        return _dhl_fwd_amount(_search(r"SUBTOTAL\s+([\d.]+)", text))
+        # 未稅小計 "SUBTOTAL 7.316.854" (不含 PPN)；月結單一份 PDF 裡好幾張
+        # 發票各自一個 SUBTOTAL，要全部加總才能跟全部發票的費用明細加總
+        # 做稽核 (2026-11-24 低等級 DGF 月結單，見 _parse_dhl_forwarding())
+        amounts = [a for a in (_dhl_fwd_amount(v) for v in re.findall(r"SUBTOTAL\s+([\d.,]+)", text))
+                   if a is not None]
+        return sum(amounts) if amounts else None
     if _dhl_is_inbound_charges(text):
         # 進口代墊費用的未稅小計 "Sub-Total 27,826,122 265,129"
         return _dhl_clean_amount(_search(r"Sub-Total\s+([\d,]+)", text))
@@ -4669,12 +4673,16 @@ def _dhl_is_credit_note(text: str) -> bool:
 def _dhl_common_header(text: str) -> Dict[str, Optional[str]]:
     """兩種子格式共用的抬頭欄位 (收件人/供應商名稱/發票號碼/發票日期)。"""
     header: Dict[str, Optional[str]] = {}
-    first_line = text.split("\n", 1)[0].strip()
+    lines = text.split("\n")
+    first_line = lines[0].strip()
     # CREDIT NOTE 的號碼照帳單印的字母 O 保留 (使用者 2026-11-03 確認 BDOIR...)，不換成 0
     fix_zero = (lambda v: v) if _dhl_is_credit_note(text) else _dhl_fix_ocr_zero
     # Credit Note 的抬頭標籤是 "Credit Number:" (2026-11-03 DHL CREDIT NOTE BDOIR00043483)
-    # 標籤 OCR 常讀成 "Inveice"，用 Inv\w{2,5} 容許 (sample16/20 收件人 = Invoice Number 同一行左側文字)
-    m = re.search(r"^([^\n]+?)[ \t]+(?:Inv\w{2,5}|Credit)[ \t]+Number[ \t]*:", text, re.MULTILINE)
+    # 標籤 OCR 常讀成 "Inveice"，用 Inv\w{2,5} 容許 (sample16/20 收件人 = Invoice Number 同一行左側文字)；
+    # 標籤大小寫也可能被掃描成全小寫 "invoice Number:" (2026-11-24 低等級 JKTIR00901237、JKTZR00574164)，
+    # 不分大小寫比對，否則會退到下面的 else 分支，把整行 (含 "invoice Number: ..." 殘字) 當成收件人
+    m = re.search(r"^([^\n]+?)[ \t]+(?:Inv\w{2,5}|Credit)[ \t]+Number[ \t]*:", text,
+                  re.MULTILINE | re.IGNORECASE)
     # 抬頭標籤 OCR 常讀成 "Inveice Number" 而對不上，改用第一行；第一行後面常黏 OCR 雜訊
     # (2026-11-04 DHL sample20："PT. BIROTIKA SEMESTA (ielanal ;")，只取公司全名
     birotika = re.match(r"(PT\.?\s*BIROTIKA\s+SEMESTA)\b", first_line, re.IGNORECASE)
@@ -4682,6 +4690,11 @@ def _dhl_common_header(text: str) -> Dict[str, Optional[str]]:
         header["consignee"] = m.group(1).strip()
     elif birotika:
         header["consignee"] = birotika.group(1)
+    elif re.match(r"^(?:Inv\w{2,5}|Credit)\s+Number\s*:", first_line, re.IGNORECASE):
+        # 另一種掃描版面：發票號碼標籤單獨佔第一行 (沒有收件人同行)，收件人公司名
+        # 在下一個非空行 (2026-11-24 低等級 BDOIR00051385："Invoice Number: BDOIRO0051385"
+        # 後空一行才是 "POU YUEN INDONESIA PT")，不能直接用 first_line 當收件人
+        header["consignee"] = next((ln.strip() for ln in lines[1:] if ln.strip()), None)
     else:
         header["consignee"] = first_line or None
     header["supplier"] = _search(r"(PT\s+BIROTIKA\s+SEMESTA)\s*/\s*DHL\s+EXPRESS", text)
@@ -5261,15 +5274,27 @@ _DHL_FWD_CONTAINER_PATTERN = re.compile(
     r"^(?P<cno>[A-Z]{4}\d{7}) - (?P<size>\d{2})(?P<kind>[A-Z]{1,2})\s*$", re.MULTILINE)
 
 
+# 跟 DSV (ID06) 共用同一套帳單樣板 (兩家都有 "PPN IN IDR"/"CHARGES IN IDR"
+# 欄位表頭)，用公司全名 "DHL GLOBAL FORWARDING INDONESIA" 互相區分；"PPN IN IDR"
+# 這組字 OCR 常把空白吃掉或把 D 讀成 O ("PPNINIOR"/"PPNINIDR"，2026-11-24 低等級
+# "INVOICE DGF - SEPTEMBER 2026"：完全比對不到字串，整份帳單判不出供應商)，
+# 改用寬鬆 regex 容許這些變形。
+_DHL_FWD_PPN_HEADER_RE = re.compile(r"PPN\s*I\s*N\s*[I1L]?\s*[DO0]\s*R", re.IGNORECASE)
+
+
 def _dhl_is_forwarding(text: str) -> bool:
-    return "DHL GLOBAL FORWARDING INDONESIA" in text.upper() and "PPN IN IDR" in text.upper()
+    return ("DHL GLOBAL FORWARDING INDONESIA" in text.upper()
+            and bool(_DHL_FWD_PPN_HEADER_RE.search(text)))
 
 
 def _dhl_fwd_amount(text: Optional[str]) -> Optional[int]:
-    """'2.387.500' (點當千分位) -> 2387500；None 或非數字回傳 None。"""
+    """'2.387.500' (點當千分位) -> 2387500；None 或非數字回傳 None。
+    掃描版偶爾同一份文件裡摘要金額改用逗號當千分位 ('4,538,260'，2026-11-24
+    低等級 "INVOICE DGF - SEPTEMBER 2026" 月結單的 SUBTOTAL/TOTAL 行)，
+    逐項費用列仍是點，兩種分隔符都接受。"""
     if not text:
         return None
-    digits = text.replace(".", "")
+    digits = re.sub(r"[.,]", "", text)
     return int(digits) if digits.isdigit() else None
 
 
@@ -5279,10 +5304,15 @@ def _dhl_parse_short_date(text: Optional[str]) -> Optional[str]:
     return _format_date_en(m.group(1), m.group(2), 2000 + int(m.group(3))) if m else None
 
 
-def _parse_dhl_forwarding(text: str) -> Dict:
+def _parse_dhl_forwarding_one(text: str) -> Dict:
+    """單張發票的抬頭 + 費用明細 (不處理月結單拆分，見 _parse_dhl_forwarding())。"""
     header: Dict[str, Optional[str]] = {"supplier": "PT. DHL GLOBAL FORWARDING INDONESIA"}
-    header["invoice_no"] = _search(r"^INVOICE\s+([A-Z]\d{5,})\s*$", text)
-    date_m = re.search(r"INVOICE DATE\s*(\d{1,2})-([A-Za-z]{3})-(\d{2})", text)
+    # 不要求整行結尾就是發票號碼："INVOICE U0606373 Page 1 of 1" 這種後面還黏著
+    # 頁碼字樣的也要抓到 (2026-11-24 低等級 "INVOICE DGF - SEPTEMBER 2026" 月結單)
+    header["invoice_no"] = _search(r"^INVOICE\s+([A-Z]\d{5,})\b", text)
+    # 標籤跟日期之間常被 OCR 誤讀成 "[" 或 "|" 而不是空白 ("DATE[08-Sep-26"，
+    # 2026-11-24 低等級 DGF 月結單)，用 \W* 取代 \s*
+    date_m = re.search(r"INVOICE DATE\W*(\d{1,2})-([A-Za-z]{3})-(\d{2})", text)
     header["invoice_date"] = (
         _format_date_en_from_month_name(date_m.group(1), date_m.group(2), 2000 + int(date_m.group(3)))
         if date_m else None)
@@ -5314,6 +5344,39 @@ def _parse_dhl_forwarding(text: str) -> Dict:
               "vat": _dhl_fwd_amount(m.group("vat"))}
              for m in _DHL_FWD_CHARGE_PATTERN.finditer(text)]
     return {"header": header, "items": items}
+
+
+# "INVOICE U0606370" 這一行是每張發票自己的開頭 (見 _parse_dhl_forwarding_one()
+# 的 header["invoice_no"] 擷取方式)，月結單用它當分界切開每張發票
+_DHL_FWD_INVOICE_SPLIT_RE = re.compile(r"^INVOICE\s+[A-Z]\d{5,}\b", re.MULTILINE)
+
+
+def _parse_dhl_forwarding(text: str) -> Dict:
+    """一份 PDF 可能是「月結單」，裡面塞了好幾張各自獨立的發票 (各自有自己的
+    發票號碼、收件人、航程、小計；2026-11-24 低等級 "DGF - NIKOMAS OKTOBER
+    2026"、"INVOICE DGF - SEPTEMBER 2026")，不是單純同一張發票印成好幾頁。
+    原本整份文件當一張發票解析，會把所有發票的費用明細混在一起、只套用
+    第 1 張發票的發票號碼，金額稽核當然對不上。
+
+    用 "INVOICE <號碼>" 這一行當分界切成每張發票各自的區塊，分別抓抬頭跟
+    費用；每筆費用明細都帶上自己那張發票的完整抬頭 (expand_to_rows() 支援
+    item 覆寫抬頭欄位)，避免把不同發票的費用、發票號碼、收件人混在一起。
+    只有一張發票 (大多數樣本) 時結果跟原本寫法完全一樣。"""
+    starts = [m.start() for m in _DHL_FWD_INVOICE_SPLIT_RE.finditer(text)]
+    if len(starts) <= 1:
+        return _parse_dhl_forwarding_one(text)
+    items: List[Dict] = []
+    first_header: Dict[str, Optional[str]] = {}
+    for i, start in enumerate(starts):
+        end = starts[i + 1] if i + 1 < len(starts) else len(text)
+        chunk = _parse_dhl_forwarding_one(text[start:end])
+        if i == 0:
+            first_header = chunk["header"]
+        for item in chunk["items"]:
+            merged = dict(chunk["header"])
+            merged.update(item)
+            items.append(merged)
+    return {"header": first_header, "items": items}
 
 
 def dhl_invoice_page(text: str) -> bool:
@@ -5703,8 +5766,12 @@ def _dhl_extract_grand_total(text: str) -> Optional[int]:
     加總 (使用者 2026-10-27 提示：每一票的項目總額 + VAT = 每一票的總費用)；
     找不到就用第 1 頁 Total Amount (IDR) 的含稅總額。"""
     if _dhl_is_forwarding(text):
-        # 海運帳單的含稅總額 "TOTAL IDR 8.121.708"
-        return _dhl_fwd_amount(_search(r"^TOTAL IDR\s+([\d.]+)", text))
+        # 含稅總額 "TOTAL IDR 8.121.708"；月結單好幾張發票各自一個 TOTAL IDR，
+        # 全部加總才能跟全部發票的費用+VAT 加總做稽核 (見 _dhl_extract_total())
+        amounts = [a for a in (_dhl_fwd_amount(v)
+                                for v in re.findall(r"^TOTAL IDR\s+([\d.,]+)", text, re.MULTILINE))
+                   if a is not None]
+        return sum(amounts) if amounts else None
     if _dhl_is_inbound_charges(text):
         # 進口代墊費用的應付總額 "Please Pay This Amount: IDR 28,091,251"；
         # "IDR" 跟數字之間可能被 OCR 雜訊字元卡住 ("IDR} 482,316"，2026-11-16
@@ -7586,6 +7653,10 @@ def _handal_extract_items_core(text: str):
         # 2,940,000"，使用者 2026-11-23 樣本 NIKO-APR 2025 HG05230425)：雜訊前面
         # 是數字不是大寫字母，上面那條規則抓不到，這裡補一條「前後都是數字」的
         # 版本，一樣只刪 1~4 個小寫字母，不影響真正的英文名稱。
+        # 注意：這裡不可以放寬到大寫字母或數字——曾經試過放寬，"CUSTOM > 5 CBM
+        # 45,000 90,000" 這種單位是真的英文字 "CBM"，會被誤判成雜訊整個刪掉
+        # (使用者 2026-11-24 樣本 sample4.pdf 確認)。大寫雜字 ("Y")、孤立數字雜字
+        # ("7") 目前沒有安全的通用判斷方式，維持原樣交人工核對，不猜。
         line = re.sub(r'(?<=\d)\s+[a-z]{1,4}(?=\s+\d)', '', line)
         # 右括號跟金額之間偶爾被 OCR 多塞一兩個小寫雜字 ("TRUCKING LAUT 20
         # (PPH 23) i 2,940,000"，使用者 2026-11-24 樣本 NIKO-OKT 2025
