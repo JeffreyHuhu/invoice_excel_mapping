@@ -6,7 +6,8 @@ combine_results.py — 把所有轉檔結果 Excel 整合成一份 (欄位跟轉
   1. 掃描資料夾底下「XXX-辨識等級(高)」「XXX-辨識等級(中)」裡的轉檔結果 Excel
      (沿用 process_data.scan_excel_files，規則一樣：跳過轉檔總表、原始 Excel 帳單)。
   2. 依標題列找出 18 個標準欄位，順序與抬頭跟轉檔結果模板一樣；最右邊加一欄
-     「辨識等級」(高/中)，讓主管分辨可能有錯的資料 (使用者 2026-10-28 指定)。
+     「檔名」(來源轉檔結果 Excel 的檔名)，方便回頭查原始帳單 (使用者 2026-11-24
+     指定，取代原本的「辨識等級」欄)。
   3. 同一張發票 (供應商 + 發票號碼) 出現在多份 Excel 時，只保留第一份
      (等級高優先，再依路徑排序)，跟資料庫的重複判斷一樣 (含逐列比對的供應商)。
   4. 寫成一個工作表「工作表」，日期欄位用 mmm-dd-yyyy 顯示。
@@ -57,7 +58,7 @@ TEMPLATE_HEADERS = {
     "shipper": "Shipper\n出貨方",
 }
 FIELDS = list(TEMPLATE_HEADERS)
-LEVEL_HEADER = "辨識等級"
+FILENAME_HEADER = "檔名"
 DATE_FIELDS = {"invoice_date", "arrive_date", "onboard_date"}
 DATE_FORMAT = "mmm-dd-yyyy"
 SHEET_NAME = "工作表"
@@ -266,7 +267,7 @@ def write_workbook(rows: List[dict], out_path: Path, totals=None, supplier_key: 
     plain = Font(name=FONT_NAME, size=11)
     wrap = Alignment(wrap_text=True, vertical="center")
     header = []
-    for text in [*TEMPLATE_HEADERS.values(), LEVEL_HEADER]:
+    for text in [*TEMPLATE_HEADERS.values(), FILENAME_HEADER]:
         cell = WriteOnlyCell(ws, value=text)
         cell.font, cell.alignment = bold, wrap
         header.append(cell)
@@ -280,7 +281,8 @@ def write_workbook(rows: List[dict], out_path: Path, totals=None, supplier_key: 
             if field in DATE_FIELDS and isinstance(value, (date, datetime)):
                 cell.number_format = DATE_FORMAT
             out.append(cell)
-        cell = WriteOnlyCell(ws, value=row["level"])
+        path = row.get("_path")
+        cell = WriteOnlyCell(ws, value=Path(path).name if path else None)
         cell.font = plain
         out.append(cell)
         ws.append(out)
