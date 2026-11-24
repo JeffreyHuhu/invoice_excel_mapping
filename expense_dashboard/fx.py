@@ -23,7 +23,7 @@ import duckdb
 SOURCE_MANUAL = "手動"
 SOURCE_BOOK = "作帳匯率"
 BOOK_FOLDER = Path(r"D:\匯率")
-BOOK_FILE_GLOB = "作帳匯率 *.xls*"
+BOOK_FILE_GLOB = "*作帳匯率*.xls*"  # 檔名可能有前綴 (例如「寶成集團 作帳匯率 …」，2026-11-23 發現)
 BOOK_SHEET = "ALL"
 # 期間文字，例如 "2026/10/21-2026/10/31"
 _PERIOD_RE = re.compile(r"(\d{4})/(\d{1,2})/(\d{1,2})\s*-\s*(\d{4})/(\d{1,2})/(\d{1,2})")
