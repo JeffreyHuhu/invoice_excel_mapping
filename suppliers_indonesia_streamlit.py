@@ -1686,17 +1686,20 @@ def detect_tata_classic(text: str) -> bool:
     (TATA 自己開的提單)，上面會誤判成這個格式；附件頁只列出、不擷取 (見
     CLAUDE.md「附件頁」規則)，先排除。這張附件偶爾也會印到收件人
     "NIKOMAS GEMILANG"，不能靠收件人名稱分辨真假發票頁。
-    ⚠️ 這個函式同時用在「整份 PDF 合併文字」(判斷供應商 key) 跟「單獨一頁」
-    (multi_page 逐頁擷取) 兩種情境，不能只看「有沒有出現 SHIPMENT
-    AIRWAYBILL」就排除——整份合併文字裡，真正的發票頁跟附件頁的文字會黏在
-    一起，一樣會出現這個字樣，誤排除會讓整份 PDF 判斷不到供應商 (2026-11-23
-    sample21 迴歸失敗)。改成「有 SHIPMENT AIRWAYBILL 但沒有發票本身的金額
-    欄位 (SUB-TOTAL/HANDLING FEE)」才排除：附件頁單獨一頁檢查時兩者都不會
-    出現 (附件頁沒有這些欄位)；合併文字檢查時只要發票頁有這些欄位就不會誤
-    排除 (不管附件頁佔了多少篇幅)。
+    ⚠️ 2026-11-24 抽樣再發現：用「有沒有出現 SHIPMENT AIRWAYBILL 字樣」排除
+    不夠可靠——同一頁不同次 OCR (供應商群組會依分數挑最佳候選，見
+    _tata_pouyuen_pages()) 偶爾把這個詞拆成兩半、順序顛倒 (例如
+    "...CY\n\nTAIRWAYBILL\n\n'SHIPMEN\n\n..."），字面比對不到，附件頁還是會
+    被誤判 (HE25001916 樣本：附件頁剛好也印著跟正本一樣的運費/PPN 數字，
+    被誤判成第二張「空白發票」，拖累信心等級)。改成反過來『正面』判斷：
+    TATA 自己的真正發票頁 (classic 跟 receipt 兩種格式都一樣) 一定會印
+    "REIMBURSEMENT" 這個費用分類字樣 (NON REIMBURSEMENT／REIMBURSEMENT -
+    ...)，附件頁 (提單/稅務發票/Packing List) 不會用這個字——比起「附件頁
+    有哪些雜訊字樣」，這個正面特徵更穩定，不受 OCR 把附件頁雜字拆散/重組
+    影響。
     """
     upper = text.upper()
-    if "SHIPMENT AIRWAYBILL" in upper and "SUB-TOTAL" not in upper and "HANDLING FEE" not in upper:
+    if "REIMBURSEMENT" not in upper:
         return False
     return "TAMAN DUTAMAS" in upper and "NOMOR INVOICE" not in upper
 
@@ -1898,14 +1901,16 @@ def parse_tata_classic(text: str) -> Dict:
         # ⚠️ 2026-11-23 再發現：「TO」常被 OCR 讀成小寫或混合大小寫
         # ("To:"/"to;")，且「No.」後面的冒號偶爾被讀成分號，兩個符號都放寬
         # 成 "[:;]"，"TO" 不分大小寫。
-        header["invoice_no"] = _search(r"[Tt][Oo]\s*[:;].*?\bNo\.?\s*[:;]\s*(\S+)", text)
+        # ⚠️ 2026-11-24 再發現："No." 的句點偶爾被 OCR 讀成逗號 ("No,  :
+        # HE26001207")，句點放寬成 "[.,]"。
+        header["invoice_no"] = _search(r"[Tt][Oo]\s*[:;].*?\bNo[.,]?\s*[:;]\s*(\S+)", text)
     if not header["invoice_no"]:
         # ⚠️ 2026-11-23 再發現：雙欄排版偶爾整段被拆散 ("TO:"/"Altn.:"/
         # "MAWB"/"HAWB" 幾個標籤先各自成行，值另外排在後面)，上面「TO 後面
         # 接 No.」的寫法完全配不到。退回只找「No. : <值>」本身，不要求前面
         # 先出現 TO——地址 "Blok B1 No. 27" 這種寫法後面沒有冒號/分號，不會
         # 誤配到。
-        header["invoice_no"] = _search(r"\bNo\.?\s*[:;]\s*(\S+)", text)
+        header["invoice_no"] = _search(r"\bNo[.,]?\s*[:;]\s*(\S+)", text)
     header["invoice_date"] = _tata_parse_date(
         _search(r"IN[VY]\s*Date\s*[:>»]\s*(\d{4}[-/]\d{1,2}[-/]\d{1,2})", text)
     )
@@ -1943,7 +1948,7 @@ def parse_tata_classic(text: str) -> Dict:
         # "HAWB" 幾個標籤先各自成行、值另外排在後面 (見上面 invoice_no 同一個
         # 觀察)，"TO :" 後面接到的不是收件人名稱而是下一個標籤 "Altn.:"。這個
         # 子版面的收件人固定是 NIKOMAS GEMILANG，退回直接找這個已知名稱。
-        header["consignee"] = _search(r"(PT\.?\s*NIKOMAS\s+GEMILANG)", text)
+        header["consignee"] = _search(r"(PT\.?\s*NIKOMAS\s*GEMILANG)", text)
     header["mbl_no"] = _search(rf"\bMAWB\s*:\s*(.+?){_TATA_STOP}", text)
     header["bl_no"] = _search(rf"\bHAWB\s*:\s*(.+?){_TATA_STOP}", text)
     header["vessel"] = _search(rf"\bFlight\s*:\s*(.+?){_TATA_STOP}", text)
