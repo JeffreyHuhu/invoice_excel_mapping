@@ -4635,9 +4635,14 @@ def _is_dhl_express_bill(text: str) -> bool:
 
 def detect_dhl(text: str) -> bool:
     upper = text.upper()
+    # "BIROTIKA SEMESTA" 是這家供應商的公司全名，比「DHL-VNPT」排除閘門更specific：
+    # 越南出貨到印尼的帳單，附件常混一張越南海關收據，上面也印著 "DHL - VNPT"，
+    # 會被閘門誤擋掉真正的 BIROTIKA SEMESTA 帳單 (2026-11-24 D000799338/D000803090)。
+    if "BIROTIKA SEMESTA" in upper:
+        return True
     if _is_dhl_vnpt(text):
         return False
-    return "BIROTIKA SEMESTA" in upper or "DHL EXPRESS" in upper or _dhl_is_forwarding(text)
+    return "DHL EXPRESS" in upper or _dhl_is_forwarding(text)
 
 
 def _dhl_fix_ocr_zero(value: Optional[str]) -> Optional[str]:
