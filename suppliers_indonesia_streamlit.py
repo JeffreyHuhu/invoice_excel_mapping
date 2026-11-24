@@ -7565,6 +7565,12 @@ def _handal_extract_items_core(text: str):
         line = re.sub(r'\(PART OFF (\d+)_ \d+', r'(PART OFF \1)', line)
         # 行首的 OCR 引號 ("‘COLLECTION FEE 737,000"，使用者 2026-11 樣本 NIKO-AGUS 2025 第 61 頁) 去掉
         line = re.sub(r'^[‘’“”"\'`|]+\s*', '', line)
+        # 行首單個符號取代了名稱的第一個字母 (">USTOM CLEARANCE 300,000 300,000"，
+        # 使用者 2026-11-24 樣本 PCI-APR 2025 HG05020425：原字應是 "CUSTOM")：
+        # 這家費用名稱一定要大寫字母開頭才會被認成費用項目 (見
+        # _looks_like_handal_item_desc)，符號卡在開頭會讓整行被跳過、金額漏算，
+        # 先去掉緊接字母前的單個非字母數字符號。
+        line = re.sub(r'^[^\w\s]{1}(?=[A-Za-z])', '', line)
         # OCR 把 "ADM REPAIR" 讀成 "ADM IR’ Fe\"" (使用者 2026-11 樣本 NIKO-AGUST 2025 第 34 頁)：還原成 ADM REPAIR
         line = re.sub(r'^ADM\s+IR\S*\s*F\w*.*$', 'ADM REPAIR', line)
         # CUSTOM 的字型錯字 / OCR 錯字 ("CU$TOM"、"cusToM"、"cusroM"、"CUSTOiTI") 統一寫成 CUSTOM
@@ -7581,6 +7587,17 @@ def _handal_extract_items_core(text: str):
         # 是數字不是大寫字母，上面那條規則抓不到，這裡補一條「前後都是數字」的
         # 版本，一樣只刪 1~4 個小寫字母，不影響真正的英文名稱。
         line = re.sub(r'(?<=\d)\s+[a-z]{1,4}(?=\s+\d)', '', line)
+        # 右括號跟金額之間偶爾被 OCR 多塞一兩個小寫雜字 ("TRUCKING LAUT 20
+        # (PPH 23) i 2,940,000"，使用者 2026-11-24 樣本 NIKO-OKT 2025
+        # HG17311025 等)：雜訊前面是右括號，不是大寫字母也不是數字，上面兩條
+        # 規則都抓不到，這裡補第三條版本。
+        line = re.sub(r'(?<=\))\s+[a-z]{1,4}(?=\s+\d)', '', line)
+        # 單價跟金額兩個數字之間偶爾被 OCR 多塞一個孤立的右括號 ("2,940,000 )
+        # 2,940,000"，使用者 2026-11-24 樣本 NIKO-MAR 2026 HG04250326)：這個
+        # ")" 沒有對應的 "(" (不是 "(PPH 23)" 那種正常括號)，純粹是雜訊，兩邊都
+        # 是數字時直接拿掉，不影響正常的 "(PART OFF 3)" 這類合法括號 (那些前面
+        # 不是數字)。
+        line = re.sub(r'(?<=\d)\s+\)\s+(?=\d)', ' ', line)
         if not line:
             continue
         if re.match(r'for and on', line, re.IGNORECASE):
