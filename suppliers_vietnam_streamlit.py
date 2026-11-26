@@ -3527,7 +3527,7 @@ def _vt_parse_sheet(name: str, rows: List[list], cfg: Dict, supplier: str,
             rest = (_vn_num(_vn_cell(row, remainder[0])) or 0) - sum(
                 _vn_num(_vn_cell(row, c)) or 0 for c in remainder[2])
             if rest > 0.5:
-                row_items.insert(0, {"description": remainder[1], "amount": rest, "vat": None, **head})
+                row_items.insert(0, {"description": _fee_desc(remainder[1], row), "amount": rest, "vat": None, **head})
             # 沒有 2% 欄、只有「TOTAL (小計) | TOTAL (含 2%)」兩欄時，差額就是 2% 附加費
             last = col.get("total")
             if not remainder[3] and last not in (None, remainder[0]):
