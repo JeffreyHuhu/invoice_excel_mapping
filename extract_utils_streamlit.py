@@ -1336,6 +1336,8 @@ _EN_FULL = {
     "PHI CAN": "Weighing Fee",
     "PHI KHAC": "Other Fee",
     "TROUBLE": "Trouble Fee",
+    # 印尼供應商整句費用名稱 (2026-11-26，掃描印尼大表後新增)
+    "DARI PENITIPAN KE PELABUHAN": "From storage to port",
 }
 # 詞組對照 (由長到短套用；越南文、印尼文常見帳單用語)
 _EN_PHRASES = (
@@ -1421,6 +1423,18 @@ _EN_PHRASES = (
     ("FIAT DOKUMEN", "Document approval"), ("ADMINISTRASI", "Administration"),
     ("MATERAI", "Stamp duty"), ("NON PPH", "excl. income tax (PPh)"),
     ("BIAYA", "Fee"), ("JASA", "Service"), ("GUDANG", "Warehouse"),
+    # 印尼文詞組 (2026-11-26，掃描印尼大表 TATA HARMONI/DWIHARTA 等供應商後新增)
+    ("PERUSAHAAN BONGKAR MUAT", "Stevedoring Company"),
+    ("TERMINAL PETIKEMAS", "Container Terminal"),
+    ("BEDA KEMASAN", "Packaging Discrepancy"),
+    ("MUAT 2 TEMPAT", "Loading at 2 Locations"),
+    ("MUAT 3 TEMPAT", "Loading at 3 Locations"),
+    ("PENGIRIMAN BARANG", "Shipment of Goods"),
+    ("PANGIRIMAN BARANG", "Shipment of Goods"),
+    ("BONGKARAN", "Unloading"), ("BONGKAR", "Unload"),
+    ("KEMASAN", "Packaging"), ("TERLAMBAT", "Late"), ("BANDARA", "Airport"),
+    ("PEMBATALAN", "Cancellation"), ("SEGEL", "Seal"), ("LOKAL", "Local"),
+    ("FISIK", "Physical"), ("SPPB", "Goods Release Approval (SPPB)"),
 )
 _EN_PHRASE_RES = tuple((re.compile(rf"(?<![A-Z]){re.escape(k)}(?![A-Z])"), v)
                        for k, v in sorted(_EN_PHRASES, key=lambda kv: -len(kv[0])))
