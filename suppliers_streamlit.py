@@ -6,9 +6,10 @@ suppliers_streamlit.py
   - suppliers_indonesia_streamlit.py：印尼供應商 (ID01~)
   - suppliers_vietnam_streamlit.py：越南供應商 (VN01~VN22)
   - suppliers_cambodia_streamlit.py：柬埔寨供應商 (KH01~)
+  - suppliers_china_streamlit.py：中國供應商 (CH01~)
   - suppliers_common_streamlit.py：跨國共用小工具
 
-日後新增國家 (柬埔寨/孟加拉/緬甸/中國) 時：
+日後新增國家 (孟加拉/緬甸) 時：
   1. 建一支新檔案 suppliers_<country>_streamlit.py (仿照印尼/越南的寫法，
      最後一樣用 register_supplier() 註冊)。
   2. 在這支檔案最上面加一行
@@ -25,6 +26,7 @@ from extract_utils_streamlit import SUPPLIER_REGISTRY, set_supplier_number
 import suppliers_indonesia_streamlit  # noqa: F401  (觸發印尼供應商 register_supplier())
 import suppliers_vietnam_streamlit  # noqa: F401  (觸發越南供應商 register_supplier())
 import suppliers_cambodia_streamlit  # noqa: F401  (觸發柬埔寨供應商 register_supplier())
+import suppliers_china_streamlit  # noqa: F401  (觸發中國供應商 register_supplier())
 
 # ===========================================================================
 # 供應商編號 (依進度管控的 Top 供應商清單)

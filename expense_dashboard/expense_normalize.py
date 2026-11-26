@@ -399,6 +399,9 @@ SUPPLIER_CURRENCY: dict = {
     "ORIENTAL POWER LOGISTICS CO., LTD": "USD",
     # 柬埔寨 KH01 Oriental Logistics & Distribution：幣別固定 USD (供應商規則文件已確認，2026-11-19)
     "ORIENTAL LOGISTICS & DISTRIBUTION (CAMBODIA) CO., LTD": "USD",
+    # 中國 CH01 Salem Logistics (香港)：帳單幣別固定 USD，放在「中國」資料夾但不是人民幣
+    # (供應商規則文件已確認，2026-11-26)
+    "SALEM LOGISTICS COMPANY LTD.": "USD",
 }
 
 # INVOICE NO 不是供應商自己的帳單號碼 (例如寶成的發票號、OPL 的 FILE NO) 的
