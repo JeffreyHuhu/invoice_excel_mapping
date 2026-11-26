@@ -2387,6 +2387,22 @@ def _any_date_in_text(text: Optional[str]) -> Optional[str]:
     return _format_date_en(best_date.day, best_date.month, best_date.year)
 
 
+# 發票日期年份的合理範圍：超出這個範圍視為最高指導原則第 7 點說的「日期明顯
+# 有誤、不合理」(2026-11-26 新增)。之前只檢查格式合不合法 (_coerce_to_date()
+# 轉得出來就採用)，但原帳單常見「年份打錯」或 Excel 格式誤判 (例如某欄本來是
+# 數字卻被當成日期序號)，格式仍然合法、年份卻離譜 (1900、2017、2206、2626
+# 等實際樣本)，舊版不會觸發備援鏈。只套用在 invoice_date，不影響 onboard_date/
+# arrive_date (到達日排到比發票日期晚半年以上，確認是供應商系統本身的排程，
+# 不是擷取錯誤，不屬於這條規則管的範圍)。
+_INVOICE_YEAR_MIN_OFFSET = 3   # 往前最多抓到 3 年前的帳單
+_INVOICE_YEAR_MAX_OFFSET = 1   # 往後最多容許跨到明年初
+
+
+def _invoice_year_plausible(year: int) -> bool:
+    today = datetime.date.today()
+    return today.year - _INVOICE_YEAR_MIN_OFFSET <= year <= today.year + _INVOICE_YEAR_MAX_OFFSET
+
+
 def _fill_missing_invoice_date(rows: List[Dict], pdf_path: str, text: Optional[str] = None) -> None:
     """rows 裡缺 invoice_date 的列，依序試這些來源頂替 (見上方最高指導原則
     第 7 點)：1) 檔名月份 2) 同列的開船日/到達日 3) 文字裡任何日期。
@@ -2396,8 +2412,10 @@ def _fill_missing_invoice_date(rows: List[Dict], pdf_path: str, text: Optional[s
     2026-11-21 規定：所有供應商都適用，缺日期優先找得到就填，不要直接
     留 N/A)。
     帳單本身寫了發票日期、但日期值無效 (例如「32 Dec 2024」12 月沒有 32 號)，
-    一樣視為缺日期套用這三種備援；三種都補不到時保留原始的無效值 (使用者
-    2026-11-22 規定：所有供應商都適用，跟「完全沒寫日期」一視同仁)。"""
+    或格式合法但年份明顯不合理 (_invoice_year_plausible() 判斷，例如年份打錯
+    或 Excel 格式誤判)，一樣視為缺日期套用這三種備援；三種都補不到時保留
+    原始的無效值 (使用者 2026-11-22 規定：所有供應商都適用，跟「完全沒寫
+    日期」一視同仁)。"""
     filename_fallback = _last_day_of_month_from_filename(pdf_path)
     text_fallback: Optional[str] = None
     text_fallback_tried = False
@@ -2405,7 +2423,8 @@ def _fill_missing_invoice_date(rows: List[Dict], pdf_path: str, text: Optional[s
         if row.get("invoice_date") == NA_CONFIRMED:
             row["invoice_date"] = NA
         raw = row.get("invoice_date")
-        if raw not in (None, "", NA) and _coerce_to_date(raw) is not None:
+        coerced = _coerce_to_date(raw) if raw not in (None, "", NA) else None
+        if coerced is not None and _invoice_year_plausible(coerced.year):
             continue
         if filename_fallback:
             row["invoice_date"] = filename_fallback

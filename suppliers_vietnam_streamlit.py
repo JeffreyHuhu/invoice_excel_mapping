@@ -6936,7 +6936,10 @@ _VT_ADC = [
         "fields": {"bl_no": "AWB/ B/L NO", "order_no": "=INVOICE NO", "container_no": "CONT NO"}}),
     (r"TAI CHO", {
         "header": "DECLARATION #", "two_rows": False, "key": ["=NO"], "end_blank_no_id": True,
-        "fees": [("SERVICE CHARGE", None)], "date": "DECLARATION/ DATE",
+        "fees": [("SERVICE CHARGE", None)], "date": "DECLARATION DATE",
+        # 2026-11-26 修正：原寫 "DECLARATION/ DATE" 跟實際表頭 "Declaration\n Date"
+        # (換行、沒有斜線) 對不起來，整張表都抓不到各列日期，導致全部落到
+        # _vt_make 的「全檔最晚日期」備援，被某一列的錄入錯誤污染成同一個離譜日期。
         "fields": {"order_no": "=INVOICE NO"}}),
 ]
 _adc_sheet_parse, _adc_sheet_totals = _vt_make("CÔNG TY TNHH GIAO NHẬN THƯƠNG MẠI RỒNG Á CHÂU", _VT_ADC)
