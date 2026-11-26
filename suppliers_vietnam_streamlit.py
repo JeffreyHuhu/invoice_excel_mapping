@@ -2044,7 +2044,7 @@ def _dhl_vn_cw_text(text: str) -> str:
 # VAT INVOICE 費用列："STT 號 Số vận đơn 品名 Tỷ giá 數量 單價 未稅 稅率% 稅額 含稅"；
 # Số vận đơn、品名都可能整欄空白 (前後不能同時要求 \s+，CLAUDE.md Regex 陷阱)
 _DHL_VN_VATINV_ITEM_RE = re.compile(
-    r"^(?P<stt>\d+)\s+(?:(?P<hbl>[A-Z]{2,4}\d{5,7})\s+)?(?P<desc>.*?)\s*"
+    r"^(?P<stt>\d+)\s+(?:(?P<hbl>[A-Z]{1,4}\d{5,7})\s+)?(?P<desc>.*?)\s*"
     r"(?P<rate>[\d.,]+)\s+(?P<qty>[\d.,]+)\s+(?P<price>[\d.,]+)\s+(?P<net>[\d.,]+)\s+"
     r"(?P<pct>\d+)%\s+(?P<vat>[\d.,]+)\s+(?P<total>[\d.,]+)$", re.MULTILINE)
 # 英文備註 (使用者同意先暫用，之後依統一費用對照表更新，2026-11-10)
