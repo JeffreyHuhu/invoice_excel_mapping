@@ -2107,13 +2107,29 @@ def _tata_receipt_extract_items(text: str) -> List[Dict]:
         行首就不會比對到，表格結尾值測失敗、整份文字 (含表格外雜訊) 都被
         當成擷取範圍。改成只要這一行「含有」結尾字樣就視為表格結束，不要求
         在行首。
+    (3) 2026-11-26 抽樣 TH20261752/TH20262414 發現：品項太多時，費用明細表格
+        會跨兩個實體頁 (這是 multi_page 供應商，一次只收到『一頁』文字)——
+        表頭 "KETERANGAN...JUMLAH" 印在第 1 頁，表尾 "PESAN"/"Subtotal" 卻在
+        第 2 頁才出現。原本「表頭+表尾都要在同一頁文字裡才算抓到範圍」，抓
+        不到表尾就整頁 (含表頭上方的公司地址/收件人/銀行資訊) 都當成擷取
+        範圍，結果第 1 筆品項 (金額跟描述分行印刷時) 把這些雜訊全部併進
+        description。改成：先找表頭，找到了就只取「表頭之後到頁尾」(不取
+        表頭之前)；表尾沒在這頁出現時就用到頁尾為止，不要整頁都算。表頭
+        找不到 (純接續頁，沒有表頭也沒有雜訊可以誤併) 才維持原來的整頁。
     """
-    block_m = re.search(
-        r"KETERANGAN[^A-Za-z0-9]{0,3}PAJAK[^A-Za-z0-9]{0,3}JUMLAH.*?\n(.*?)"
-        r"\n[^\n]*?(?:PESAN|" + _TATA_RECEIPT_SUBTOTAL_TOKEN_RE.pattern + r")",
-        text, re.DOTALL | re.IGNORECASE,
+    header_m = re.search(
+        r"KETERANGAN[^A-Za-z0-9]{0,3}PAJAK[^A-Za-z0-9]{0,3}JUMLAH.*?\n",
+        text, re.IGNORECASE,
     )
-    block = block_m.group(1) if block_m else text
+    if header_m:
+        after_header = text[header_m.end():]
+        end_m = re.search(
+            r"\n[^\n]*?(?:PESAN|" + _TATA_RECEIPT_SUBTOTAL_TOKEN_RE.pattern + r")",
+            after_header, re.DOTALL | re.IGNORECASE,
+        )
+        block = after_header[:end_m.start()] if end_m else after_header
+    else:
+        block = text
 
     lines = block.split("\n")
     items: List[Dict] = []
