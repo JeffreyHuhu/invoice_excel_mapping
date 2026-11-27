@@ -2180,17 +2180,45 @@ def _page_balances(entry: Dict, text: str) -> Optional[bool]:
     return None
 
 
+def _page_header_complete(entry: Dict, text: str) -> bool:
+    """這一頁的 INVOICE NO/CONSIGNEE 都抓到值。這兩欄通常來自同一段表頭文字，
+    OCR 漏讀表頭時會一起缺值，用來在金額稽核都兜不起來時當另一個訊號
+    (2026-11-27 CH01 答案：掃描頁的表頭常跟 INVOICE NO 疊在一起漏讀，跟金額
+    讀錯是兩種各自獨立的 OCR 誤差，不能只看金額決定)。"""
+    try:
+        header = entry["parse"](text).get("header") or {}
+    except Exception:
+        return False
+    return bool(header.get("invoice_no")) and bool(header.get("consignee"))
+
+
 def _choose_page_variant(entry: Dict, original: str, psm_text: str, alt_text: str) -> str:
     """psm 版跟對比版都兜不起來時，三個版本裡選一個 (呼叫時已知 psm_text
     不平；原圖可能平、可能不平、也可能沒有稽核規則可比對)：
-      1. 優先選「金額稽核有過」的 (原圖本身才正確時維持原本選原圖的行為，
-         2026-11-18 低等級 D000604364：psm 6 誤讀數字，原圖才對)。
-      2. 都不過，選「有擷取到費用明細」的 (原圖常常整個金額欄都讀不到，
+      1. 金額稽核有過、且 INVOICE NO/CONSIGNEE 都抓到的版本最優先 (原圖本身
+         才正確時維持原本選原圖的行為，2026-11-18 低等級 D000604364：psm 6
+         誤讀數字，原圖才對；這種情況原圖通常表頭也是完整的，這一層就會
+         選到原圖，跟舊行為一致)。
+      2. 都沒有「兩項都過」，但有版本的 INVOICE NO/CONSIGNEE 完整，優先選它
+         (表頭缺值代表連這是哪一張發票都認不出來，比金額對不上更嚴重；金額
+         不平至少還能看出是哪一張發票，人工只要核對一個數字。2026-11-27
+         CH01 17092026105151：psm 6 抓到表頭但負號偶爾讀漏、金額就不平，
+         原圖金額剛好對但整段表頭漏讀，兩者都是 ERROR，優先保留表頭完整的
+         版本)。
+      3. 都沒有完整表頭，選「金額稽核有過」的 (舊行為)。
+      4. 都不過，選「有擷取到費用明細」的 (原圖常常整個金額欄都讀不到，
          退回原圖只會把這頁清空，比留著 OCR 結果更差；2026-11-23 GALUH
          Adidas 0500151/Pouchen 05000152：原圖沒有金額，退回後整張都是空的)。
-      3. 都抓不到任何明細，退回原圖 (跟舊行為一致)。
+      5. 都抓不到任何明細，退回原圖 (跟舊行為一致)。
     """
-    for text in (psm_text, alt_text, original):
+    candidates = (psm_text, alt_text, original)
+    for text in candidates:
+        if _page_balances(entry, text) and _page_header_complete(entry, text):
+            return text
+    for text in candidates:
+        if _page_header_complete(entry, text):
+            return text
+    for text in candidates:
         if _page_balances(entry, text):
             return text
     for text in (psm_text, alt_text):
